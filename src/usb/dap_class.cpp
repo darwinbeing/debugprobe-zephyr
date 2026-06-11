@@ -30,6 +30,10 @@ struct DapData {
 
 } // namespace
 
+/* Count 2 is load-bearing: during reconfiguration the cancelled OUT buffer's
+ * completion event can still hold one buffer while enable() arms a fresh one.
+ * Phase 2 (IN responses from this pool) will need >= 3.
+ */
 UDC_BUF_POOL_DEFINE(dap_buf_pool, 2, kPacketSize,
 		    sizeof(struct udc_buf_info), nullptr);
 
@@ -137,13 +141,20 @@ static int dap_request_handler(struct usbd_class_data *const c_data,
 		/* Phase 1 stub: log only, no processing.
 		 * Phase 2 plugs the DapEngine in here.
 		 */
-		LOG_HEXDUMP_DBG(buf->data, buf->len, "DAP OUT (stub)");
+		/* INF so the phase-1 stub is observable at the default log level;
+		 * phase 2 replaces this with the DAP protocol engine.
+		 */
+		LOG_HEXDUMP_INF(buf->data, buf->len, "DAP OUT (stub)");
 	}
 
 	usbd_ep_buf_free(ctx, buf);
 
 	if (is_out && err == 0) {
-		return dap_arm_out(c_data);
+		/* A re-arm failure is already logged in dap_arm_out(); returning
+		 * non-zero here would make the stack publish USBD_MSG_STACK_ERROR
+		 * while the endpoint stays dead anyway, so swallow it.
+		 */
+		(void)dap_arm_out(c_data);
 	}
 
 	return 0;
@@ -161,6 +172,10 @@ static void *dap_get_desc(struct usbd_class_data *const c_data,
 static void dap_enable(struct usbd_class_data *const c_data)
 {
 	LOG_INF("DAP interface enabled");
+	/* No re-entrancy guard: in Zephyr 4.4 usbd, enable() is only invoked from
+	 * usbd_config_set(), which always disables (and drains endpoints) first.
+	 * TODO(phase 2): handle SET_INTERFACE via an update() callback re-arm.
+	 */
 	(void)dap_arm_out(c_data);
 }
 
