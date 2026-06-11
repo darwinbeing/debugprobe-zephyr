@@ -1,5 +1,6 @@
 #include "usb/usb_device.hpp"
 #include "usb/dap_class.hpp"
+#include "usb/msosv2.hpp"
 
 #include <zephyr/device.h>
 #include <zephyr/usb/usbd.h>
@@ -75,6 +76,11 @@ int init()
 	err = check(usbd_add_configuration(&probe_usbd, USBD_SPEED_FS,
 					   &probe_fs_config),
 		    "add FS configuration");
+	if (err) {
+		return err;
+	}
+
+	err = check(register_msosv2(&probe_usbd), "register MS OS 2.0 BOS");
 	if (err) {
 		return err;
 	}
