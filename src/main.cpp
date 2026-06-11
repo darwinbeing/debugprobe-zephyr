@@ -33,5 +33,6 @@ int main()
 		return err;
 	}
 
+	/* USB runs on the usbd thread + controller IRQs; nothing for main to do. */
 	return 0;
 }

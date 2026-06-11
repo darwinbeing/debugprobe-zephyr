@@ -1,4 +1,5 @@
 #include "usb/usb_device.hpp"
+#include "usb/dap_class.hpp"
 
 #include <zephyr/device.h>
 #include <zephyr/usb/usbd.h>
@@ -26,47 +27,72 @@ USBD_CONFIGURATION_DEFINE(probe_fs_config, 0, 50, &probe_fs_cfg_desc);
 
 namespace probe::usb {
 
+static int check(int err, const char *what)
+{
+	if (err) {
+		LOG_ERR("%s failed: %d", what, err);
+	}
+	return err;
+}
+
 int init()
 {
 	int err;
 
-	err = usbd_add_descriptor(&probe_usbd, &probe_lang);
+	err = check(usbd_add_descriptor(&probe_usbd, &probe_lang),
+		    "add lang descriptor");
 	if (err) {
 		return err;
 	}
-	err = usbd_add_descriptor(&probe_usbd, &probe_mfr);
+	err = check(usbd_add_descriptor(&probe_usbd, &probe_mfr),
+		    "add manufacturer descriptor");
 	if (err) {
 		return err;
 	}
-	err = usbd_add_descriptor(&probe_usbd, &probe_product);
+	err = check(usbd_add_descriptor(&probe_usbd, &probe_product),
+		    "add product descriptor");
 	if (err) {
 		return err;
 	}
-	err = usbd_add_descriptor(&probe_usbd, &probe_sn);
+	err = check(usbd_add_descriptor(&probe_usbd, &probe_sn),
+		    "add serial number descriptor");
 	if (err) {
 		return err;
 	}
 
 	/* bcdUSB 2.10 (required for BOS) and bcdDevice 2.31, as in the original */
-	err = usbd_device_set_bcd_usb(&probe_usbd, USBD_SPEED_FS, 0x0210);
+	err = check(usbd_device_set_bcd_usb(&probe_usbd, USBD_SPEED_FS, 0x0210),
+		    "set bcdUSB");
 	if (err) {
 		return err;
 	}
-	err = usbd_device_set_bcd_device(&probe_usbd, 0x0231);
+	err = check(usbd_device_set_bcd_device(&probe_usbd, 0x0231),
+		    "set bcdDevice");
 	if (err) {
 		return err;
 	}
 
-	err = usbd_add_configuration(&probe_usbd, USBD_SPEED_FS, &probe_fs_config);
+	err = check(usbd_add_configuration(&probe_usbd, USBD_SPEED_FS,
+					   &probe_fs_config),
+		    "add FS configuration");
 	if (err) {
 		return err;
 	}
 
-	/* Registration order determines interface numbering. Task 4 inserts the
-	 * DAP vendor class before CDC so DAP becomes interface 0 (old Keil MDK
-	 * only looks at interface 0, matching the original).
+	/* Registration order determines interface numbering. DAP is registered
+	 * first so it becomes interface 0 (old Keil MDK only looks at interface
+	 * 0, matching the original firmware).
 	 */
-	err = usbd_register_class(&probe_usbd, "cdc_acm_0", USBD_SPEED_FS, 1);
+	err = check(usbd_register_class(&probe_usbd, probe::usb::kDapClassName,
+					USBD_SPEED_FS, 1),
+		    "register DAP class");
+	if (err) {
+		return err;
+	}
+
+	err = check(usbd_register_class(&probe_usbd, "cdc_acm_0",
+					USBD_SPEED_FS, 1),
+		    "register CDC-ACM class");
 	if (err) {
 		return err;
 	}
@@ -74,17 +100,19 @@ int init()
 	/* Keep the device-level class triple 0/0/0 like the original
 	 * (each interface declares its own class).
 	 */
-	err = usbd_device_set_code_triple(&probe_usbd, USBD_SPEED_FS, 0, 0, 0);
+	err = check(usbd_device_set_code_triple(&probe_usbd, USBD_SPEED_FS,
+						0, 0, 0),
+		    "set code triple");
 	if (err) {
 		return err;
 	}
 
-	err = usbd_init(&probe_usbd);
+	err = check(usbd_init(&probe_usbd), "usbd_init");
 	if (err) {
 		return err;
 	}
 
-	err = usbd_enable(&probe_usbd);
+	err = check(usbd_enable(&probe_usbd), "usbd_enable");
 	if (err) {
 		return err;
 	}
