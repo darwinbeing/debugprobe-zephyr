@@ -1,0 +1,9 @@
+mainmenu "debugprobe-zephyr"
+
+config PROBE_PRODUCT_STRING
+	string "USB product string"
+	default "Debug Probe (CMSIS-DAP)" if BOARD_RPI_DEBUG_PROBE
+	default "Debugprobe on Pico (CMSIS-DAP)" if BOARD_RPI_PICO || BOARD_RPI_PICO2
+	default "Debugprobe (CMSIS-DAP)"
+
+source "Kconfig.zephyr"
