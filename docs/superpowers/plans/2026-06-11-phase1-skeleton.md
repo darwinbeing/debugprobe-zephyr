@@ -175,7 +175,10 @@ source "Kconfig.zephyr"
 ```ini
 CONFIG_CPP=y
 CONFIG_STD_CPP20=y
+# GLIBCXX_LIBCPP (full libstdc++) depends on NEWLIB_LIBC || PICOLIBC;
+# the gnuarmemb toolchain only provides newlib, so select it explicitly.
 CONFIG_GLIBCXX_LIBCPP=y
+CONFIG_NEWLIB_LIBC=y
 CONFIG_LOG=y
 ```
 
