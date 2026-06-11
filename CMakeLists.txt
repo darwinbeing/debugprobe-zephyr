@@ -5,5 +5,6 @@ project(debugprobe_zephyr LANGUAGES C CXX)
 
 target_sources(app PRIVATE
   src/main.cpp
+  src/usb/usb_device.cpp
 )
 target_include_directories(app PRIVATE src)

@@ -4,6 +4,8 @@
 #include <array>
 #include <span>
 
+#include "usb/usb_device.hpp"
+
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 namespace {
@@ -25,5 +27,11 @@ static_assert(ByteBuffer<std::span<const uint8_t>>);
 int main()
 {
 	LOG_INF("debugprobe-zephyr starting");
+
+	if (int err = probe::usb::init(); err != 0) {
+		LOG_ERR("USB init failed: %d", err);
+		return err;
+	}
+
 	return 0;
 }
