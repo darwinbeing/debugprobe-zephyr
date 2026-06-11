@@ -1,35 +1,35 @@
-# debugprobe-zephyr 阶段 1（骨架）实施计划
+# debugprobe-zephyr Phase 1 (Skeleton) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 建立 west 工作区结构 + C++20 Zephyr 应用，三块板（rpi_debug_probe / rpi_pico / rpi_pico2）编译通过，USB 枚举出与原版 debugprobe 对齐的描述符（VID/PID、接口布局、字符串、BOS + MS OS 2.0）。
+**Goal:** Establish the west workspace structure plus a C++20 Zephyr application that builds for all three boards (rpi_debug_probe / rpi_pico / rpi_pico2) and enumerates over USB with descriptors aligned to the original debugprobe (VID/PID, interface layout, strings, BOS + MS OS 2.0).
 
-**Architecture:** 应用为独立仓库（T2 拓扑，west.yml 锁定 Zephyr v4.4.0），本地构建复用现有 `~/Developer/zephyrproject` 工作区。USB 用 usbd-next 新栈：自定义 vendor bulk 类（接口 0，"CMSIS-DAP v2 Interface"，本阶段为收包即丢的 stub）+ 内置 CDC-ACM 类（接口 1/2），BOS+MS OS 2.0 描述符参照 Zephyr dap sample 改写为原版参数。
+**Architecture:** The application is a standalone repository (T2 topology; west.yml pins Zephyr v4.4.0), while local builds reuse the existing `~/Developer/zephyrproject` workspace. USB uses the usbd-next stack: a custom vendor bulk class (interface 0, "CMSIS-DAP v2 Interface", a receive-and-drop stub in this phase) plus the built-in CDC-ACM class (interfaces 1/2). BOS + MS OS 2.0 descriptors are adapted from the Zephyr dap sample with the original firmware's parameters.
 
-**Tech Stack:** Zephyr 4.4.0（本地 `~/Developer/zephyrproject/zephyr`）、usbd-next、C++20（GNU Arm 工具链 14.2，`gnuarmemb` variant）、pyusb（描述符校验）。
+**Tech Stack:** Zephyr 4.4.0 (local `~/Developer/zephyrproject/zephyr`), usbd-next, C++20 (GNU Arm toolchain 14.2, `gnuarmemb` variant), pyusb (descriptor verification).
 
-**与原版的已知可接受差异**（写入对比工具白名单）：
+**Known acceptable differences vs. the original** (goes into the conformance tool allowlist):
 
-- 端点地址：原版 DAP 用 EP 0x04/0x85、CDC 用 0x81/0x02/0x83；Zephyr usbd 按注册顺序自动分配（DAP 将是 0x01/0x81）。CMSIS-DAP v2 主机（openocd/pyocd/probe-rs）从描述符动态发现端点，不影响兼容性。
-- MS OS 2.0 描述符集：原版含 configuration subset header（总长 0xB2）；本实现按 Zephyr sample 结构（set header + function subset + compatible ID + registry property）。Windows 两种布局都接受，关键内容（WINUSB compatible ID、DeviceInterfaceGUID `{CDB3B5AD-293B-4663-AA36-1AAE46463776}`）一致。
-- `bcdDevice` 暂定 0x0231（与原版 v2.31 相同），后续版本管理在阶段 5 决定。
+- Endpoint addresses: the original uses EP 0x04/0x85 for DAP and 0x81/0x02/0x83 for CDC; Zephyr usbd assigns addresses automatically in registration order (DAP will get 0x01/0x81). CMSIS-DAP v2 hosts (openocd/pyocd/probe-rs) discover endpoints from descriptors, so compatibility is unaffected.
+- MS OS 2.0 descriptor set: the original includes a configuration subset header (total length 0xB2); this implementation follows the Zephyr sample structure (set header + function subset + compatible ID + registry property). Windows accepts both layouts; the key content (WINUSB compatible ID, DeviceInterfaceGUID `{CDB3B5AD-293B-4663-AA36-1AAE46463776}`) is identical.
+- `bcdDevice` is tentatively 0x0231 (same as the original v2.31); version management is decided in phase 5.
 
-**参考文件**（实施时可对照）：
+**Reference files** (consult during implementation):
 
-- 原版描述符：`~/Developer/debugprobe/src/usb_descriptors.c`
-- Zephyr vendor 类模板：`~/Developer/zephyrproject/zephyr/subsys/dap/dap_backend_usb.c`
-- usbd 初始化模板：`~/Developer/zephyrproject/zephyr/samples/subsys/usb/common/sample_usbd_init.c`
-- MS OS 2.0 模板：`~/Developer/zephyrproject/zephyr/samples/subsys/dap/src/msosv2.h`
+- Original descriptors: `~/Developer/debugprobe/src/usb_descriptors.c`
+- Zephyr vendor class template: `~/Developer/zephyrproject/zephyr/subsys/dap/dap_backend_usb.c`
+- usbd init template: `~/Developer/zephyrproject/zephyr/samples/subsys/usb/common/sample_usbd_init.c`
+- MS OS 2.0 template: `~/Developer/zephyrproject/zephyr/samples/subsys/dap/src/msosv2.h`
 
 ---
 
-### Task 0: 构建环境冒烟验证
+### Task 0: Build environment smoke test
 
-确认现有工作区能为 rpi_pico 构建（之前机器上未发现 Zephyr SDK，预期用 `gnuarmemb` variant + 工作区内的 GNU Arm 工具链）。
+Confirm the existing workspace can build for rpi_pico (no Zephyr SDK was found on this machine; expect the `gnuarmemb` variant with the GNU Arm toolchain inside the workspace).
 
-**Files:** 无（只验证环境）
+**Files:** none (environment verification only)
 
-- [ ] **Step 1: 用 hello_world 冒烟构建**
+- [ ] **Step 1: Smoke-build hello_world**
 
 ```bash
 export ZEPHYR_TOOLCHAIN_VARIANT=gnuarmemb
@@ -38,9 +38,9 @@ cd ~/Developer/zephyrproject
 west build -p always -b rpi_pico -d /tmp/zsmoke zephyr/samples/hello_world
 ```
 
-Expected: 构建成功，结尾出现 `Generating files from /tmp/zsmoke/zephyr/zephyr.elf` 及 memory region 报表；`ls /tmp/zsmoke/zephyr/zephyr.uf2` 存在。
+Expected: build succeeds, ending with `Generating files from /tmp/zsmoke/zephyr/zephyr.elf` and the memory region report; `ls /tmp/zsmoke/zephyr/zephyr.uf2` exists.
 
-- [ ] **Step 2: 验证 rpi_pico2 与 rpi_debug_probe 也能构建**
+- [ ] **Step 2: Verify rpi_pico2 and rpi_debug_probe also build**
 
 ```bash
 cd ~/Developer/zephyrproject
@@ -49,20 +49,20 @@ west build -p always -b rpi_debug_probe -d /tmp/zsmokedp zephyr/samples/hello_wo
 rm -rf /tmp/zsmoke /tmp/zsmoke2 /tmp/zsmokedp
 ```
 
-Expected: 两次构建都成功。
+Expected: both builds succeed.
 
-若 Step 1 失败提示找不到工具链：检查 `ls $GNUARMEMB_TOOLCHAIN_PATH/bin/arm-none-eabi-gcc`；若提示缺 Python 依赖则 `pip install -r ~/Developer/zephyrproject/zephyr/scripts/requirements.txt`。后续所有 `west build` 命令都假定这两个环境变量已导出。
+If Step 1 fails with a missing toolchain: check `ls $GNUARMEMB_TOOLCHAIN_PATH/bin/arm-none-eabi-gcc`; if Python dependencies are missing, run `pip install -r ~/Developer/zephyrproject/zephyr/scripts/requirements.txt`. All subsequent `west build` commands assume these two environment variables are exported.
 
 ---
 
-### Task 1: 仓库基础文件
+### Task 1: Repository base files
 
 **Files:**
 - Create: `~/Developer/debugprobe-zephyr/.gitignore`
 - Create: `~/Developer/debugprobe-zephyr/west.yml`
 - Create: `~/Developer/debugprobe-zephyr/README.md`
 
-- [ ] **Step 1: 写 .gitignore**
+- [ ] **Step 1: Write .gitignore**
 
 ```gitignore
 build/
@@ -73,7 +73,7 @@ __pycache__/
 .DS_Store
 ```
 
-- [ ] **Step 2: 写 west.yml（T2 manifest，锁定 Zephyr v4.4.0）**
+- [ ] **Step 2: Write west.yml (T2 manifest pinning Zephyr v4.4.0)**
 
 ```yaml
 manifest:
@@ -94,15 +94,15 @@ manifest:
     path: debugprobe-zephyr
 ```
 
-- [ ] **Step 3: 写 README.md**
+- [ ] **Step 3: Write README.md**
 
 ````markdown
 # debugprobe-zephyr
 
-Raspberry Pi Debug Probe 固件的 Zephyr RTOS + C++20 重写版。
-设计文档见 `docs/superpowers/specs/`。
+A Zephyr RTOS + C++20 rewrite of the Raspberry Pi Debug Probe firmware.
+Design documents live in `docs/superpowers/specs/`.
 
-## 构建（复用现有 Zephyr 工作区）
+## Building (reusing an existing Zephyr workspace)
 
 ```bash
 export ZEPHYR_TOOLCHAIN_VARIANT=gnuarmemb
@@ -111,15 +111,15 @@ cd ~/Developer/zephyrproject
 west build -p always -b rpi_debug_probe -d ~/Developer/debugprobe-zephyr/build/rpi_debug_probe ~/Developer/debugprobe-zephyr
 ```
 
-板目标：`rpi_debug_probe`、`rpi_pico`、`rpi_pico2/rp2350a/m33`。
-一键构建三板：`scripts/build_all.sh`。
-产物：`build/<board>/zephyr/zephyr.uf2`，BOOTSEL 模式拖入即可烧录。
+Board targets: `rpi_debug_probe`, `rpi_pico`, `rpi_pico2/rp2350a/m33`.
+Build all three at once: `scripts/build_all.sh`.
+Artifacts: `build/<board>/zephyr/zephyr.uf2` — drag onto the BOOTSEL drive to flash.
 
-## 全新机器初始化（T2 拓扑）
+## Fresh machine setup (T2 topology)
 
 ```bash
 mkdir debugprobe-ws && cd debugprobe-ws
-west init -m <本仓库 URL>
+west init -m <this repository URL>
 west update
 ```
 ````
@@ -129,12 +129,12 @@ west update
 ```bash
 cd ~/Developer/debugprobe-zephyr
 git add .gitignore west.yml README.md
-git commit -m "chore: 仓库基础文件（west manifest、README）"
+git commit -m "chore: repository base files (west manifest, README)"
 ```
 
 ---
 
-### Task 2: 最小 C++20 应用，三板编译通过
+### Task 2: Minimal C++20 application building for all three boards
 
 **Files:**
 - Create: `~/Developer/debugprobe-zephyr/CMakeLists.txt`
@@ -142,7 +142,7 @@ git commit -m "chore: 仓库基础文件（west manifest、README）"
 - Create: `~/Developer/debugprobe-zephyr/prj.conf`
 - Create: `~/Developer/debugprobe-zephyr/src/main.cpp`
 
-- [ ] **Step 1: 写 CMakeLists.txt**
+- [ ] **Step 1: Write CMakeLists.txt**
 
 ```cmake
 cmake_minimum_required(VERSION 3.20.0)
@@ -156,7 +156,7 @@ target_sources(app PRIVATE
 target_include_directories(app PRIVATE src)
 ```
 
-- [ ] **Step 2: 写 Kconfig（应用选项：每板产品字符串，与原版 board_*_config.h 一致）**
+- [ ] **Step 2: Write Kconfig (app option: per-board product string, matching the original board_*_config.h)**
 
 ```kconfig
 mainmenu "debugprobe-zephyr"
@@ -170,7 +170,7 @@ config PROBE_PRODUCT_STRING
 source "Kconfig.zephyr"
 ```
 
-- [ ] **Step 3: 写 prj.conf（C++20，全量 libstdc++ 头以使用 std::span）**
+- [ ] **Step 3: Write prj.conf (C++20; full libstdc++ headers for std::span)**
 
 ```ini
 CONFIG_CPP=y
@@ -179,7 +179,7 @@ CONFIG_GLIBCXX_LIBCPP=y
 CONFIG_LOG=y
 ```
 
-- [ ] **Step 4: 写 src/main.cpp（含 C++20 特性冒烟断言）**
+- [ ] **Step 4: Write src/main.cpp (with a C++20 feature smoke assertion)**
 
 ```cpp
 #include <zephyr/kernel.h>
@@ -192,7 +192,9 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 namespace {
 
-/* C++20 冒烟：concepts + std::span 能编译即说明工具链/Kconfig 配置正确 */
+/* C++20 smoke check: if concepts + std::span compile, the toolchain and
+ * Kconfig selections are correct.
+ */
 template <typename T>
 concept ByteBuffer = requires(T t) {
 	{ t.size() } -> std::convertible_to<size_t>;
@@ -211,7 +213,7 @@ int main()
 }
 ```
 
-- [ ] **Step 5: 三板构建验证**
+- [ ] **Step 5: Build for all three boards**
 
 ```bash
 cd ~/Developer/zephyrproject
@@ -221,21 +223,21 @@ west build -p always -b rpi_pico              -d $APP/build/rpi_pico        $APP
 west build -p always -b rpi_pico2/rp2350a/m33 -d $APP/build/rpi_pico2       $APP
 ```
 
-Expected: 三次都成功，各 build 目录下生成 `zephyr/zephyr.uf2`。
+Expected: all three succeed; each build directory contains `zephyr/zephyr.uf2`.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 cd ~/Developer/debugprobe-zephyr
 git add CMakeLists.txt Kconfig prj.conf src/main.cpp
-git commit -m "feat: 最小 C++20 Zephyr 应用，三板编译通过"
+git commit -m "feat: minimal C++20 Zephyr app building for all three boards"
 ```
 
 ---
 
-### Task 3: USB 设备 + CDC-ACM 枚举（设备级描述符对齐原版）
+### Task 3: USB device + CDC-ACM enumeration (device-level descriptors aligned with the original)
 
-目标：设备以 VID 0x2E8A / PID 0x000C 枚举，bcdUSB 2.10、bcdDevice 2.31、制造商 "Raspberry Pi"、产品字符串按板、序列号来自 flash 唯一 ID（hwinfo），暂时只有 CDC-ACM 一个功能。
+Goal: the device enumerates as VID 0x2E8A / PID 0x000C, bcdUSB 2.10, bcdDevice 2.31, manufacturer "Raspberry Pi", per-board product string, serial number from the flash unique ID (hwinfo). Only the CDC-ACM function exists for now.
 
 **Files:**
 - Create: `~/Developer/debugprobe-zephyr/src/usb/usb_device.hpp`
@@ -247,7 +249,7 @@ git commit -m "feat: 最小 C++20 Zephyr 应用，三板编译通过"
 - Modify: `~/Developer/debugprobe-zephyr/CMakeLists.txt`
 - Modify: `~/Developer/debugprobe-zephyr/src/main.cpp`
 
-- [ ] **Step 1: 三个 overlay 都加 CDC-ACM 实例（三个文件内容相同）**
+- [ ] **Step 1: Add a CDC-ACM instance to all three overlays (identical content)**
 
 ```dts
 &zephyr_udc0 {
@@ -257,7 +259,7 @@ git commit -m "feat: 最小 C++20 Zephyr 应用，三板编译通过"
 };
 ```
 
-- [ ] **Step 2: prj.conf 追加 USB 配置**
+- [ ] **Step 2: Append USB configuration to prj.conf**
 
 ```ini
 CONFIG_USB_DEVICE_STACK_NEXT=y
@@ -267,20 +269,22 @@ CONFIG_UART_LINE_CTRL=y
 CONFIG_HWINFO=y
 ```
 
-- [ ] **Step 3: 写 src/usb/usb_device.hpp**
+- [ ] **Step 3: Write src/usb/usb_device.hpp**
 
 ```cpp
 #pragma once
 
 namespace probe::usb {
 
-/* 构造 USB 设备（描述符、配置、类注册）并使能。成功返回 0。 */
+/* Build the USB device (descriptors, configuration, class registration)
+ * and enable it. Returns 0 on success.
+ */
 int init();
 
 } // namespace probe::usb
 ```
 
-- [ ] **Step 4: 写 src/usb/usb_device.cpp**
+- [ ] **Step 4: Write src/usb/usb_device.cpp**
 
 ```cpp
 #include "usb/usb_device.hpp"
@@ -291,7 +295,9 @@ int init();
 
 LOG_MODULE_REGISTER(usbdev, LOG_LEVEL_INF);
 
-/* usbd 宏使用链接器 section 与设计上的 C 链接，放在全局作用域 */
+/* The usbd macros rely on linker sections and C linkage conventions;
+ * keep them at global scope.
+ */
 USBD_DEVICE_DEFINE(probe_usbd,
 		   DEVICE_DT_GET(DT_NODELABEL(zephyr_udc0)),
 		   0x2E8A, 0x000C);
@@ -302,7 +308,9 @@ USBD_DESC_PRODUCT_DEFINE(probe_product, CONFIG_PROBE_PRODUCT_STRING);
 USBD_DESC_SERIAL_NUMBER_DEFINE(probe_sn);
 
 USBD_DESC_CONFIG_DEFINE(probe_fs_cfg_desc, "");
-/* bmAttributes=0（bus powered）、bMaxPower=50（=100 mA），同原版配置描述符 */
+/* bmAttributes=0 (bus powered), bMaxPower=50 (=100 mA),
+ * same as the original configuration descriptor.
+ */
 USBD_CONFIGURATION_DEFINE(probe_fs_config, 0, 50, &probe_fs_cfg_desc);
 
 namespace probe::usb {
@@ -328,7 +336,7 @@ int init()
 		return err;
 	}
 
-	/* bcdUSB 2.10（BOS 需要）、bcdDevice 2.31，与原版一致 */
+	/* bcdUSB 2.10 (required for BOS) and bcdDevice 2.31, as in the original */
 	err = usbd_device_set_bcd_usb(&probe_usbd, USBD_SPEED_FS, 0x0210);
 	if (err) {
 		return err;
@@ -343,14 +351,18 @@ int init()
 		return err;
 	}
 
-	/* 注册顺序决定接口编号。Task 4 会在 CDC 之前插入 DAP vendor 类，
-	 * 使 DAP 成为接口 0（旧版 Keil MDK 只认接口 0，与原版对齐）。 */
+	/* Registration order determines interface numbering. Task 4 inserts the
+	 * DAP vendor class before CDC so DAP becomes interface 0 (old Keil MDK
+	 * only looks at interface 0, matching the original).
+	 */
 	err = usbd_register_class(&probe_usbd, "cdc_acm_0", USBD_SPEED_FS, 1);
 	if (err) {
 		return err;
 	}
 
-	/* 设备级 class 三元组保持 0/0/0，同原版（接口各自声明类） */
+	/* Keep the device-level class triple 0/0/0 like the original
+	 * (each interface declares its own class).
+	 */
 	err = usbd_device_set_code_triple(&probe_usbd, USBD_SPEED_FS, 0, 0, 0);
 	if (err) {
 		return err;
@@ -373,9 +385,9 @@ int init()
 } // namespace probe::usb
 ```
 
-- [ ] **Step 5: main.cpp 调用 USB 初始化**
+- [ ] **Step 5: Call USB init from main.cpp**
 
-将 `src/main.cpp` 的 `main` 函数替换为：
+Replace the `main` function in `src/main.cpp` with:
 
 ```cpp
 #include "usb/usb_device.hpp"
@@ -393,9 +405,9 @@ int main()
 }
 ```
 
-（文件顶部 include 区追加 `#include "usb/usb_device.hpp"`，其余保持不变。）
+(Add `#include "usb/usb_device.hpp"` to the include block at the top; everything else stays.)
 
-- [ ] **Step 6: CMakeLists.txt 追加源文件**
+- [ ] **Step 6: Append the source file to CMakeLists.txt**
 
 ```cmake
 target_sources(app PRIVATE
@@ -404,7 +416,7 @@ target_sources(app PRIVATE
 )
 ```
 
-- [ ] **Step 7: 三板构建**
+- [ ] **Step 7: Build for all three boards**
 
 ```bash
 cd ~/Developer/zephyrproject
@@ -414,31 +426,31 @@ west build -p always -b rpi_pico              -d $APP/build/rpi_pico        $APP
 west build -p always -b rpi_pico2/rp2350a/m33 -d $APP/build/rpi_pico2       $APP
 ```
 
-Expected: 三板构建成功。
+Expected: all three boards build.
 
-- [ ] **Step 8: 真机枚举验证（任选一块板，推荐 Pico）**
+- [ ] **Step 8: On-target enumeration check (any board; Pico recommended)**
 
-BOOTSEL 模式插入，拷贝 `build/rpi_pico/zephyr/zephyr.uf2` 到 RPI-RP2 卷；重新枚举后：
+Plug in while holding BOOTSEL, copy `build/rpi_pico/zephyr/zephyr.uf2` onto the RPI-RP2 volume; after re-enumeration:
 
 ```bash
 system_profiler SPUSBDataType | grep -A 12 -i "debugprobe\|debug probe"
 ```
 
-Expected: 出现 `Product ID: 0x000c`、`Vendor ID: 0x2e8a`、`Manufacturer: Raspberry Pi`、产品名 `Debugprobe on Pico (CMSIS-DAP)`、序列号为 16 位十六进制，且系统出现 `/dev/tty.usbmodem*`（CDC）。
+Expected: shows `Product ID: 0x000c`, `Vendor ID: 0x2e8a`, `Manufacturer: Raspberry Pi`, product name `Debugprobe on Pico (CMSIS-DAP)`, a 16-hex-digit serial number, and a `/dev/tty.usbmodem*` device (CDC) appears.
 
 - [ ] **Step 9: Commit**
 
 ```bash
 cd ~/Developer/debugprobe-zephyr
 git add -A
-git commit -m "feat: USB 设备骨架 + CDC-ACM，设备描述符对齐原版"
+git commit -m "feat: USB device skeleton + CDC-ACM, device descriptors aligned with original"
 ```
 
 ---
 
-### Task 4: DAP v2 vendor bulk 接口 stub（接口 0）
+### Task 4: DAP v2 vendor bulk interface stub (interface 0)
 
-自定义 usbd 类：vendor-specific 接口、bulk OUT/IN 各 64 字节、接口字符串 "CMSIS-DAP v2 Interface"。本阶段 request handler 只打印并重新挂出 OUT 缓冲（协议引擎阶段 2 接入）。结构参照 `subsys/dap/dap_backend_usb.c`。
+A custom usbd class: vendor-specific interface, 64-byte bulk OUT/IN, interface string "CMSIS-DAP v2 Interface". In this phase the request handler only logs and re-arms the OUT buffer (the protocol engine plugs in here in phase 2). Structure follows `subsys/dap/dap_backend_usb.c`.
 
 **Files:**
 - Create: `~/Developer/debugprobe-zephyr/src/usb/dap_class.hpp`
@@ -446,20 +458,20 @@ git commit -m "feat: USB 设备骨架 + CDC-ACM，设备描述符对齐原版"
 - Modify: `~/Developer/debugprobe-zephyr/src/usb/usb_device.cpp`
 - Modify: `~/Developer/debugprobe-zephyr/CMakeLists.txt`
 
-- [ ] **Step 1: 写 src/usb/dap_class.hpp**
+- [ ] **Step 1: Write src/usb/dap_class.hpp**
 
 ```cpp
 #pragma once
 
 namespace probe::usb {
 
-/* usbd 类实例名，供 usbd_register_class 引用 */
+/* usbd class instance name, referenced by usbd_register_class */
 inline constexpr const char *kDapClassName = "dap_v2_0";
 
 } // namespace probe::usb
 ```
 
-- [ ] **Step 2: 写 src/usb/dap_class.cpp**
+- [ ] **Step 2: Write src/usb/dap_class.cpp**
 
 ```cpp
 #include "usb/dap_class.hpp"
@@ -597,7 +609,9 @@ static int dap_request_handler(struct usbd_class_data *const c_data,
 	const bool is_out = (bi->ep == dap_bulk_out_ep(c_data));
 
 	if (err == 0 && is_out) {
-		/* 阶段 1 stub：只记录，不处理。阶段 2 在此接入 DapEngine。 */
+		/* Phase 1 stub: log only, no processing.
+		 * Phase 2 plugs the DapEngine in here.
+		 */
 		LOG_HEXDUMP_DBG(buf->data, buf->len, "DAP OUT (stub)");
 	}
 
@@ -615,7 +629,7 @@ static void *dap_get_desc(struct usbd_class_data *const c_data,
 {
 	auto *data = static_cast<DapData *>(usbd_class_get_private(c_data));
 
-	ARG_UNUSED(speed); /* 仅支持 full-speed */
+	ARG_UNUSED(speed); /* full-speed only */
 	return data->fs_desc;
 }
 
@@ -657,11 +671,11 @@ static struct usbd_class_api dap_class_api = {
 USBD_DEFINE_CLASS(dap_v2_0, &dap_class_api, &dap_data, nullptr);
 ```
 
-注意：`usbd_class_api` 的成员顺序以 `zephyr/include/zephyr/usb/usbd.h` 中的定义为准——C++ 的指定初始化器要求按声明顺序排列，如编译报错请按头文件顺序调整。
+Note: the member order of `usbd_class_api` must follow its definition in `zephyr/include/zephyr/usb/usbd.h` — C++ designated initializers require declaration order; if compilation fails, reorder the members to match the header.
 
-- [ ] **Step 3: usb_device.cpp 在 CDC 之前注册 DAP 类**
+- [ ] **Step 3: Register the DAP class before CDC in usb_device.cpp**
 
-在 `usbd_register_class(&probe_usbd, "cdc_acm_0", ...)` 之前插入：
+Insert before `usbd_register_class(&probe_usbd, "cdc_acm_0", ...)`:
 
 ```cpp
 	err = usbd_register_class(&probe_usbd, probe::usb::kDapClassName,
@@ -671,9 +685,9 @@ USBD_DEFINE_CLASS(dap_v2_0, &dap_class_api, &dap_data, nullptr);
 	}
 ```
 
-并在文件顶部追加 `#include "usb/dap_class.hpp"`。
+and add `#include "usb/dap_class.hpp"` at the top of the file.
 
-- [ ] **Step 4: CMakeLists.txt 追加 src/usb/dap_class.cpp**
+- [ ] **Step 4: Append src/usb/dap_class.cpp to CMakeLists.txt**
 
 ```cmake
 target_sources(app PRIVATE
@@ -683,33 +697,33 @@ target_sources(app PRIVATE
 )
 ```
 
-- [ ] **Step 5: 三板构建（命令同 Task 3 Step 7）**
+- [ ] **Step 5: Build for all three boards (same commands as Task 3 Step 7)**
 
-Expected: 三板构建成功。
+Expected: all three boards build.
 
-- [ ] **Step 6: 真机验证接口布局**
+- [ ] **Step 6: Verify the interface layout on target**
 
-烧录后：
+After flashing:
 
 ```bash
 system_profiler SPUSBDataType | grep -B 2 -A 20 "0x000c"
 ```
 
-Expected: 设备有 3 个接口；用 `ioreg -p IOUSB -l -w0 | grep -i "cmsis"` 或 Task 6 的 pyusb 工具确认接口 0 为 vendor class (0xFF) 且字符串为 "CMSIS-DAP v2 Interface"。
+Expected: the device exposes 3 interfaces; confirm interface 0 is vendor class (0xFF) with string "CMSIS-DAP v2 Interface" using `ioreg -p IOUSB -l -w0 | grep -i "cmsis"` or the pyusb tool from Task 6.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 cd ~/Developer/debugprobe-zephyr
 git add -A
-git commit -m "feat: DAP v2 vendor bulk 接口 stub（接口 0）"
+git commit -m "feat: DAP v2 vendor bulk interface stub (interface 0)"
 ```
 
 ---
 
-### Task 5: BOS + MS OS 2.0 描述符
+### Task 5: BOS + MS OS 2.0 descriptors
 
-参照 sample 的 msosv2.h，参数改为原版值：vendor code 0x01（原版 `TUD_BOS_MS_OS_20_DESCRIPTOR(..., 1)`）、GUID `{CDB3B5AD-293B-4663-AA36-1AAE46463776}`、function subset 指向接口 0。
+Adapted from the sample's msosv2.h with the original firmware's parameters: vendor code 0x01 (original `TUD_BOS_MS_OS_20_DESCRIPTOR(..., 1)`), GUID `{CDB3B5AD-293B-4663-AA36-1AAE46463776}`, function subset pointing at interface 0.
 
 **Files:**
 - Create: `~/Developer/debugprobe-zephyr/src/usb/msosv2.hpp`
@@ -717,7 +731,7 @@ git commit -m "feat: DAP v2 vendor bulk 接口 stub（接口 0）"
 - Modify: `~/Developer/debugprobe-zephyr/src/usb/usb_device.cpp`
 - Modify: `~/Developer/debugprobe-zephyr/CMakeLists.txt`
 
-- [ ] **Step 1: 写 src/usb/msosv2.hpp**
+- [ ] **Step 1: Write src/usb/msosv2.hpp**
 
 ```cpp
 #pragma once
@@ -726,13 +740,15 @@ struct usbd_context;
 
 namespace probe::usb {
 
-/* 向设备上下文挂载 BOS（MS OS 2.0 platform capability + vendor request） */
+/* Attach the BOS (MS OS 2.0 platform capability + vendor request)
+ * to the device context.
+ */
 int register_msosv2(struct usbd_context *uds_ctx);
 
 } // namespace probe::usb
 ```
 
-- [ ] **Step 2: 写 src/usb/msosv2.cpp**
+- [ ] **Step 2: Write src/usb/msosv2.cpp**
 
 ```cpp
 #include "usb/msosv2.hpp"
@@ -748,12 +764,12 @@ LOG_MODULE_REGISTER(msosv2, LOG_LEVEL_INF);
 
 namespace {
 
-/* 与原版一致：bMS_VendorCode = 0x01 */
+/* Same as the original: bMS_VendorCode = 0x01 */
 constexpr uint8_t kVendorCode = 0x01;
-/* Windows 8.1 起（原版用 0x06030000） */
+/* Windows 8.1 and later (the original uses 0x06030000) */
 constexpr uint32_t kWindowsVersion = 0x06030000;
 
-/* {CDB3B5AD-293B-4663-AA36-1AAE46463776}，UTF-16LE，同原版 */
+/* {CDB3B5AD-293B-4663-AA36-1AAE46463776}, UTF-16LE, same as the original */
 #define CMSIS_DAP_V2_GUID \
 	'{', 0x00, 'C', 0x00, 'D', 0x00, 'B', 0x00, '3', 0x00, 'B', 0x00, \
 	'5', 0x00, 'A', 0x00, 'D', 0x00, '-', 0x00, '2', 0x00, '9', 0x00, \
@@ -780,7 +796,7 @@ Msosv2Descriptor msosv2_desc = {
 	.subset_header = {
 		.wLength = sizeof(struct msosv2_function_subset_header),
 		.wDescriptorType = MS_OS_20_SUBSET_HEADER_FUNCTION,
-		.bFirstInterface = 0, /* DAP v2 接口 */
+		.bFirstInterface = 0, /* DAP v2 interface */
 		.wSubsetLength = sizeof(Msosv2Descriptor) -
 				 sizeof(struct msosv2_descriptor_set_header),
 	},
@@ -864,11 +880,11 @@ int register_msosv2(struct usbd_context *uds_ctx)
 } // namespace probe::usb
 ```
 
-注意：匿名 namespace 内的 `msosv2_to_host_cb` 若被宏要求外部链接而报错，把回调和两个描述符结构移出匿名 namespace 即可。
+Note: if the macro requires external linkage for `msosv2_to_host_cb` and compilation fails, move the callback and the two descriptor structs out of the anonymous namespace.
 
-- [ ] **Step 3: usb_device.cpp 挂载 BOS**
+- [ ] **Step 3: Attach the BOS in usb_device.cpp**
 
-在 `usbd_add_configuration` 之后、注册类之前插入：
+Insert after `usbd_add_configuration` and before class registration:
 
 ```cpp
 	err = probe::usb::register_msosv2(&probe_usbd);
@@ -877,44 +893,44 @@ int register_msosv2(struct usbd_context *uds_ctx)
 	}
 ```
 
-并在文件顶部追加 `#include "usb/msosv2.hpp"`。
+and add `#include "usb/msosv2.hpp"` at the top of the file.
 
-- [ ] **Step 4: CMakeLists.txt 追加 src/usb/msosv2.cpp，三板构建（命令同 Task 3 Step 7）**
+- [ ] **Step 4: Append src/usb/msosv2.cpp to CMakeLists.txt; build all three boards (same commands as Task 3 Step 7)**
 
-Expected: 三板构建成功。
+Expected: all three boards build.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cd ~/Developer/debugprobe-zephyr
 git add -A
-git commit -m "feat: BOS + MS OS 2.0 描述符（WinUSB 自动绑定，参数对齐原版）"
+git commit -m "feat: BOS + MS OS 2.0 descriptors (WinUSB auto-binding, params match original)"
 ```
 
 ---
 
-### Task 6: 描述符校验工具 + 真机验证
+### Task 6: Descriptor verification tool + on-target check
 
-pyusb 脚本校验已烧录设备的描述符与原版关键字段一致（这是本阶段的"测试"，也是阶段 5 一致性工具的起点）。
+A pyusb script verifies that a flashed device's descriptors match the original firmware's key fields (this is the "test" of this phase and the seed of the phase 5 conformance tool).
 
 **Files:**
 - Create: `~/Developer/debugprobe-zephyr/tools/conformance/check_descriptors.py`
 - Create: `~/Developer/debugprobe-zephyr/tools/conformance/requirements.txt`
 
-- [ ] **Step 1: 写 requirements.txt**
+- [ ] **Step 1: Write requirements.txt**
 
 ```
 pyusb>=1.2
 ```
 
-- [ ] **Step 2: 写 check_descriptors.py**
+- [ ] **Step 2: Write check_descriptors.py**
 
 ```python
 #!/usr/bin/env python3
-"""校验 debugprobe-zephyr 的 USB 描述符与原版 debugprobe 对齐。
+"""Verify debugprobe-zephyr USB descriptors are aligned with the original debugprobe.
 
-用法: python3 check_descriptors.py
-需要: pip install pyusb; macOS 需 brew install libusb
+Usage: python3 check_descriptors.py
+Needs: pip install pyusb; on macOS: brew install libusb
 """
 import sys
 
@@ -945,7 +961,7 @@ def check(name, cond, detail=""):
 def main():
     dev = usb.core.find(idVendor=VID, idProduct=PID)
     if dev is None:
-        print(f"未找到设备 {VID:04x}:{PID:04x}", file=sys.stderr)
+        print(f"Device {VID:04x}:{PID:04x} not found", file=sys.stderr)
         return 2
 
     check("bcdUSB == 2.10", dev.bcdUSB == 0x0210, f"got {dev.bcdUSB:#06x}")
@@ -957,42 +973,42 @@ def main():
     product = usb.util.get_string(dev, dev.iProduct)
     check("product string", product in EXPECTED_PRODUCTS, product)
     serial = usb.util.get_string(dev, dev.iSerialNumber)
-    check("serial 是 16 位大写十六进制",
+    check("serial is 16 uppercase hex digits",
           len(serial) == 16 and all(c in "0123456789ABCDEF" for c in serial),
           serial)
 
     cfg = dev.get_active_configuration()
     intfs = list(cfg)
-    check("接口数量 == 3", len(intfs) == 3, f"got {len(intfs)}")
+    check("interface count == 3", len(intfs) == 3, f"got {len(intfs)}")
 
     if0 = cfg[(0, 0)]
-    check("接口 0 是 vendor class", if0.bInterfaceClass == 0xFF)
-    check("接口 0 名为 CMSIS-DAP v2 Interface",
+    check("interface 0 is vendor class", if0.bInterfaceClass == 0xFF)
+    check("interface 0 named CMSIS-DAP v2 Interface",
           usb.util.get_string(dev, if0.iInterface)
           == "CMSIS-DAP v2 Interface")
     eps = list(if0)
-    check("接口 0 有 2 个 bulk 端点",
+    check("interface 0 has 2 bulk endpoints",
           len(eps) == 2 and all(usb.util.endpoint_type(e.bmAttributes)
                                 == usb.util.ENDPOINT_TYPE_BULK for e in eps))
-    check("接口 1 是 CDC 控制", cfg[(1, 0)].bInterfaceClass == 0x02)
-    check("接口 2 是 CDC 数据", cfg[(2, 0)].bInterfaceClass == 0x0A)
+    check("interface 1 is CDC control", cfg[(1, 0)].bInterfaceClass == 0x02)
+    check("interface 2 is CDC data", cfg[(2, 0)].bInterfaceClass == 0x0A)
 
-    # BOS：GET_DESCRIPTOR(BOS)，检查 MS OS 2.0 platform capability
+    # BOS: GET_DESCRIPTOR(BOS), check for the MS OS 2.0 platform capability
     bos = dev.ctrl_transfer(0x80, 0x06, (0x0F << 8), 0, 256)
-    check("BOS 含 MS OS 2.0 platform UUID",
+    check("BOS contains MS OS 2.0 platform UUID",
           MSOS_PLATFORM_UUID in bytes(bos))
 
-    # MS OS 2.0 描述符集：vendor request（bRequest=0x01, wIndex=7）
+    # MS OS 2.0 descriptor set: vendor request (bRequest=0x01, wIndex=7)
     msos = bytes(dev.ctrl_transfer(0xC0, 0x01, 0, 7, 512))
-    check("MS OS 2.0 含 WINUSB compatible ID", b"WINUSB" in msos)
+    check("MS OS 2.0 contains WINUSB compatible ID", b"WINUSB" in msos)
     guid_utf16 = DAP_GUID.encode("utf-16-le")
-    check("MS OS 2.0 含 DAP DeviceInterfaceGUID", guid_utf16 in msos)
+    check("MS OS 2.0 contains DAP DeviceInterfaceGUID", guid_utf16 in msos)
 
     print()
     if failures:
-        print(f"FAILED: {len(failures)} 项不一致: {failures}")
+        print(f"FAILED: {len(failures)} mismatches: {failures}")
         return 1
-    print("OK: 描述符与原版对齐")
+    print("OK: descriptors aligned with the original")
     return 0
 
 
@@ -1000,7 +1016,7 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 3: 对已烧录的板子运行**
+- [ ] **Step 3: Run against a flashed board**
 
 ```bash
 cd ~/Developer/debugprobe-zephyr/tools/conformance
@@ -1008,29 +1024,29 @@ python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt
 .venv/bin/python check_descriptors.py
 ```
 
-Expected: 全部 `[PASS]`，结尾 `OK: 描述符与原版对齐`，退出码 0。
-（若 libusb 缺失：`brew install libusb`。）
+Expected: all `[PASS]`, ending with `OK: descriptors aligned with the original`, exit code 0.
+(If libusb is missing: `brew install libusb`.)
 
 - [ ] **Step 4: Commit**
 
 ```bash
 cd ~/Developer/debugprobe-zephyr
 git add tools/
-git commit -m "test: USB 描述符对齐校验工具（pyusb）"
+git commit -m "test: USB descriptor alignment checker (pyusb)"
 ```
 
 ---
 
-### Task 7: 三板构建脚本与阶段收尾
+### Task 7: Three-board build script and phase wrap-up
 
 **Files:**
 - Create: `~/Developer/debugprobe-zephyr/scripts/build_all.sh`
 
-- [ ] **Step 1: 写 scripts/build_all.sh**
+- [ ] **Step 1: Write scripts/build_all.sh**
 
 ```bash
 #!/usr/bin/env bash
-# 三板全量构建，产物在 build/<board>/zephyr/zephyr.uf2
+# Build all three boards; artifacts land in build/<board>/zephyr/zephyr.uf2
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -1047,35 +1063,35 @@ echo
 ls -l "$APP_DIR"/build/*/zephyr/zephyr.uf2
 ```
 
-- [ ] **Step 2: 赋权并运行**
+- [ ] **Step 2: Make executable and run**
 
 ```bash
 chmod +x ~/Developer/debugprobe-zephyr/scripts/build_all.sh
 ~/Developer/debugprobe-zephyr/scripts/build_all.sh
 ```
 
-Expected: 三板构建成功，列出三个 `zephyr.uf2`。
+Expected: all three boards build; three `zephyr.uf2` files listed.
 
-- [ ] **Step 3: 阶段验收清单确认**
+- [ ] **Step 3: Confirm the phase acceptance checklist**
 
-- 三板 `build_all.sh` 全绿；
-- 至少一块真机：枚举 VID/PID/字符串正确（Task 3 Step 8）；
-- `check_descriptors.py` 全 PASS（Task 6 Step 3）；
-- `/dev/tty.usbmodem*`（CDC）出现。
+- `build_all.sh` green for all three boards;
+- at least one physical board enumerates with correct VID/PID/strings (Task 3 Step 8);
+- `check_descriptors.py` all PASS (Task 6 Step 3);
+- `/dev/tty.usbmodem*` (CDC) appears.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 cd ~/Developer/debugprobe-zephyr
 git add scripts/
-git commit -m "chore: 三板构建脚本，阶段 1 收尾"
+git commit -m "chore: three-board build script, phase 1 wrap-up"
 ```
 
 ---
 
-## 已知风险与处置
+## Known Risks and Handling
 
-- **C++ 中的 Zephyr 宏**：`USBD_DEFINE_CLASS` / `UDC_BUF_POOL_DEFINE` 等宏在 C++ 编译单元使用，指定初始化器必须按结构体声明顺序；编译报错时对照 `usbd.h` 调整成员顺序，必要时把对应定义移到全局作用域/具名变量。
-- **`usbd_class_api` 成员顺序**：Task 4 Step 2 的初始化顺序是按常见定义猜测的，以头文件实际顺序为准。
-- **rpi_debug_probe 板 console 占用 uart1**：上游板定义 `zephyr,console = &uart1`，与日后 UART 桥冲突；本阶段无影响，阶段 4 在 overlay 中改 chosen。
-- **macOS 上 pyusb 读取 CDC 接口受限**：脚本只做控制传输与描述符读取，正常可用；若权限问题用 `sudo` 运行。
+- **Zephyr macros in C++**: `USBD_DEFINE_CLASS` / `UDC_BUF_POOL_DEFINE` etc. are used in C++ translation units; designated initializers must follow struct declaration order. On compile errors, reorder members per `usbd.h`, and move definitions to global scope / named variables if needed.
+- **`usbd_class_api` member order**: the initializer order in Task 4 Step 2 is a best guess; the header's actual order is authoritative.
+- **rpi_debug_probe board console occupies uart1**: the upstream board sets `zephyr,console = &uart1`, which conflicts with the future UART bridge; harmless this phase, fixed via the overlay's `chosen` in phase 4.
+- **pyusb on macOS has limited access to CDC interfaces**: the script only does control transfers and descriptor reads, which work fine; run with `sudo` if permissions block it.

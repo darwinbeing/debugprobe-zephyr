@@ -1,229 +1,257 @@
-# debugprobe-zephyr 总体设计
+# debugprobe-zephyr Overall Design
 
-日期：2026-06-11
-状态：已评审通过（设计阶段）
+Date: 2026-06-11
+Status: Approved (design phase)
 
-## 背景与目标
+## Background and Goal
 
-将 Raspberry Pi 官方 [debugprobe](https://github.com/raspberrypi/debugprobe) 固件
-（pico-sdk + FreeRTOS + TinyUSB + ARM CMSIS-DAP 参考实现，C 语言）
-在 Zephyr RTOS 上用 C++20 完整重写，做到**功能与性能对等的替代固件**。
+Reimplement the official Raspberry Pi [debugprobe](https://github.com/raspberrypi/debugprobe)
+firmware (pico-sdk + FreeRTOS + TinyUSB + ARM CMSIS-DAP reference implementation, C)
+on Zephyr RTOS in C++20, producing a **drop-in replacement firmware with feature and
+performance parity**.
 
-参考实现位于 `~/Developer/debugprobe`（v2.3.1 附近，master 分支）。
+The reference implementation lives at `~/Developer/debugprobe` (around v2.3.1, master branch).
 
-### 需求决议（已与用户确认）
+### Requirement Decisions (confirmed with the user)
 
-| 决策点 | 选择 |
+| Decision | Choice |
 |---|---|
-| SWD 实现 | PIO 加速，性能与原版对等（SWD 时钟可达 ~25 MHz 量级） |
-| 目标硬件 | Debug Probe 配件（RP2040）、Pico 1（RP2040）、Pico 2（RP2350）三种一步到位 |
-| 功能范围 | 完整功能对等：CMSIS-DAP v2 + CDC UART 桥 + PIO 自动波特率 + LED + USB 看门狗 |
-| C++ 程度 | 全部 C++ 重写，**包括 CMSIS-DAP 协议层**（不复用 ARM C 参考实现） |
-| 代码位置 | 独立新仓库 `~/Developer/debugprobe-zephyr` |
-| 测试策略 | 主机单元测试 + 真机验证 + 新旧固件协议一致性对比 |
+| SWD implementation | PIO-accelerated, performance parity with the original (SWD clock up to ~25 MHz) |
+| Target hardware | Debug Probe accessory (RP2040), Pico 1 (RP2040), Pico 2 (RP2350) — all three from the start |
+| Feature scope | Full parity: CMSIS-DAP v2 + CDC UART bridge + PIO autobaud + LEDs + USB watchdog |
+| C++ extent | Full C++ rewrite, **including the CMSIS-DAP protocol layer** (no reuse of the ARM C reference implementation) |
+| Code location | New standalone repository `~/Developer/debugprobe-zephyr` |
+| Test strategy | Host unit tests + on-target verification + old-vs-new firmware protocol conformance comparison |
 
-### 非目标
+### Non-goals
 
-- JTAG 支持（原版固件也只编译了 SWD，`DAP_JTAG_DEV_CNT = 0`）
-- CMSIS-DAP UART 扩展命令（`DAP_UART_*`，原版未启用；UART 走 CDC）
-- USB MSC / DFU 等额外 USB 功能
-- 除三种目标硬件外的板卡
+- JTAG support (the original firmware only compiles SWD; `DAP_JTAG_DEV_CNT = 0`)
+- CMSIS-DAP UART extension commands (`DAP_UART_*`; not enabled in the original — UART goes over CDC)
+- Extra USB functions such as MSC / DFU
+- Boards other than the three targets above
 
-## 既有可复用资产（Zephyr 4.4.0，本地工作区 `~/Developer/zephyrproject`）
+## Reusable Upstream Assets (Zephyr 4.4.0, local workspace `~/Developer/zephyrproject`)
 
-- **板定义全部存在于上游**：`rpi_debug_probe`（含全部 LED 与 pinctrl）、`rpi_pico`、`rpi_pico2/rp2350a/m33`。无需自定义 board，只需各板 overlay。
-- **`swdp` 驱动接口**（`include/zephyr/drivers/swdp.h`，`swdp_api`）：SWD 端口驱动抽象
-  （output/input sequence、transfer、set clock、pin 控制）。本项目的 PIO 驱动实现该接口。
-- **`zephyr,swdp-gpio` bitbang 驱动**（`drivers/dp/swdp_bitbang.c`）：阶段 3 用作协议库
-  真机验证的过渡驱动，最终被 PIO 驱动替换（保留 Kconfig 可选）。
-- **usbd-next 新 USB 设备栈**：CDC-ACM 类、BOS/MS OS 2.0 描述符支持；
-  `samples/subsys/dap` 演示了 CMSIS-DAP v2 vendor bulk + WinUSB 描述符的完整写法。
-- **PIO 基础设施**：`raspberrypi,pico-pio` 设备 + `pio_rpi_pico` misc 驱动 +
-  pioasm CMake 集成（参考 `drivers/serial/uart_rpi_pico_pio.c` 的用法）。
+- **All board definitions exist upstream**: `rpi_debug_probe` (with all LEDs and pinctrl),
+  `rpi_pico`, `rpi_pico2/rp2350a/m33`. No custom board needed — only per-board overlays.
+- **`swdp` driver interface** (`include/zephyr/drivers/swdp.h`, `swdp_api`): an SWD port
+  driver abstraction (output/input sequence, transfer, clock, pin control). Our PIO driver
+  implements this interface.
+- **`zephyr,swdp-gpio` bitbang driver** (`drivers/dp/swdp_bitbang.c`): used in phase 3 as a
+  transitional driver to validate the protocol library on hardware, later replaced by the
+  PIO driver (kept selectable via Kconfig).
+- **usbd-next (new USB device stack)**: CDC-ACM class, BOS / MS OS 2.0 descriptor support;
+  `samples/subsys/dap` demonstrates a complete CMSIS-DAP v2 vendor-bulk + WinUSB descriptor setup.
+- **PIO infrastructure**: `raspberrypi,pico-pio` device + `pio_rpi_pico` misc driver +
+  pioasm CMake integration (see `drivers/serial/uart_rpi_pico_pio.c` for usage).
 
-## 总体架构（方案 A：分层库架构）
+## Overall Architecture (Option A: layered libraries)
 
 ```
-debugprobe-zephyr/                      west T2 拓扑（app 仓库即 manifest 仓库）
-├── west.yml                            # 锁定 zephyr v4.4.0 + hal_rpi_pico 等模块
+debugprobe-zephyr/                      west T2 topology (app repo is the manifest repo)
+├── west.yml                            # pins zephyr v4.4.0 + hal_rpi_pico and friends
 ├── CMakeLists.txt
-├── Kconfig                             # 应用级选项（USB 看门狗开关等）
+├── Kconfig                             # app-level options (USB watchdog switch, etc.)
 ├── prj.conf                            # CONFIG_CPP=y, CONFIG_STD_CPP20=y, usbd-next
-├── lib/dap/                            # ① 纯 C++20 CMSIS-DAP 协议库（零 Zephyr 依赖）
-│   ├── include/dap/...                 #    公共头：DapEngine、SwdDriver、Pins 等
+├── lib/dap/                            # ① pure C++20 CMSIS-DAP protocol library (zero Zephyr deps)
+│   ├── include/dap/...                 #    public headers: DapEngine, SwdDriver, Pins, ...
 │   └── src/...
 ├── drivers/
-│   ├── dp_pio/                         # ② PIO SWD 驱动，compatible: raspberrypi,swdp-pio
-│   │   └── probe.pio / probe_oen.pio   #    自原版移植（RP2040 / RP2350 变体）
-│   └── freqcount_pio/                  #    PIO 频率计（autobaud 用），自 autobaud.pio 移植
-├── dts/bindings/                       # 自定义 DT binding（swdp-pio、freqcount-pio）
-├── src/                                # ③ 应用层（全部 C++）
-│   ├── main.cpp                        #    初始化与线程拉起
-│   ├── usb/                            #    描述符、vendor bulk 类、MS OS 2.0
-│   ├── dap_thread.cpp                  #    DAP 请求/响应泵 + SwdDriver 适配器
-│   ├── uart_bridge.{hpp,cpp}           #    CDC ↔ 物理 UART 桥
-│   ├── autobaud.{hpp,cpp}              #    自动波特率
+│   ├── dp_pio/                         # ② PIO SWD driver, compatible: raspberrypi,swdp-pio
+│   │   └── probe.pio / probe_oen.pio   #    ported from the original (RP2040 / RP2350 variants)
+│   └── freqcount_pio/                  #    PIO frequency counter (for autobaud), from autobaud.pio
+├── dts/bindings/                       # custom DT bindings (swdp-pio, freqcount-pio)
+├── src/                                # ③ application layer (all C++)
+│   ├── main.cpp                        #    init and thread bring-up
+│   ├── usb/                            #    descriptors, vendor bulk class, MS OS 2.0
+│   ├── dap_thread.cpp                  #    DAP request/response pump + SwdDriver adapter
+│   ├── uart_bridge.{hpp,cpp}           #    CDC <-> physical UART bridge
+│   ├── autobaud.{hpp,cpp}              #    automatic baud rate detection
 │   ├── leds.{hpp,cpp}
-│   └── usb_watchdog.cpp                #    RP2040 SOF 停滞检测（条件编译）
-├── boards/                             # 三板 overlay + .conf
+│   └── usb_watchdog.cpp                #    RP2040 SOF-stall detection (conditional compile)
+├── boards/                             # per-board overlays + .conf
 │   ├── rpi_debug_probe.overlay/.conf
 │   ├── rpi_pico.overlay/.conf
 │   └── rpi_pico2_rp2350a_m33.overlay/.conf
-├── tests/dap_lib/                      # ztest（native_sim）协议库单元测试
-├── tools/conformance/                  # Python(pyusb) 新旧固件协议一致性对比
-└── docs/superpowers/specs/             # 本文档及后续实施计划
+├── tests/dap_lib/                      # ztest (native_sim) protocol library unit tests
+├── tools/conformance/                  # Python (pyusb) old-vs-new protocol conformance tool
+└── docs/superpowers/specs/             # this document and subsequent plans
 ```
 
-依赖方向：`src/` → `lib/dap/` + 驱动；`lib/dap/` 不依赖任何下层。
-构建：`west build -b rpi_debug_probe|rpi_pico|rpi_pico2/rp2350a/m33` 产出三个 UF2。
+Dependency direction: `src/` → `lib/dap/` + drivers; `lib/dap/` depends on nothing below it.
+Build: `west build -b rpi_debug_probe|rpi_pico|rpi_pico2/rp2350a/m33` produces three UF2s.
 
-## 组件设计
+## Component Design
 
-### ① C++ CMSIS-DAP 协议库（`lib/dap/`）
+### ① C++ CMSIS-DAP protocol library (`lib/dap/`)
 
-全新实现 CMSIS-DAP v2 命令集（与原版固件实际启用范围一致）：
+A from-scratch implementation of the CMSIS-DAP v2 command set (matching what the original
+firmware actually enables):
 
-- 通用：`DAP_Info`、`DAP_HostStatus`、`DAP_Connect`、`DAP_Disconnect`、
-  `DAP_Delay`、`DAP_ResetTarget`、`DAP_ExecuteCommands`、`DAP_QueueCommands`
-- SWJ：`DAP_SWJ_Pins`、`DAP_SWJ_Clock`、`DAP_SWJ_Sequence`
-- SWD：`DAP_SWD_Configure`、`DAP_SWD_Sequence`
-- 传输：`DAP_TransferConfigure`、`DAP_Transfer`、`DAP_TransferBlock`、`DAP_TransferAbort`
-- JTAG 命令返回 `DAP_ERROR`（同原版行为）
+- General: `DAP_Info`, `DAP_HostStatus`, `DAP_Connect`, `DAP_Disconnect`,
+  `DAP_Delay`, `DAP_ResetTarget`, `DAP_ExecuteCommands`, `DAP_QueueCommands`
+- SWJ: `DAP_SWJ_Pins`, `DAP_SWJ_Clock`, `DAP_SWJ_Sequence`
+- SWD: `DAP_SWD_Configure`, `DAP_SWD_Sequence`
+- Transfers: `DAP_TransferConfigure`, `DAP_Transfer`, `DAP_TransferBlock`, `DAP_TransferAbort`
+- JTAG commands return `DAP_ERROR` (same behavior as the original)
 
-核心抽象（纯虚接口，主机测试用 mock 注入）：
+Core abstractions (pure virtual interfaces; mocks injected for host testing):
 
 ```cpp
 namespace dap {
 
-class SwdDriver {                     // SWD 端口硬件抽象
+class SwdDriver {                     // SWD port hardware abstraction
 public:
   virtual void set_clock(uint32_t hz) = 0;
   virtual void output_sequence(std::span<const uint8_t> bits, size_t nbits) = 0;
   virtual void input_sequence(std::span<uint8_t> bits, size_t nbits) = 0;
-  virtual Ack  transfer(Request req, uint32_t &data) = 0;   // 单次 DAP 传输（含 turnaround/parity）
+  virtual Ack  transfer(Request req, uint32_t &data) = 0;   // one DAP transfer (turnaround/parity included)
   virtual void set_pins(uint8_t mask, uint8_t value, uint32_t wait_us) = 0; // SWJ_Pins
   virtual uint8_t read_pins() = 0;
-  virtual void connect() = 0;         // 引脚接管/释放（对应原版 PORT_SWD_SETUP / PORT_OFF）
+  virtual void connect() = 0;         // pin takeover/release (original PORT_SWD_SETUP / PORT_OFF)
   virtual void disconnect() = 0;
   virtual ~SwdDriver() = default;
 };
 
-class HostStatus {                    // LED 等宿主状态指示
+class HostStatus {                    // host status indication (LEDs)
 public:
   virtual void connected(bool) = 0;
   virtual void running(bool) = 0;
   virtual ~HostStatus() = default;
 };
 
-class DapEngine {                     // 协议状态机
+class DapEngine {                     // protocol state machine
 public:
   DapEngine(SwdDriver &, HostStatus &, const InfoStrings &);
-  // 解析一个完整请求包，写出响应包，返回响应长度
+  // Parse one complete request packet, write the response packet, return its length
   size_t process(std::span<const uint8_t> req, std::span<uint8_t> resp);
 };
 
 } // namespace dap
 ```
 
-约束：
+Constraints:
 
-- 不依赖 Zephyr 头文件、不使用堆分配（固定大小缓冲，包大小上限 = USB bulk 包配置，
-  与原版 `DAP_PACKET_SIZE` 对齐）、不使用异常与 RTTI（`-fno-exceptions -fno-rtti`）。
-- ACK 重试（WAIT retry）、match mask/value 传输、abort 标志位等行为
-  以 ARM CMSIS-DAP 规范 + 原版实测行为为准。
-- `DAP_Info` 返回的 Vendor/Product/SerialNumber/FirmwareVersion 由应用层注入。
+- No Zephyr headers, no heap allocation (fixed-size buffers; packet size cap equals the
+  USB bulk packet configuration, aligned with the original `DAP_PACKET_SIZE`), no
+  exceptions or RTTI (`-fno-exceptions -fno-rtti`).
+- ACK retry (WAIT retry), match mask/value transfers, abort flag behavior follow the
+  ARM CMSIS-DAP specification plus observed behavior of the original firmware.
+- The Vendor/Product/SerialNumber/FirmwareVersion strings returned by `DAP_Info` are
+  injected by the application layer.
 
-### ② PIO SWD 驱动（`drivers/dp_pio/`）
+### ② PIO SWD driver (`drivers/dp_pio/`)
 
-- 移植原版 `probe.pio`；RP2350 使用 `probe_oen.pio` 变体（输出使能极性差异）。
-- devicetree：`compatible = "raspberrypi,swdp-pio"`，属性含 `pio` 句柄、
-  `clk-gpios`/`dio-gpios`（或 pin 序号）、可选 `dir-gpios`（Debug Probe 的电平转换方向控制）。
-- 实现 Zephyr `swdp_api`（与生态一致，可被上游 `subsys/dap` 复用）；
-  `lib/dap` 的 `SwdDriver` 在应用层由薄 C++ 适配器包装 swdp 设备。
-- 时钟分频计算、写/读位序列、DIO 三态翻转时序与原版 `sw_dp_pio.c` 逐条对齐；
-  `transfer()` 快速路径在驱动内完成（ACK 读取 + 数据 + parity），避免逐 bit 往返。
-- `drivers/freqcount_pio/`：移植 `autobaud.pio` 为 PIO 频率计驱动，
-  供 autobaud 模块测目标 TX 引脚跳变周期。
+- Port the original `probe.pio`; RP2350 uses the `probe_oen.pio` variant (output-enable
+  polarity difference).
+- Devicetree: `compatible = "raspberrypi,swdp-pio"`, properties include the `pio` handle,
+  `clk-gpios`/`dio-gpios` (or pin indices), optional `dir-gpios` (level-shifter direction
+  control on the Debug Probe).
+- Implements the Zephyr `swdp_api` (ecosystem-consistent; reusable by upstream `subsys/dap`);
+  the `lib/dap` `SwdDriver` is backed by a thin C++ adapter wrapping the swdp device.
+- Clock divider computation, write/read bit sequences, and DIO tri-state turnaround timing
+  are aligned line-by-line with the original `sw_dp_pio.c`; the `transfer()` fast path
+  (ACK read + data + parity) is done inside the driver to avoid per-bit round trips.
+- `drivers/freqcount_pio/`: port `autobaud.pio` as a PIO frequency-counter driver used by
+  the autobaud module to measure target TX edge periods.
 
-### ③ USB 与应用层（`src/`）
+### ③ USB and application layer (`src/`)
 
-USB（usbd-next）：
+USB (usbd-next):
 
-- 接口 0：CDC-ACM（UART 桥）；接口 2：DAP v2 vendor 类（bulk out/in），
-  接口名含 "CMSIS-DAP"（主机工具按此识别）。顺序与原版描述符一致。
-- BOS + MS OS 2.0 描述符（WinUSB 自动绑定），vendor request 处理同原版。
-- VID/PID 统一为 `0x2E8A`/`0x000C`（三种硬件相同，仅产品字符串区分，同原版）、
-  字符串、序列号（flash 唯一 ID，`hwinfo` API 读取）与原版一致，
-  保证 openocd / probe-rs / pyocd 现有配置零修改可用。
+- **DAP v2 interface**: custom vendor class (bulk in/out) with MS OS 2.0 descriptors
+  (automatic WinUSB binding) and BOS. Interface name contains "CMSIS-DAP" (host tools
+  match on this).
+- **CDC-ACM ↔ uart1 bridge**: our own C++ `UartBridge` class — line coding
+  (baud/data bits/parity) forwarded to the physical UART, DTR/RTS pass-through, hardware
+  flow control (Debug Probe board), ring buffers, TX/RX LED activity.
+- VID/PID fixed at `0x2E8A`/`0x000C` (same for all three boards; only the product string
+  differs, as in the original), strings and serial number (flash unique ID via `hwinfo`)
+  identical to the original so existing openocd / probe-rs / pyocd configs work unchanged.
 
-应用模块：
+Application modules:
 
-- `DapThread`：bulk out 收包 → `DapEngine::process` → bulk in 发回；
-  双缓冲流水（原版 `tusb_edpt_handler.c` 的请求/响应队列语义）。
-- `UartBridge`：CDC line coding（波特率/数据位/停止位/校验）下发到物理 UART
-  （`uart_configure`）、DTR/RTS 透传、硬件流控（Debug Probe 板 CTS/RTS 引脚）、
-  双向环形缓冲 + TX/RX LED 活动指示。
-- `Autobaud`：仅在主机连接后未显式设置波特率时启用；用频率计驱动测目标 TX
-  最短脉宽推算波特率，命中常见波特率表后套用（算法与原版 `autobaud.c` 一致）。
-- `UsbWatchdog`（仅 RP2040，条件编译）：周期采样 SOF 计数器，三次不变判定
-  USB 控制器卡死，断开重连 USB（usbd disable/enable）。RP2040 errata 对策。
-- 线程：`dap`、`bridge`、`autobaud` 三个 Zephyr 线程 + 系统工作队列；
-  优先级关系沿用原版（UART 桥 > USB > DAP）。USB 挂起/恢复时挂起/恢复各线程。
+- `DapThread`: bulk-out packet in → `DapEngine::process` → bulk-in response out;
+  double-buffered pipelining (the request/response queue semantics of the original
+  `tusb_edpt_handler.c`).
+- `UartBridge`: as above.
+- `Autobaud`: engaged only when the host has not explicitly set a baud rate; measures the
+  target TX shortest pulse width via the frequency-counter driver and snaps to a table of
+  common baud rates (same algorithm as the original `autobaud.c`).
+- `UsbWatchdog` (RP2040 only, conditional compile): samples the SOF counter periodically;
+  three identical readings ⇒ USB controller stuck ⇒ disconnect/reconnect USB
+  (usbd disable/enable). RP2040 errata workaround.
+- Threads: `dap`, `bridge`, `autobaud` Zephyr threads + system workqueue; priority
+  relations follow the original (UART bridge > USB > DAP). Threads suspend/resume on USB
+  suspend/resume.
 
-### 板级差异（devicetree overlay）
+### Board differences (devicetree overlays)
 
 | | rpi_debug_probe | rpi_pico | rpi_pico2 |
 |---|---|---|---|
-| SWD CLK/DIO | GP12/GP14（带方向控制 GP13/GP15） | GP3/GP2 | GP3/GP2 |
-| 目标 UART | uart1 GP4/GP5 + CTS/RTS GP6/GP7 | uart1 GP4/GP5 | uart1 GP4/GP5 |
-| LED | 红(运行)/绿×2(UART)/黄×2(DAP) | 单板载 LED | 单板载 LED |
-| PIO 程序 | probe.pio | probe.pio | probe_oen.pio |
-| USB 看门狗 | 启用 | 启用 | 不需要 |
+| SWD CLK/DIO | GP12/GP14 (direction ctrl GP13/GP15) | GP3/GP2 | GP3/GP2 |
+| Target UART | uart1 GP4/GP5 + CTS/RTS GP6/GP7 | uart1 GP4/GP5 | uart1 GP4/GP5 |
+| LEDs | red (run) / 2× green (UART) / 2× yellow (DAP) | single onboard LED | single onboard LED |
+| PIO program | probe.pio | probe.pio | probe_oen.pio |
+| USB watchdog | enabled | enabled | not needed |
 
-（引脚以原版 `include/board_*_config.h` 为准，实施时逐项核对。）
+(Pin assignments authoritative source: the original `include/board_*_config.h`; verify
+item-by-item during implementation.)
 
-## 测试与验收
+## Testing and Acceptance
 
-1. **单元测试**（`tests/dap_lib`，`west twister -p native_sim`）：
-   mock `SwdDriver` 注入，覆盖全部命令的编解码、WAIT/FAULT 重试、match 传输、
-   越界/截断请求等错误路径。CI 可跑（无硬件依赖）。
-2. **协议一致性**（`tools/conformance/`）：Python + pyusb，向旧固件与新固件
-   发送同一组 DAP 请求序列（含随机生成的 Transfer 批次），逐字节比对响应；
-   `DAP_Info` 的版本/序列号字符串走白名单豁免。
-3. **真机验收**（三板各自执行）：
-   - openocd + gdb 对真实 ARM 目标：connect → halt → 读写内存/寄存器 →
-     flash 烧录 → reset → 断点运行，全流程通过；
-   - SWD 时钟设到原版同档位（如 24 MHz）烧录耗时与原版相差 < 10%；
-   - UART 桥 115200 与 921600 双向压测无丢字节；autobaud 对常见波特率收敛；
-   - LED 行为、USB 挂起/恢复、拔插重连与原版一致。
+1. **Unit tests** (`tests/dap_lib`, `west twister -p native_sim`): mock `SwdDriver`
+   injection; cover encode/decode of every command, WAIT/FAULT retries, match transfers,
+   out-of-bounds/truncated request error paths. CI-runnable (no hardware).
+2. **Protocol conformance** (`tools/conformance/`): Python + pyusb sends the same DAP
+   request sequences (including randomized Transfer batches) to the old and the new
+   firmware and compares responses byte-for-byte; `DAP_Info` version/serial strings go
+   through an allowlist.
+3. **On-target acceptance** (each of the three boards):
+   - openocd + gdb against a real ARM target: connect → halt → memory/register
+     read/write → flash program → reset → breakpoint run, full pass;
+   - with the SWD clock at the same setting as the original (e.g. 24 MHz), flash
+     programming time within 10% of the original;
+   - UART bridge bidirectional stress at 115200 and 921600 with no byte loss; autobaud
+     converges on common rates;
+   - LED behavior, USB suspend/resume, unplug/replug match the original.
 
-## 错误处理原则
+## Error Handling Principles
 
-- 协议层：畸形/越界请求返回 `DAP_ERROR` 响应而非崩溃；所有缓冲访问有界。
-- 驱动层：PIO 资源申请失败、devicetree 缺项在 init 阶段报错并使设备 not-ready。
-- 应用层：USB 断开/挂起走显式状态机（对应原版 mount/unmount/suspend 回调链）；
-  UART 桥缓冲满时按原版策略丢弃并计数（debug log 可见）。
-- 禁用异常；错误经由返回值/`expected` 风格传递。
+- Protocol layer: malformed/out-of-bounds requests produce a `DAP_ERROR` response, never
+  a crash; all buffer accesses are bounds-checked.
+- Driver layer: PIO resource allocation failures and missing devicetree properties fail
+  at init and mark the device not-ready.
+- Application layer: USB disconnect/suspend goes through an explicit state machine
+  (mirroring the original mount/unmount/suspend callback chain); when bridge buffers are
+  full, drop and count per the original policy (visible in debug logs).
+- Exceptions disabled; errors propagate via return values / `expected`-style types.
 
-## 分阶段实施
+## Phased Implementation
 
-每阶段单独产出实施计划（writing-plans），独立验收：
+Each phase gets its own implementation plan (writing-plans) and acceptance:
 
-1. **骨架**：west workspace + 空 C++ app 三板编译通过；USB 枚举且描述符
-   与原版对齐（接口布局、VID/PID、MS OS 2.0）。
-2. **协议库 + 单元测试**：`lib/dap` 全命令实现；native_sim 测试全绿。
-3. **SWD 落地**：先以上游 `zephyr,swdp-gpio` bitbang 驱动真机验证协议库
-   （openocd 全流程通），再实现 `dp_pio` PIO 驱动替换之，达到性能对等。
-4. **UART 桥 + autobaud + LED + USB 看门狗**。
-5. **一致性对比 + 三板真机验收**：conformance 工具跑通，验收清单逐项过。
+1. **Skeleton**: west workspace + empty C++ app building for all three boards; USB
+   enumerates with descriptors aligned to the original (interface layout, VID/PID,
+   MS OS 2.0).
+2. **Protocol library + unit tests**: full `lib/dap` command set; native_sim tests green.
+3. **SWD bring-up**: first validate the protocol library on hardware with the upstream
+   `zephyr,swdp-gpio` bitbang driver (openocd full flow passes), then implement the
+   `dp_pio` PIO driver to replace it and reach performance parity.
+4. **UART bridge + autobaud + LEDs + USB watchdog**.
+5. **Conformance comparison + three-board on-target acceptance**: conformance tool passes;
+   acceptance checklist completed item by item.
 
-## 风险与对策
+## Risks and Mitigations
 
-- **usbd-next vendor 类 + CDC 组合的描述符顺序控制**：以上游 dap sample 为底，
-  阶段 1 即用 USB 描述符 dump 与原版逐字段比对，提前暴露问题。
-- **PIO 驱动在 RP2350 上的差异**（GPIO coupling / OEN 极性）：原版已有
-  `probe_oen.pio` 解法，按板卡条件选择 PIO 程序。
-- **协议层重写引入行为偏差**：一致性对比工具是主要防线；对规范含糊处
-  以原版（ARM 参考实现）实测行为为准。
-- **Zephyr CDC-ACM 对非常用波特率/流控的支持限制**：阶段 4 实测，必要时
-  绕过 CDC-ACM UART 抽象直接用 usbd CDC 类回调。
+- **Descriptor ordering control with usbd-next vendor class + CDC combo**: start from the
+  upstream dap sample; in phase 1 dump the descriptors and compare field-by-field with
+  the original to surface problems early.
+- **PIO driver differences on RP2350** (GPIO coupling / OEN polarity): the original
+  already solved this with `probe_oen.pio`; select the PIO program per board.
+- **Behavioral drift from rewriting the protocol layer**: the conformance tool is the main
+  defense; where the spec is ambiguous, the original (ARM reference implementation)
+  observed behavior is authoritative.
+- **Zephyr CDC-ACM limitations for unusual baud rates / flow control**: measure in
+  phase 4; if needed, bypass the CDC-ACM UART abstraction and use the usbd CDC class
+  callbacks directly.
