@@ -60,7 +60,7 @@ private:
 	Config config_;
 
 	bool connected_ = false;
-	uint8_t idle_cycles_ = 0;
+	uint8_t idle_cycles_ = 0; /* set by TransferConfigure; consumed by the SwdDriver (PORT_SWD idle), not the engine */
 	uint16_t retry_count_ = 100;
 	uint16_t match_retry_ = 0;
 	uint32_t match_mask_ = 0;

@@ -243,3 +243,23 @@ TEST(transfer_truncated_request_no_crash)
 	}
 	/* must not have read past the buffer; count reflects completed ones */
 }
+
+TEST(transfer_dp_read_with_timestamp_bit)
+{
+	Fixture f;
+	f.drv.timestamp_value = 0x11223344;
+	f.drv.script.push_back({dap::Ack::Ok, 0xCAFEBABE});
+	/* count=1: DP read addr 0 with TIMESTAMP bit (RnW|Timestamp = 0x82).
+	 * DP read path (transfer.cpp:288-304): transfer_retry fills data, then
+	 * timestamp is stored BEFORE data (DAP.c:778-786 / :798-806). */
+	auto r = f.run({0x05, 0x00, 0x01,
+			static_cast<uint8_t>(dap::kReqRnW | dap::kReqTimestamp)});
+	/* response: cmd(0x05), count(1), response_value(kXferOk),
+	 * timestamp(4 LE) = 0x11223344, data(4 LE) = 0xCAFEBABE.
+	 * Timestamp precedes data per DAP.c:778-786. */
+	const uint8_t want[] = {0x05, 0x01, dap::kXferOk,
+				0x44, 0x33, 0x22, 0x11,
+				0xBE, 0xBA, 0xFE, 0xCA};
+	CHECK_BYTES(r, want);
+	CHECK_EQ(f.drv.transfers.size(), 1u); /* no RDBUFF; DP read is synchronous */
+}
