@@ -13,8 +13,7 @@ enum class Ack : uint8_t {
 	Wait = 0x02,
 	Fault = 0x04,
 	NoAck = 0x07,
-	/* Driver may OR kXferProtocolError into the engine's response value
-	 * by returning ProtocolError; data is then invalid. */
+	/* Sentinel for protocol errors: casts to 0x0F = protocol-error bit (0x08) | NoAck bits; the engine compares the cast value against kXfer* masks. */
 	ProtocolError = 0x08 | 0x07,
 };
 
