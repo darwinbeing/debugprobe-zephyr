@@ -85,18 +85,95 @@ DapEngine::Sizes DapEngine::cmd_swj_pins(std::span<const uint8_t> req,
 	return {6, 1};
 }
 
-/* --- Task 4 stubs (replaced in Task 4) --- */
+/* --- Task 4 implementations --- */
 
-#define DAP_STUB(name)                                                          \
-	DapEngine::Sizes DapEngine::name(std::span<const uint8_t> req,         \
-					 std::span<uint8_t> resp)               \
-	{                                                                       \
-		resp[0] = kDapError;                                            \
-		return {req.size(), 1};                                         \
+/* DAP_SWJ_Sequence (DAP.c:~500): request {bit_count(1), data(ceil(n/8))};
+ * count byte 0 means 256 bits. Response: {cmd, DAP_OK}.
+ */
+DapEngine::Sizes DapEngine::cmd_swj_sequence(std::span<const uint8_t> req,
+					     std::span<uint8_t> resp)
+{
+	if (req.empty()) {
+		resp[0] = kDapError;
+		return {0, 1};
 	}
-DAP_STUB(cmd_swj_sequence)
-DAP_STUB(cmd_swd_configure)
-DAP_STUB(cmd_swd_sequence)
-#undef DAP_STUB
+	size_t bits = req[0];
+	if (bits == 0) {
+		bits = 256;
+	}
+	const size_t nbytes = (bits + 7) / 8;
+	if (req.size() < 1 + nbytes) {
+		resp[0] = kDapError;
+		return {req.size(), 1};
+	}
+	driver_.swj_sequence(req.subspan(1, nbytes), bits);
+	resp[0] = kDapOk;
+	return {1 + nbytes, 1};
+}
+
+/* DAP_SWD_Configure (DAP.c:~560): config byte: turnaround = (bits0-1)+1 cycles,
+ * data_phase = bit2. Response: {cmd, DAP_OK}.
+ */
+DapEngine::Sizes DapEngine::cmd_swd_configure(std::span<const uint8_t> req,
+					      std::span<uint8_t> resp)
+{
+	if (req.empty()) {
+		resp[0] = kDapError;
+		return {0, 1};
+	}
+	const uint8_t cfg = req[0];
+	driver_.configure(static_cast<uint8_t>((cfg & 0x03U) + 1U),
+			  (cfg & 0x04U) != 0);
+	resp[0] = kDapOk;
+	return {1, 1};
+}
+
+/* DAP_SWD_Sequence (DAP.c:~575): request {seq_count(1), then per sequence:
+ * info(1) [+ output data]}; info: bits0-5 = cycle count (0 means 64), bit7 =
+ * input. Response: {cmd, DAP_OK, then input data for each input sequence}.
+ */
+DapEngine::Sizes DapEngine::cmd_swd_sequence(std::span<const uint8_t> req,
+					     std::span<uint8_t> resp)
+{
+	if (req.empty()) {
+		resp[0] = kDapError;
+		return {0, 1};
+	}
+	size_t seq_count = req[0];
+	size_t req_off = 1;
+	size_t resp_off = 1; /* resp[0] is the status byte */
+
+	while (seq_count--) {
+		if (req_off >= req.size()) {
+			resp[0] = kDapError;
+			return {req.size(), 1};
+		}
+		const uint8_t info = req[req_off++];
+		size_t cycles = info & 0x3FU;
+		if (cycles == 0) {
+			cycles = 64;
+		}
+		const size_t nbytes = (cycles + 7) / 8;
+		if ((info & 0x80U) != 0) {
+			/* input: capture from SWDIO into response buffer */
+			if (resp_off + nbytes > resp.size()) {
+				resp[0] = kDapError;
+				return {req.size(), 1};
+			}
+			driver_.swd_input(resp.subspan(resp_off, nbytes), cycles);
+			resp_off += nbytes;
+		} else {
+			/* output: drive SWDIO from request buffer */
+			if (req_off + nbytes > req.size()) {
+				resp[0] = kDapError;
+				return {req.size(), 1};
+			}
+			driver_.swd_output(req.subspan(req_off, nbytes), cycles);
+			req_off += nbytes;
+		}
+	}
+	resp[0] = kDapOk;
+	return {req_off, resp_off};
+}
 
 } // namespace dap
