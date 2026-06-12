@@ -21,6 +21,23 @@
 			bias-pull-up;
 		};
 	};
+
+	/* Target UART (uart1): TX=GP4, RX=GP5 -- the CDC-ACM bridge endpoint. */
+	uart1_default: uart1_default {
+		group1 {
+			pinmux = <UART1_TX_P4>, <UART1_RX_P5>;
+		};
+	};
+};
+
+/* Enable uart1 as the bridge's hardware side. The board defaults the console
+ * to uart0 (GP0/GP1), so uart1 is free to be the target UART.
+ */
+&uart1 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-names = "default";
 };
 
 /* Enable PIO0 so the misc PIO HAL (PIO_RPI_PICO) builds, which the dp_pio
@@ -31,6 +48,15 @@
 };
 
 / {
+	/* CDC-ACM (USB) <-> uart1 (target) bridge: Zephyr's zephyr,uart-bridge
+	 * driver wires cdc_acm_uart0 to the hardware uart1, copying bytes both
+	 * ways and propagating the host's line coding to uart1.
+	 */
+	uart_bridge0: uart-bridge0 {
+		compatible = "zephyr,uart-bridge";
+		peers = <&cdc_acm_uart0 &uart1>;
+	};
+
 	/* Two SWD backends share these pins (GP2=SWCLK, GP3=shared SWDIO,
 	 * GP1=nRESET). Exactly one is enabled at a time: the PIO node is the
 	 * default (CONFIG_PROBE_SWD_PIO=y); to use bitbang, flip both the
