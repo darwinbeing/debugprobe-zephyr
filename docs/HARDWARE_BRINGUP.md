@@ -261,24 +261,25 @@ cmsis_dap_swd_switch_seq(): DORMANT-to-SWD
 cmsis_dap_swd_read_process(): SWD ack not OK @ 0 JUNK   <-- garbage ACK, repeated
 ```
 
-**Root cause (resolved 2026-06-12 on the bring-up rig): a dirty target state, NOT
-the probe and NOT signal integrity.** While the target was running user code that
-reconfigured its SWD pads, the dormant→SWD multidrop wake-up returned a JUNK ack
-and a legacy connect read a garbage `DPIDR 0x10212927`. Speed sweeps
-(100/200/500/1000 kHz) and `connect_assert_srst` did not help, and the **official**
-`debugprobe_on_pico.uf2` v2.3.1 failed identically — confirming the probe firmware
-is not at fault. **The fix:** put the target into a clean state. With the target
-RP2040 held in **BOOTSEL** (bootrom owns the cores; nothing reconfigures the SWD
-pads), the multidrop DP connects on the first try, reads the genuine
-`DPIDR 0x0bc12477`, detects the Cortex-M0+, and the full acceptance (halt, step,
-mem R/W, flash erase/program/verify, reset run) passes.
+**Root cause (resolved + verified 2026-06-12): the target was not live/responsive
+on the SWD bus — NOT the probe, NOT BOOTSEL-specific, NOT signal integrity.** The
+probe attaches to a **running** target perfectly: verified by connecting while the
+target ran its own flash firmware (`DPIDR 0x0bc12477`, state `running`), then
+`halt` → `halted` → read memory → `resume` → `running`. The original JUNK ack
+(with the garbage `DPIDR 0x10212927` — a *misread*; the genuine RP2040 DPIDR is
+`0x0bc12477`) happened only while the target was unpowered or hung. Bringing the
+target to life fixes it; the user did so via BOOTSEL, but that was incidental —
+any reset/power-up works and a normally-running target connects too. Speed sweeps
+(100/200/500/1000 kHz) and `connect_assert_srst` did not help because the problem
+was simply that nothing was answering on the bus; the **official** firmware
+"failed" the same way for the same reason (no live target to talk to).
 
-Remedies, in order of effectiveness:
-1. **Put the target in a clean state** — power the target RP2040 with its BOOTSEL
-   held (bootrom owns the cores), or wire the probe's RUN/nRESET to the target's
-   RUN pin and use connect-under-reset. This resolved it here.
-2. **Use a single-drop SWD target** (STM32 / nRF / bare Cortex-M) — standard SWD,
-   no dormant-multidrop dance, immune to target-pad reconfiguration.
-3. **If the JUNK ack persists even from a clean target**, then suspect signal
-   integrity: shorten the SWCLK/SWDIO leads, add a solid common ground wire
+Remedies:
+1. **Make sure the target is powered and alive** — a not-powered or hung target
+   reads as JUNK on the bus. Power-cycle or reset it (BOOTSEL, the RUN pin, or its
+   own USB). Once live, it connects in any state (running included).
+2. **Use a single-drop SWD target** (STM32 / nRF / bare Cortex-M) if you want to
+   avoid the RP2040 multidrop sequence entirely.
+3. **Only if the JUNK ack persists from a known-live target** should you suspect
+   signal integrity: shorten the SWCLK/SWDIO leads, add a solid common ground wire
    alongside the signals, and ensure nothing else drives GP2 (SWCLK) / GP3 (SWDIO).
