@@ -56,18 +56,16 @@ dap::DapEngine g_engine{g_driver, g_host, g_config};
 
 size_t process(std::span<const uint8_t> request, std::span<uint8_t> response)
 {
-	/* DAP_TransferAbort (0x07) is an out-of-band signal in the original
-	 * transport: it is delivered on a separate path and never produces a
-	 * response. Phase 2 has a single-buffered transport, so handle it here
-	 * by setting the abort flag and emitting no response. The phase-4
-	 * double-buffered transport will route 0x07 properly before it reaches
-	 * the engine; this simplification is acceptable until then.
+	/* In this single-in-flight-OUT design — and in the original RP2040
+	 * debugprobe — abort-during-transfer is architecturally impossible: the
+	 * OUT endpoint is not re-armed until the current request finishes.  A
+	 * raw DAP_TransferAbort (0x07) therefore cannot arrive while a Transfer
+	 * is in progress; it falls to the engine's default branch and is
+	 * answered with DAP_Invalid (0xFF), exactly as the original firmware's
+	 * DAP_ProcessCommand does (DAP.c has no case ID_DAP_TransferAbort).
+	 * request_abort() remains available for the phase-4 async/double-buffered
+	 * transport, which can call it out-of-band on the abort endpoint.
 	 */
-	if (!request.empty() && request[0] == dap::kCmdTransferAbort) {
-		request_abort();
-		return 0;
-	}
-
 	return g_engine.process(request, response);
 }
 

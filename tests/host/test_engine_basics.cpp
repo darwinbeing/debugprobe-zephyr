@@ -281,3 +281,14 @@ TEST(batch_count_exceeding_payload_no_oob)
 	size_t n = f.engine.process(req, resp);
 	CHECK_EQ(n, 2u); /* echo + count, no sub-responses */
 }
+
+TEST(transfer_abort_packet_returns_invalid)
+{
+	/* A raw DAP_TransferAbort (0x07) is not a DAP_ProcessCommand case in the
+	 * reference (DAP.c default -> 0xFF); the engine matches that. The abort
+	 * mechanism is driven out-of-band via request_abort(), not this packet. */
+	Fixture f;
+	auto r = f.run({0x07});
+	const uint8_t want[] = {dap::kCmdInvalid};
+	CHECK_BYTES(r, want);
+}
