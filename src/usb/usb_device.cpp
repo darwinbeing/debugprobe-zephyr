@@ -3,6 +3,8 @@
 #include "usb/msosv2.hpp"
 
 #include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/uart/uart_bridge.h>
 #include <zephyr/usb/usbd.h>
 #include <zephyr/logging/log.h>
 
@@ -25,6 +27,21 @@ USBD_DESC_CONFIG_DEFINE(probe_fs_cfg_desc, "");
  * same as the original configuration descriptor.
  */
 USBD_CONFIGURATION_DEFINE(probe_fs_config, 0, 50, &probe_fs_cfg_desc);
+
+/* Propagate the host's CDC line coding / control line state onto the hardware
+ * UART so uart1 follows the host's baud/parity instead of being stuck at the
+ * DTS default. The uart-bridge driver applies the CDC port's settings to its
+ * hardware peer. Referenced by name in init(), so keep it at file scope.
+ */
+static void usb_msg_cb(struct usbd_context *const ctx, const struct usbd_msg *msg)
+{
+	ARG_UNUSED(ctx);
+	if (msg->type == USBD_MSG_CDC_ACM_LINE_CODING ||
+	    msg->type == USBD_MSG_CDC_ACM_CONTROL_LINE_STATE) {
+		uart_bridge_settings_update(msg->dev,
+					    DEVICE_DT_GET(DT_NODELABEL(uart_bridge0)));
+	}
+}
 
 namespace probe::usb {
 
@@ -114,6 +131,12 @@ int init()
 	}
 
 	err = check(usbd_init(&probe_usbd), "usbd_init");
+	if (err) {
+		return err;
+	}
+
+	err = check(usbd_msg_register_cb(&probe_usbd, usb_msg_cb),
+		    "register usbd msg cb");
 	if (err) {
 		return err;
 	}

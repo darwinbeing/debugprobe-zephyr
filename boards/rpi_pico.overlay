@@ -24,8 +24,12 @@
 
 	/* Target UART (uart1): TX=GP4, RX=GP5 -- the CDC-ACM bridge endpoint. */
 	uart1_default: uart1_default {
-		group1 {
-			pinmux = <UART1_TX_P4>, <UART1_RX_P5>;
+		tx_group {
+			pinmux = <UART1_TX_P4>;
+		};
+		rx_group {
+			pinmux = <UART1_RX_P5>;
+			input-enable;
 		};
 	};
 };

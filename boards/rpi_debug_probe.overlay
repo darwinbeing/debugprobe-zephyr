@@ -31,8 +31,12 @@
 	 * defines uart1_default).
 	 */
 	uart0_default: uart0_default {
-		group1 {
-			pinmux = <UART0_TX_P0>, <UART0_RX_P1>;
+		tx_group {
+			pinmux = <UART0_TX_P0>;
+		};
+		rx_group {
+			pinmux = <UART0_RX_P1>;
+			input-enable;
 		};
 	};
 };
