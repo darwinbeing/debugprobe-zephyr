@@ -1,6 +1,6 @@
-/* lib/dap/src/swj.cpp — Connect/Disconnect/ResetTarget/SWJ_Clock/SWJ_Pins
- * implemented in Task 3; SWJ_Sequence/SWD_Configure/SWD_Sequence stubbed
- * here and replaced in Task 4.
+/* lib/dap/src/swj.cpp — SWJ/SWD port-level command handlers.
+ * Connect/Disconnect/ResetTarget/SWJ_Clock/SWJ_Pins (Task 3) and
+ * SWJ_Sequence/SWD_Configure/SWD_Sequence (Task 4) are all implemented here.
  */
 #include "dap/constants.hpp"
 #include "dap/engine.hpp"
@@ -87,7 +87,7 @@ DapEngine::Sizes DapEngine::cmd_swj_pins(std::span<const uint8_t> req,
 
 /* --- Task 4 implementations --- */
 
-/* DAP_SWJ_Sequence (DAP.c:~500): request {bit_count(1), data(ceil(n/8))};
+/* DAP_SWJ_Sequence (DAP.c:412): request {bit_count(1), data(ceil(n/8))};
  * count byte 0 means 256 bits. Response: {cmd, DAP_OK}.
  */
 DapEngine::Sizes DapEngine::cmd_swj_sequence(std::span<const uint8_t> req,
@@ -111,7 +111,7 @@ DapEngine::Sizes DapEngine::cmd_swj_sequence(std::span<const uint8_t> req,
 	return {1 + nbytes, 1};
 }
 
-/* DAP_SWD_Configure (DAP.c:~560): config byte: turnaround = (bits0-1)+1 cycles,
+/* DAP_SWD_Configure (DAP.c:438): config byte: turnaround = (bits0-1)+1 cycles,
  * data_phase = bit2. Response: {cmd, DAP_OK}.
  */
 DapEngine::Sizes DapEngine::cmd_swd_configure(std::span<const uint8_t> req,
@@ -128,7 +128,7 @@ DapEngine::Sizes DapEngine::cmd_swd_configure(std::span<const uint8_t> req,
 	return {1, 1};
 }
 
-/* DAP_SWD_Sequence (DAP.c:~575): request {seq_count(1), then per sequence:
+/* DAP_SWD_Sequence (DAP.c:460): request {seq_count(1), then per sequence:
  * info(1) [+ output data]}; info: bits0-5 = cycle count (0 means 64), bit7 =
  * input. Response: {cmd, DAP_OK, then input data for each input sequence}.
  */

@@ -13,5 +13,6 @@ add_executable(dap_tests
   test_engine_basics.cpp
   test_connect_swj.cpp
   test_sequences.cpp
+  test_transfer.cpp
 )
 target_link_libraries(dap_tests PRIVATE dap)
