@@ -707,6 +707,8 @@ git commit -m "feat: dap library public interfaces, mock driver, host compile te
 
 ### Task 2: Engine dispatch + Info / HostStatus / Delay / unknown / vendor / ExecuteCommands
 
+> **Amended during execution:** response-capacity enforcement in process()/dispatch()/cmd_info (OOB findings), ASan mode in run_host_tests.sh.
+
 **Files:**
 - Create: `lib/dap/src/engine.cpp` (replace the Task-1 placeholder)
 - Create: `tests/host/test_engine_basics.cpp`

@@ -71,7 +71,9 @@ TEST(info_packet_size_and_count)
 	const uint8_t want_size[] = {0x00, 2, 64, 0};
 	CHECK_BYTES(rs, want_size);
 	auto rc = f.run({0x00, dap::kInfoPacketCount});
-	const uint8_t want_cnt[] = {0x00, 1, 6}; /* original's count-2 quirk */
+	/* count=6: the original debugprobe bakes DAP_PACKET_COUNT(8) - 2 into
+	 * Config::packet_count default (interfaces.hpp); the engine reports it as-is. */
+	const uint8_t want_cnt[] = {0x00, 1, 6};
 	CHECK_BYTES(rc, want_cnt);
 }
 
@@ -227,4 +229,55 @@ TEST(execute_commands_jtag_idcode_mid_batch_stays_in_sync)
 	const uint8_t want[] = {0x7F, 0x02, 0x16, dap::kDapError, 0x09, dap::kDapOk};
 	CHECK_BYTES(r, want);
 	CHECK_EQ(f.drv.delays_us, 7u);
+}
+
+TEST(batch_overflowing_response_stops_cleanly)
+{
+	Fixture f;
+	/* 21 Info(Capabilities) sub-commands into a 64-byte response.
+	 * Layout with capacity checks in place:
+	 *   Header: 2 bytes (0x7F, 21); resp_off starts at 2.
+	 *   Iterations 1-20: each sub-response is {0x00, 1, 0x31} = 3 bytes;
+	 *     after 20 iterations resp_off = 2 + 60 = 62, remaining = 2.
+	 *   Iteration 21: process loop guard (remaining < 2) is 2 < 2 = false,
+	 *     so dispatch runs with span of 2 bytes; body_resp has 1 byte;
+	 *     cmd_info capacity check (1+1 > 1) → empty info; sub-response
+	 *     = {0x00, 0} = 2 bytes; resp_off = 64.
+	 *   Expected n = 64. All 21 sub-responses are well-formed.
+	 */
+	std::vector<uint8_t> req = {0x7F, 21};
+	for (int i = 0; i < 21; ++i) {
+		req.push_back(0x00);
+		req.push_back(dap::kInfoCapabilities);
+	}
+	uint8_t resp[64];
+	size_t n = f.engine.process({req.data(), req.size()}, resp);
+	CHECK(n <= sizeof(resp));
+	CHECK_EQ(resp[0], 0x7F);
+	CHECK_EQ(n, 64u);
+}
+
+TEST(small_response_span_is_respected)
+{
+	Fixture f;
+	/* Info(TimestampClock) normally writes 6 bytes {0x00, 4, b0, b1, b2, b3};
+	 * into a 2-byte response span the payload doesn't fit → empty info. */
+	uint8_t resp[2];
+	const uint8_t req[] = {0x00, dap::kInfoTimestampClock};
+	size_t n = f.engine.process(req, resp);
+	CHECK(n <= 2);
+	CHECK_EQ(resp[0], 0x00);
+	CHECK_EQ(resp[1], 0); /* payload doesn't fit -> empty info */
+}
+
+TEST(batch_count_exceeding_payload_no_oob)
+{
+	Fixture f;
+	/* 7F 01: count=1 but zero sub-command bytes follow.
+	 * The top-of-loop guard must detect the empty span before dispatch
+	 * reads req[0]. Expected: header only, n=2. */
+	uint8_t resp[64];
+	const uint8_t req[] = {0x7F, 0x01}; /* count=1, no sub-command bytes */
+	size_t n = f.engine.process(req, resp);
+	CHECK_EQ(n, 2u); /* echo + count, no sub-responses */
 }

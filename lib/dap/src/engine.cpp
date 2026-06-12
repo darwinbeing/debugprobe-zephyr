@@ -14,7 +14,8 @@ size_t string_info(const char *s, uint8_t *out, size_t cap)
 		return 0;
 	}
 	size_t len = std::strlen(s) + 1; /* include NUL, like the reference */
-	if (len > 255 || len + 2 > cap) {
+	/* Layout: resp[0]=len byte, resp[1..len]=payload; need 1 + len <= cap. */
+	if (len > 255 || len + 1 > cap) {
 		return 0;
 	}
 	std::memcpy(out, s, len);
@@ -67,13 +68,16 @@ size_t DapEngine::process(std::span<const uint8_t> request, std::span<uint8_t> r
 		response[1] = static_cast<uint8_t>(cnt);
 		size_t req_off = 2, resp_off = 2;
 		while (cnt--) {
+			/* Stop cleanly if the request is exhausted or the response
+			 * buffer has no room for at least a 2-byte sub-response. */
+			if (req_off >= request.size() ||
+			    response.size() - resp_off < 2) {
+				break;
+			}
 			Sizes s = dispatch(request.subspan(req_off),
 					   response.subspan(resp_off));
 			req_off += s.consumed;
 			resp_off += s.written;
-			if (req_off >= request.size() && cnt) {
-				break; /* malformed batch: stop, report what ran */
-			}
 		}
 		return resp_off;
 	}
@@ -83,6 +87,17 @@ size_t DapEngine::process(std::span<const uint8_t> request, std::span<uint8_t> r
 
 DapEngine::Sizes DapEngine::dispatch(std::span<const uint8_t> req, std::span<uint8_t> resp)
 {
+	/* Every handler may assume at least 1 writable byte; anything more must
+	 * be capacity-checked inside the handler.  Guard here so callers are safe
+	 * even with malformed input. */
+	if (req.empty() || resp.size() < 2) {
+		if (!resp.empty()) {
+			resp[0] = kCmdInvalid;
+			return {req.size(), 1};
+		}
+		return {req.size(), 0};
+	}
+
 	const uint8_t cmd = req[0];
 
 	if (cmd >= kCmdVendorFirst && cmd <= kCmdVendorLast) {
@@ -165,6 +180,10 @@ DapEngine::Sizes DapEngine::dispatch(std::span<const uint8_t> req, std::span<uin
 
 DapEngine::Sizes DapEngine::cmd_info(std::span<const uint8_t> req, std::span<uint8_t> resp)
 {
+	/* resp[0] = len byte; payload starts at resp[1].
+	 * cap = resp.size(); to write N payload bytes need 1 + N <= cap.
+	 * If capacity is insufficient for a given info type, fall through to
+	 * len=0 (empty info), which is well-formed. */
 	uint8_t *payload = resp.data() + 1;
 	size_t cap = resp.size();
 	size_t len = 0;
@@ -190,12 +209,14 @@ DapEngine::Sizes DapEngine::cmd_info(std::span<const uint8_t> req, std::span<uin
 		len = string_info(config_.fw_version, payload, cap);
 		break;
 	case kInfoCapabilities:
-		payload[0] = 0x01 /* SWD */ | 0x10 /* atomic */ |
-			     (config_.timestamp_clock ? 0x20 : 0x00);
-		len = 1;
+		if (cap >= 1 + 1) { /* 1 payload byte */
+			payload[0] = 0x01 /* SWD */ | 0x10 /* atomic */ |
+				     (config_.timestamp_clock ? 0x20 : 0x00);
+			len = 1;
+		}
 		break;
 	case kInfoTimestampClock:
-		if (config_.timestamp_clock != 0) {
+		if (config_.timestamp_clock != 0 && cap >= 1 + 4) { /* 4 payload bytes */
 			payload[0] = static_cast<uint8_t>(config_.timestamp_clock);
 			payload[1] = static_cast<uint8_t>(config_.timestamp_clock >> 8);
 			payload[2] = static_cast<uint8_t>(config_.timestamp_clock >> 16);
@@ -204,13 +225,17 @@ DapEngine::Sizes DapEngine::cmd_info(std::span<const uint8_t> req, std::span<uin
 		}
 		break;
 	case kInfoPacketSize:
-		payload[0] = static_cast<uint8_t>(config_.packet_size);
-		payload[1] = static_cast<uint8_t>(config_.packet_size >> 8);
-		len = 2;
+		if (cap >= 1 + 2) { /* 2 payload bytes */
+			payload[0] = static_cast<uint8_t>(config_.packet_size);
+			payload[1] = static_cast<uint8_t>(config_.packet_size >> 8);
+			len = 2;
+		}
 		break;
 	case kInfoPacketCount:
-		payload[0] = config_.packet_count;
-		len = 1;
+		if (cap >= 1 + 1) { /* 1 payload byte */
+			payload[0] = config_.packet_count;
+			len = 1;
+		}
 		break;
 	default: /* device vendor/name, SWO buffer, unknown: empty */
 		break;
