@@ -10,5 +10,6 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/dap dap)
 add_executable(dap_tests
   test_smoke.cpp
   test_interfaces.cpp
+  test_engine_basics.cpp
 )
 target_link_libraries(dap_tests PRIVATE dap)
