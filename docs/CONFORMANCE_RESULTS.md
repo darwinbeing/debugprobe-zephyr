@@ -62,7 +62,7 @@ Hold BOOTSEL again and copy `build/rpi_pico/zephyr/zephyr.uf2` back.
 
 **Board:** rpi_pico, USB 2e8a:000c, USB serial E661A4D41777B429.
 **Firmware under test:** Zephyr rewrite (phase 5), endpoints OUT=0x01/IN=0x81.
-**Reference:** official debugprobe v2.3.1 (endpoints OUT=0x04/IN=0x85).
+**Reference:** official debugprobe v2.3.1 — **source-derived, not a live capture** (the live A/B re-flash is pending; see [Pending empirical confirmation](#pending-empirical-confirmation) below). For context, the official firmware enumerates with endpoints OUT=0x04/IN=0x85.
 
 **Headline: 27 byte-identical / 3 whitelisted / 1 environment-dependent / 0 unexpected mismatches.**
 

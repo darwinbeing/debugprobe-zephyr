@@ -89,7 +89,7 @@ mechanism, source-derived reference capture.
 |---|---|
 | Host tests | 76/76 pass |
 | 3-board build | All boards pass |
-| On-target hardware | **Verified (our firmware)** — live capture succeeded (`captured 31 responses`); macOS interface-claim fix validated end-to-end.  See [CONFORMANCE_RESULTS.md](CONFORMANCE_RESULTS.md) for the full table. |
+| On-target hardware | **Verified (our firmware)** — live capture succeeded (`captured 31 responses`); macOS interface-claim fix validated end-to-end. Cross-checked vs the v2.3.1 source: **27 byte-identical / 3 whitelisted (DAP_Info strings) / 1 environment-dependent / 0 unexpected mismatches** (`compare` → PASS). Live official-firmware A/B re-flash still pending. See [CONFORMANCE_RESULTS.md](CONFORMANCE_RESULTS.md) for the full table. |
 
 ### Phase 5 hardware acceptance table (fill in per board × backend)
 
