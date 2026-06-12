@@ -6,4 +6,21 @@ config PROBE_PRODUCT_STRING
 	default "Debugprobe on Pico (CMSIS-DAP)" if BOARD_RPI_PICO || BOARD_RPI_PICO2
 	default "Debugprobe (CMSIS-DAP)"
 
+choice PROBE_SWD_BACKEND
+	prompt "SWD driver backend"
+	default PROBE_SWD_BITBANG
+	help
+	  Which SWD port driver backs the DAP engine.
+
+config PROBE_SWD_NULL
+	bool "Null (no SWD; bring-up only)"
+
+config PROBE_SWD_BITBANG
+	bool "Zephyr GPIO bitbang (zephyr,swdp-gpio)"
+
+config PROBE_SWD_PIO
+	bool "PIO-accelerated (raspberrypi,swdp-pio)"
+
+endchoice
+
 source "Kconfig.zephyr"

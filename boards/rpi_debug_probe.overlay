@@ -3,3 +3,12 @@
 		compatible = "zephyr,cdc-acm-uart";
 	};
 };
+
+/ {
+	swd_dev: swd_dev {
+		compatible = "zephyr,swdp-gpio";
+		clk-gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
+		dio-gpios = <&gpio0 14 (GPIO_PULL_UP | GPIO_ACTIVE_HIGH)>;
+		port-write-cycles = <2>;
+	};
+};
