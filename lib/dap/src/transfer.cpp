@@ -1,7 +1,8 @@
 /* lib/dap/src/transfer.cpp — Transfer-family command handlers.
  * transfer_retry and cmd_write_abort (Task 3), TransferConfigure and Transfer
- * (Task 5, faithful port of DAP_SWD_Transfer, DAP.c:657-940) are implemented
- * here; TransferBlock remains stubbed and is replaced in Task 6.
+ * (Task 5, faithful port of DAP_SWD_Transfer, DAP.c:657-940), and TransferBlock
+ * (Task 6, faithful port of DAP_SWD_TransferBlock, DAP.c:1267-1460) are all
+ * implemented here.
  */
 #include "dap/constants.hpp"
 #include "dap/engine.hpp"

@@ -1,5 +1,7 @@
 #include "usb/dap_class.hpp"
 
+#include "dap/dap_backend.hpp"
+
 #include <zephyr/kernel.h>
 #include <zephyr/usb/usbd.h>
 /* udc_get_buf_info() lives in udc.h (not udc_buf.h which does not exist in 4.4) */
@@ -8,6 +10,7 @@
 #include <zephyr/logging/log.h>
 
 #include <cstring>
+#include <span>
 
 LOG_MODULE_REGISTER(dap_usb, LOG_LEVEL_INF);
 
@@ -30,11 +33,13 @@ struct DapData {
 
 } // namespace
 
-/* Count 2 is load-bearing: during reconfiguration the cancelled OUT buffer's
- * completion event can still hold one buffer while enable() arms a fresh one.
- * Phase 2 (IN responses from this pool) will need >= 3.
+/* Count 3 is load-bearing: during reconfiguration the cancelled OUT buffer's
+ * completion event can still hold one buffer while enable() arms a fresh one;
+ * phase 2 adds an IN response buffer drawn from this same pool while the OUT
+ * buffer is still in flight, so the pool must hold OUT + IN + the cancelled
+ * straggler concurrently.
  */
-UDC_BUF_POOL_DEFINE(dap_buf_pool, 2, kPacketSize,
+UDC_BUF_POOL_DEFINE(dap_buf_pool, 3, kPacketSize,
 		    sizeof(struct udc_buf_info), nullptr);
 
 USBD_DESC_STRING_DEFINE(dap_if_str_desc, "CMSIS-DAP v2 Interface",
@@ -94,6 +99,13 @@ static uint8_t dap_bulk_out_ep(struct usbd_class_data *const c_data)
 	return data->desc->if0_out_ep.bEndpointAddress;
 }
 
+static uint8_t dap_bulk_in_ep(struct usbd_class_data *const c_data)
+{
+	auto *data = static_cast<DapData *>(usbd_class_get_private(c_data));
+
+	return data->desc->if0_in_ep.bEndpointAddress;
+}
+
 static struct net_buf *dap_buf_alloc(const uint8_t ep)
 {
 	struct net_buf *buf = net_buf_alloc(&dap_buf_pool, K_NO_WAIT);
@@ -138,13 +150,42 @@ static int dap_request_handler(struct usbd_class_data *const c_data,
 	const bool is_out = (bi->ep == dap_bulk_out_ep(c_data));
 
 	if (err == 0 && is_out) {
-		/* Phase 1 stub: log only, no processing.
-		 * Phase 2 plugs the DapEngine in here.
+		/* Copy the request out of the OUT buffer before we free it, run
+		 * the DAP engine, and ship the response on the IN endpoint.
 		 */
-		/* INF so the phase-1 stub is observable at the default log level;
-		 * phase 2 replaces this with the DAP protocol engine.
+		uint8_t request[kPacketSize];
+		uint8_t response[kPacketSize];
+		const size_t req_len = MIN(buf->len, sizeof(request));
+
+		std::memcpy(request, buf->data, req_len);
+
+		const size_t resp_len = probe::dap_backend::process(
+			std::span<const uint8_t>(request, req_len),
+			std::span<uint8_t>(response, sizeof(response)));
+
+		/* resp_len == 0 means "no response" (e.g. DAP_TransferAbort,
+		 * handled out-of-band): skip the IN transfer entirely.
 		 */
-		LOG_HEXDUMP_INF(buf->data, buf->len, "DAP OUT (stub)");
+		if (resp_len != 0) {
+			struct net_buf *in_buf =
+				dap_buf_alloc(dap_bulk_in_ep(c_data));
+
+			if (in_buf == nullptr) {
+				/* Pool exhausted: drop the response rather than
+				 * escalate; the host will time out and retry.
+				 */
+				LOG_ERR("IN buffer alloc failed");
+			} else {
+				net_buf_add_mem(in_buf, response,
+						MIN(resp_len,
+						    net_buf_tailroom(in_buf)));
+
+				if (usbd_ep_enqueue(c_data, in_buf)) {
+					LOG_ERR("IN enqueue failed");
+					usbd_ep_buf_free(ctx, in_buf);
+				}
+			}
+		}
 	}
 
 	usbd_ep_buf_free(ctx, buf);
