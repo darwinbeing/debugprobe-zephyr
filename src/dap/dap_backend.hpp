@@ -1,9 +1,10 @@
 #pragma once
 /* Firmware-side ownership of the CMSIS-DAP protocol engine.
  *
- * Owns the singleton dap::DapEngine wired to a NullSwdDriver (phase 2 has no
- * real SWD hardware yet) and a NullHostStatus (no LEDs yet). The USB DAP class
- * request handler forwards OUT packets here and ships the returned response.
+ * Owns the singleton dap::DapEngine wired to a NullSwdDriver and a
+ * probe::LedHostStatus that drives real LEDs (src/leds.cpp). The USB DAP
+ * class request handler forwards OUT packets here and ships the returned
+ * response.
  */
 #include <cstddef>
 #include <cstdint>
