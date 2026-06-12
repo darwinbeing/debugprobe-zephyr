@@ -1,4 +1,5 @@
 #include "uart_bridge.hpp"
+#include "leds.hpp"
 
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/ring_buffer.h>
@@ -86,7 +87,13 @@ void handle_rx(const struct device *dev)
 		return;
 	}
 
-	/* TODO(Task 2): rx/tx activity LED blink here (data read FROM `dev`). */
+	/* Activity LEDs: data read FROM the CDC (host→target) = TX; data read
+	 * FROM uart1 (target→host) = RX. Mirrors original cdc_uart.c blink. */
+	if (dev == cdc_dev) {
+		probe::leds_uart_tx_activity();
+	} else {
+		probe::leds_uart_rx_activity();
+	}
 
 	uart_irq_tx_enable(self.peer);
 }

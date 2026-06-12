@@ -111,5 +111,7 @@
 		dap-connected-led = &green_led_dbug;
 		dap-running-led = &yellow_led_dbug;
 		usb-connected-led = &red_led;
+		uart-tx-led = &yellow_led_uart;
+		uart-rx-led = &green_led_uart;
 	};
 };
