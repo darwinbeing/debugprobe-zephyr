@@ -182,28 +182,38 @@ USB (usbd-next):
 - **DAP v2 interface**: custom vendor class (bulk in/out) with MS OS 2.0 descriptors
   (automatic WinUSB binding) and BOS. Interface name contains "CMSIS-DAP" (host tools
   match on this).
-- **CDC-ACM ↔ uart1 bridge**: our own C++ `UartBridge` class — line coding
-  (baud/data bits/parity) forwarded to the physical UART, DTR/RTS pass-through, hardware
-  flow control (Debug Probe board), ring buffers, TX/RX LED activity.
+- **CDC-ACM ↔ uart1 bridge** (as built, phase 4 core): Zephyr's `zephyr,uart-bridge`
+  devicetree driver (`drivers/serial/uart_bridge.c`, `CONFIG_UART_BRIDGE=y`) — a
+  devicetree node `uart-bridge0` with `peers = <&cdc_acm_uart0 &uart1>`. The driver
+  copies bytes both ways via interrupt-driven UART and propagates CDC line-coding
+  (baud/parity/data bits) to the hardware UART via `uart_configure()`. No hand-written
+  `UartBridge` C++ class is needed. **Autobaud and TX/RX UART-activity LEDs are deferred
+  to phase 4b** (autobaud requires a PIO frequency-counter + DMA histogram; activity LEDs
+  require tapping the closed `uart_bridge` data path — both are separable efforts).
 - VID/PID fixed at `0x2E8A`/`0x000C` (same for all three boards; only the product string
   differs, as in the original), strings and serial number (flash unique ID via `hwinfo`)
   identical to the original so existing openocd / probe-rs / pyocd configs work unchanged.
 
-Application modules:
+Application modules (as built):
 
 - `DapThread`: bulk-out packet in → `DapEngine::process` → bulk-in response out;
   double-buffered pipelining (the request/response queue semantics of the original
   `tusb_edpt_handler.c`).
-- `UartBridge`: as above.
-- `Autobaud`: engaged only when the host has not explicitly set a baud rate; measures the
-  target TX shortest pulse width via the frequency-counter driver and snaps to a table of
-  common baud rates (same algorithm as the original `autobaud.c`).
+- **Status LEDs** (`src/leds.cpp`): `probe::LedHostStatus` implements `dap::HostStatus`;
+  GPIO pins are resolved via devicetree aliases (`dap-connected-led`, `dap-running-led`,
+  `usb-connected-led`). Any alias absent on a board is a no-op (uses
+  `GPIO_DT_SPEC_GET_OR`). Replaces `NullHostStatus` in `dap_backend.cpp`. USB-connected
+  LED is lit from the `usbd_msg` callback on `USBD_MSG_CONFIGURATION`. TX/RX
+  UART-activity LEDs are deferred to phase 4b.
+- **CMSIS-DAP serial** (`src/dap/dap_backend.cpp`): `DAP_Info(SerialNumber)` returns the
+  flash unique ID formatted as uppercase hex via `hwinfo_get_device_id()` — the same
+  source as `USBD_DESC_SERIAL_NUMBER_DEFINE`, so the DAP serial matches the USB serial
+  descriptor. Built once at startup by `build_serial()` / `make_config()`.
 - `UsbWatchdog` (RP2040 only, conditional compile): samples the SOF counter periodically;
   three identical readings ⇒ USB controller stuck ⇒ disconnect/reconnect USB
   (usbd disable/enable). RP2040 errata workaround.
-- Threads: `dap`, `bridge`, `autobaud` Zephyr threads + system workqueue; priority
-  relations follow the original (UART bridge > USB > DAP). Threads suspend/resume on USB
-  suspend/resume.
+- Threads: `dap` Zephyr thread + system workqueue; the bridge runs in the Zephyr
+  `uart_bridge` driver's interrupt context (no separate bridge thread needed).
 
 ### Board differences (devicetree overlays)
 
