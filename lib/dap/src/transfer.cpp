@@ -398,13 +398,181 @@ DapEngine::Sizes DapEngine::cmd_transfer(std::span<const uint8_t> req,
 	return {ri, wi};
 }
 
-/* --- Task 6 stub (replaced later) --- */
+/* --- Task 6 implementation --- */
 
+/* Request-consumed length for a TransferBlock, computed from the HEADER alone
+ * (DAP_TransferBlock wrapper, DAP.c:1501-1507), independent of how many
+ * transfers completed or of connect state:
+ *   body[0]=DAP index, body[1..2]=count (LE 16-bit), body[3]=request value.
+ *   read block  (request_value has RnW): consumed = 4 (index + count(2) + value)
+ *   write block (RnW clear):             consumed = 4 + count*4
+ * Clamped to req.size() so a truncated request never reports more than present.
+ * Using a cursor-based consumed here would desync an ExecuteCommands batch when
+ * a write block faults mid-way; the header computation keeps framing intact. */
+static size_t transfer_block_consumed_len(std::span<const uint8_t> req)
+{
+	const size_t req_size = req.size();
+	const uint32_t count = (req_size > 1 ? static_cast<uint32_t>(req[1]) : 0) |
+			       (req_size > 2 ? static_cast<uint32_t>(req[2]) << 8 : 0);
+	const uint8_t request_value = req_size > 3 ? req[3] : 0;
+	size_t consumed;
+	if ((request_value & kReqRnW) != 0U) {
+		consumed = 4; /* read block carries no per-transfer data */
+	} else {
+		consumed = 4 + static_cast<size_t>(count) * 4;
+	}
+	return consumed > req_size ? req_size : consumed;
+}
+
+/* DAP_TransferBlock (faithful port of DAP_SWD_TransferBlock, DAP.c:1267-1357,
+ * plus the wrapper's header-computed consumed length, DAP.c:1479-1510).
+ *
+ * Request body (after the command byte, stripped by the dispatcher):
+ *   {dap_index(1), count(2 LE), request_value(1), [write data words...]}.
+ * Response body (cmd byte added by the dispatcher):
+ *   {count(2 LE), response_value(1), data words...}.
+ *
+ * The consumed request length is ALWAYS the header computation above (clamped),
+ * even when the block faults early or the port is disconnected. */
 DapEngine::Sizes DapEngine::cmd_transfer_block(std::span<const uint8_t> req,
 					       std::span<uint8_t> resp)
 {
-	resp[0] = kDapError;
-	return {req.size(), 1};
+	/* Mirror DAP_TransferAbort = 0U (DAP.c:1281): a latched abort must not
+	 * poison this command. */
+	abort_.store(false, std::memory_order_relaxed);
+
+	/* The consumed request length is header-computed and clamped, the same
+	 * for every exit path (disconnected, early fault, full completion). */
+	const size_t consumed = transfer_block_consumed_len(req);
+
+	/* Disconnected -> DAP_Dummy_TransferBlock parity (DAP.c default path):
+	 * response {count=0(2 bytes), value=0}, consumed still header-computed. */
+	if (!connected_) {
+		size_t written = 0;
+		if (resp.size() >= 1) {
+			resp[0] = 0;
+			written = 1;
+		}
+		if (resp.size() >= 2) {
+			resp[1] = 0;
+			written = 2;
+		}
+		if (resp.size() >= 3) {
+			resp[2] = 0;
+			written = 3;
+		}
+		return {consumed, written};
+	}
+
+	/* Header needs body >= 3 (count(2) + value(1)). The dispatcher only
+	 * guarantees >= 1 writable byte, so write what fits and return safely. */
+	if (resp.size() < 3) {
+		for (size_t i = 0; i < resp.size(); ++i) {
+			resp[i] = 0;
+		}
+		return {consumed, resp.size()};
+	}
+
+	const size_t req_size = req.size();
+	size_t ri = 0;            /* request cursor (into req) */
+	size_t wi = 3;            /* response cursor; [0..1]=count, [2]=value */
+	uint16_t response_count = 0;
+	uint8_t response_value = 0;
+
+	/* req[0] = DAP index (ignored); req[1..2] = transfer count (LE). */
+	if (ri < req_size) {
+		ri++; /* skip DAP index */
+	}
+	uint32_t request_count = (ri < req_size ? req[ri] : 0) |
+				 (ri + 1 < req_size ? static_cast<uint32_t>(req[ri + 1]) << 8 : 0);
+	ri += 2;
+	if (ri > req_size) {
+		ri = req_size;
+	}
+
+	if (request_count == 0U) {
+		resp[0] = 0;
+		resp[1] = 0;
+		resp[2] = 0;
+		return {consumed, 3};
+	}
+
+	uint32_t request_value = ri < req_size ? req[ri] : 0;
+	ri++;
+	if (ri > req_size) {
+		ri = req_size;
+	}
+
+	uint32_t data = 0;
+
+	/* Store a 32-bit LE word at the response cursor if it fits; otherwise
+	 * signal the caller to stop (treated like an abort). */
+	auto store_word = [&](uint32_t value) -> bool {
+		if (resp.size() - wi < 4) {
+			return false;
+		}
+		resp[wi++] = static_cast<uint8_t>(value);
+		resp[wi++] = static_cast<uint8_t>(value >> 8);
+		resp[wi++] = static_cast<uint8_t>(value >> 16);
+		resp[wi++] = static_cast<uint8_t>(value >> 24);
+		return true;
+	};
+
+	if ((request_value & kReqRnW) != 0U) {
+		/* Read register block */
+		if ((request_value & kReqApNdp) != 0U) {
+			/* Post AP read. */
+			response_value = transfer_retry(request_value, nullptr);
+			if (response_value != kXferOk) {
+				goto end;
+			}
+		}
+		while (request_count--) {
+			/* Read DP/AP register */
+			if (request_count == 0U &&
+			    (request_value & kReqApNdp) != 0U) {
+				/* Last AP read: flush via RDBUFF. */
+				request_value = kReqReadRdbuff;
+			}
+			response_value = transfer_retry(request_value, &data);
+			if (response_value != kXferOk) {
+				goto end;
+			}
+			/* Store data. */
+			if (!store_word(data)) {
+				goto end; /* response full: stop like abort */
+			}
+			response_count++;
+		}
+	} else {
+		/* Write register block */
+		while (request_count--) {
+			/* Load data: consume 4 bytes (request-bounds check). */
+			if (req_size - ri < 4) {
+				goto end; /* request underflow: stop like abort */
+			}
+			data = static_cast<uint32_t>(req[ri + 0]) |
+			       (static_cast<uint32_t>(req[ri + 1]) << 8) |
+			       (static_cast<uint32_t>(req[ri + 2]) << 16) |
+			       (static_cast<uint32_t>(req[ri + 3]) << 24);
+			ri += 4;
+			/* Write DP/AP register */
+			response_value = transfer_retry(request_value, &data);
+			if (response_value != kXferOk) {
+				goto end;
+			}
+			response_count++;
+		}
+		/* Check last write (DAP.c:1344-1348): unconditional trailing
+		 * RDBUFF read with NULL data; stores no data, updates value. */
+		response_value = transfer_retry(kReqReadRdbuff, nullptr);
+	}
+
+end:
+	resp[0] = static_cast<uint8_t>(response_count);
+	resp[1] = static_cast<uint8_t>(response_count >> 8);
+	resp[2] = response_value;
+	return {consumed, wi};
 }
 
 } // namespace dap

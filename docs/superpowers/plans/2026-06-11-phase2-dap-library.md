@@ -2137,7 +2137,14 @@ TEST(transfer_abort_mid_batch_stops)
 
 - [ ] **Step 2: Run — new tests FAIL.**
 
-- [ ] **Step 3: Implement `cmd_transfer_block`** as a faithful port of `DAP_SWD_TransferBlock` (`DAP.c:1267-1460`), with the same bounds rules as Task 5. Disconnected → `{count=0(2 bytes), value=0}` consuming the whole request. Also confirm `cmd_transfer` clears `abort_` at entry (`abort_.store(false)`) — Task 6's first abort test depends on it; `cmd_transfer_block` does the same.
+- [ ] **Step 3: Implement `cmd_transfer_block`** as a faithful port of `DAP_SWD_TransferBlock` (`DAP.c:1267-1460`), with the same bounds rules as Task 5. Also confirm `cmd_transfer` clears `abort_` at entry (`abort_.store(false)`) — Task 6's first abort test depends on it; `cmd_transfer_block` does the same.
+
+  **Header-computed consumed length (CRITICAL framing parity, `DAP_TransferBlock` wrapper `DAP.c:1501-1507`):** the request-consumed length is computed from the HEADER ALONE — `body[0]`=DAP index, `body[1..2]`=count (LE 16-bit), `body[3]`=request value — independent of how many transfers completed or of connect state:
+  - read block (`body[3]` has RnW set): consumed = **4** (index + count(2) + value(1)); a read block carries no per-transfer request data.
+  - write block (RnW clear): consumed = **4 + count*4**.
+  - This holds even when the block FAULTS early (e.g. write 2 of 3 faults → still 4+3*4=16) and even when DISCONNECTED. Clamp the final consumed to `req.size()` (never claim more than exists), but compute it from the header first. A cursor-based consumed would desync an ExecuteCommands batch when a write block faults mid-way; the header computation keeps the next sub-command framed. Disconnected → `{count=0(2 bytes), value=0}` with this same header-computed consumed (read→4, write→4+count*4, clamped).
+
+  > **Amended during execution:** consumed length is header-computed (read→4, write→4+count*4, clamped, independent of completed count / connect state), not cursor-based — verified by `block_write_fault_stays_framed_in_batch`. Two plan-Step-1 count assertions were corrected to faithful reference behavior: `block_write_two_words` expects 3 SWD transfers (2 writes + the unconditional trailing "check last write" RDBUFF read, `DAP.c:1344-1348`), and `transfer_abort_mid_batch_stops` expects 2 transfers (the write plus `cmd_transfer`'s trailing check-write RDBUFF, `DAP.c:902-908`, which still fires after the abort breaks the loop).
 
 - [ ] **Step 4: Run tests — all green.**
 
