@@ -64,6 +64,7 @@ struct swdp_pio_config {
 struct swdp_pio_data {
 	size_t sm;          /* allocated state machine index */
 	uint offset;        /* program load offset in PIO instruction memory */
+	bool loaded;        /* SM claimed + program added (one-time, lifetime-held) */
 	uint8_t turnaround; /* swd_conf.turnaround (1-based) */
 	bool data_phase;    /* swd_conf.data_phase */
 	uint32_t cached_khz;
@@ -426,7 +427,7 @@ static int sw_configure(const struct device *dev, uint8_t turnaround,
 	d->turnaround = turnaround;
 	d->data_phase = data_phase;
 
-	LOG_INF("turnaround %d, data_phase %d", d->turnaround, d->data_phase);
+	LOG_DBG("turnaround %d, data_phase %d", d->turnaround, d->data_phase);
 
 	return 0;
 }
@@ -499,9 +500,18 @@ static void probe_sm_init(const struct device *dev, pio_sm_config *sm_config)
 }
 
 /* sw_port_on <- probe_init (probe.c:151-169) + probe_gpio_init (probe.pio:74-87).
- * Claim an SM, init the SWDIO/SWCLK (and OEn/SWDI) pin functions, add the
- * (oen?) program, configure the SM (probe_sm_init), pio_sm_init, jump to the
- * command-dispatch routine (get_next_cmd), enable, default clock 1 MHz.
+ *
+ * Idempotency contract (mirrors probe_init's `if (!probe.initted)` guard,
+ * probe.c:151-168): the SM claim + pio_add_program are one-time, done only on
+ * the first port_on, and the SM stays claimed + the program stays loaded for the
+ * device's lifetime -- exactly as the original holds a FIXED PROBE_SM and adds
+ * probe_program once (probe.c:154-167). Every port_on then re-runs the
+ * configure/init/enable cycle (pin funcsel, probe_sm_init, pio_sm_init, default
+ * clock, jump to get_next_cmd, enable). This makes connect/disconnect
+ * (DAP_Connect->port_on / DAP_Disconnect->port_off) a balanced enable/disable
+ * pair: previously claim+add ran on EVERY connect while port_off never
+ * unclaimed/removed, leaking one SM + ~11-15 progmem words per connect until the
+ * PIO's 4 SMs / 32-word instruction memory were exhausted (-EBUSY).
  */
 static int sw_port_on(const struct device *dev)
 {
@@ -512,42 +522,60 @@ static int sw_port_on(const struct device *dev)
 	uint get_next_cmd_off;
 	int ret;
 
-	/* Claim a state machine (Zephyr-managed; original hard-codes PROBE_SM). */
-	ret = pio_rpi_pico_allocate_sm(cfg->piodev, &d->sm);
-	if (ret < 0) {
-		return ret;
+	/* One-time: claim the SM + funcsel pins + add the program. Held for the
+	 * device's lifetime (like the original's fixed PROBE_SM, probe.c:151-167);
+	 * port_off only disables, never unclaims/removes, so this guard keeps
+	 * connect/disconnect leak-free and idempotent.
+	 */
+	if (!d->loaded) {
+		/* Claim a state machine (Zephyr-managed; original hard-codes
+		 * PROBE_SM). Propagate the allocator error (-EBUSY etc.).
+		 */
+		ret = pio_rpi_pico_allocate_sm(cfg->piodev, &d->sm);
+		if (ret < 0) {
+			return ret;
+		}
+
+		/* probe_gpio_init (probe.pio:74-87): funcsel SWDIO/SWCLK to PIO. */
+		pio_gpio_init(pio, cfg->swclk_pin);
+		pio_gpio_init(pio, cfg->swdio_pin);
+		/* Separate SWD input pin (real Debug Probe SWDI, or the OEN board's
+		 * SWDI): funcsel it to the PIO so `in pins` reads it. Skipped when
+		 * SWDIO is shared.
+		 */
+		if (cfg->use_swdi || cfg->use_oen) {
+			pio_gpio_init(pio, cfg->swdi_pin);
+		}
+		/* Level-shifter output-enable, only on the (latent) OEN board. */
+		if (cfg->use_oen) {
+			pio_gpio_init(pio, cfg->oen_pin);
+		}
+
+		/* Add the matching program once -- probe.c:154. */
+		if (cfg->use_oen) {
+			d->offset = pio_add_program(pio, &probe_oen_program);
+		} else {
+			d->offset = pio_add_program(pio, &probe_program);
+		}
+
+		d->loaded = true;
 	}
 
-	/* probe_gpio_init (probe.pio:74-87): pull-up nRESET as input open-drain,
-	 * funcsel SWDIO/SWCLK to PIO, pull-up SWDIO (idle high). nRESET pull/dir
-	 * is handled by GPIO_DT_SPEC config (GPIO_ACTIVE_LOW + pull from DT);
-	 * here we drive it de-asserted (input/Hi-Z) to match probe_assert_reset(1).
+	/* probe_gpio_init nRESET (probe.pio:74-87): nRESET pull/dir is handled by
+	 * GPIO_DT_SPEC config (GPIO_ACTIVE_LOW + pull from DT); here we drive it
+	 * de-asserted (input/Hi-Z) to match probe_assert_reset(1).
 	 */
 	if (cfg->reset_gpio.port) {
 		gpio_pin_configure_dt(&cfg->reset_gpio, GPIO_INPUT);
 	}
-	pio_gpio_init(pio, cfg->swclk_pin);
-	pio_gpio_init(pio, cfg->swdio_pin);
-	/* Separate SWD input pin (real Debug Probe SWDI, or the OEN board's SWDI):
-	 * funcsel it to the PIO so `in pins` reads it. Skipped when SWDIO is shared.
-	 */
-	if (cfg->use_swdi || cfg->use_oen) {
-		pio_gpio_init(pio, cfg->swdi_pin);
-	}
-	/* Level-shifter output-enable, only on the (latent) OEN board. */
-	if (cfg->use_oen) {
-		pio_gpio_init(pio, cfg->oen_pin);
-	}
 
-	/* Load the matching program and configure the SM. */
+	/* Configure the SM from the already-loaded program (every port_on). */
 	if (cfg->use_oen) {
-		d->offset = pio_add_program(pio, &probe_oen_program);
 		sm_config = pio_get_default_sm_config();
 		sm_config_set_wrap(&sm_config, d->offset + probe_oen_wrap_target,
 				   d->offset + probe_oen_wrap);
 		get_next_cmd_off = probe_oen_offset_get_next_cmd;
 	} else {
-		d->offset = pio_add_program(pio, &probe_program);
 		sm_config = pio_get_default_sm_config();
 		sm_config_set_wrap(&sm_config, d->offset + probe_wrap_target,
 				   d->offset + probe_wrap);
@@ -569,8 +597,14 @@ static int sw_port_on(const struct device *dev)
 
 /* sw_port_off <- probe_deinit (probe.c:171-182). Disable the SM and assert
  * (de-assert) nRESET. probe_deinit calls probe_assert_reset(1), which floats
- * the line (de-assert); we replicate that and disable the SM. The program is
- * left loaded so a subsequent port_on can re-enable without re-adding.
+ * the line (de-assert); we replicate that and disable the SM.
+ *
+ * Unlike probe_deinit (which pio_remove_program()s, probe.c:176), we keep the
+ * SM claimed and the program loaded (d->loaded stays true) for the device's
+ * lifetime -- matching the original holding a fixed PROBE_SM -- so the next
+ * port_on re-enables without re-claiming/re-adding. This is the balanced
+ * disable half of the connect/disconnect enable/disable pair: leaving the SM
+ * claimed is intentional and avoids the per-connect SM/progmem leak.
  */
 static int sw_port_off(const struct device *dev)
 {
