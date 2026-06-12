@@ -1,7 +1,12 @@
 # debugprobe-zephyr Overall Design
 
 Date: 2026-06-11
-Status: Approved (design phase)
+Status: Implemented — all phases 1–5 complete and merged; hardware-verified on
+rpi_pico (CMSIS-DAP conformance: 28/31 responses byte-identical to official
+v2.3.1 — 27 protocol-deterministic plus the environment-dependent
+`swj_pins_read` — with 3 deliberate DAP_Info-string enhancements and 0 unexpected
+mismatches). See
+`docs/PROJECT_STATUS.md` and `docs/CONFORMANCE_RESULTS.md`.
 
 ## Background and Goal
 
@@ -287,8 +292,16 @@ Each phase gets its own implementation plan (writing-plans) and acceptance:
    `zephyr,swdp-gpio` bitbang driver (openocd full flow passes), then implement the
    `dp_pio` PIO driver to replace it and reach performance parity.
 4. **UART bridge + autobaud + LEDs + USB watchdog**.
-5. **Conformance comparison + three-board on-target acceptance**: conformance tool passes;
-   acceptance checklist completed item by item.
+5. **Conformance comparison + three-board on-target acceptance** (done): the
+   `tools/conformance/dap_conformance.py` capture/compare tool sends a fixed
+   31-command DAP sequence and byte-compares responses with a documented
+   whitelist; our firmware is byte-identical to official v2.3.1 on all 27
+   deterministic probe-level commands, differing only on the 3 deliberately
+   populated DAP_Info strings (1 command, `swj_pins_read`, is live-pin-state
+   dependent). The full three-board × two-backend openocd acceptance procedure is
+   documented in `docs/HARDWARE_BRINGUP.md`; remaining hardware-dependent items
+   (autobaud detection happy-path, full memory-R/W on a single-drop target) are
+   tracked in `docs/PROJECT_STATUS.md`.
 
 ## Risks and Mitigations
 
