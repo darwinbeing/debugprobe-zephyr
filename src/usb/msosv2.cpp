@@ -43,7 +43,10 @@ Msosv2Descriptor msosv2_desc = {
 	.subset_header = {
 		.wLength = sizeof(struct msosv2_function_subset_header),
 		.wDescriptorType = MS_OS_20_SUBSET_HEADER_FUNCTION,
-		.bFirstInterface = 0, /* DAP v2 interface */
+		/* DAP v2 is interface 0 because usb_device.cpp registers it
+		 * before CDC-ACM (see init() there); keep these in sync.
+		 */
+		.bFirstInterface = 0,
 		.wSubsetLength = sizeof(Msosv2Descriptor) -
 				 sizeof(struct msosv2_descriptor_set_header),
 	},
@@ -70,7 +73,8 @@ struct BosMsosv2 {
 
 BosMsosv2 bos_msosv2_desc = {
 	.platform = {
-		.bLength = sizeof(BosMsosv2),
+		.bLength = sizeof(struct usb_bos_platform_descriptor)
+			 + sizeof(struct usb_bos_capability_msos),
 		.bDescriptorType = USB_DESC_DEVICE_CAPABILITY,
 		.bDevCapabilityType = USB_BOS_CAPABILITY_PLATFORM,
 		.bReserved = 0,
@@ -102,9 +106,10 @@ int msosv2_to_host_cb(const struct usbd_context *const ctx,
 
 	if (setup->bRequest == kVendorCode &&
 	    setup->wIndex == MS_OS_20_DESCRIPTOR_INDEX) {
-		net_buf_add_mem(buf, &msosv2_desc,
-				MIN(net_buf_tailroom(buf),
-				    sizeof(msosv2_desc)));
+		size_t len = MIN(net_buf_tailroom(buf), sizeof(msosv2_desc));
+
+		net_buf_add_mem(buf, &msosv2_desc, len);
+		LOG_DBG("MS OS 2.0 descriptor set sent (%u bytes)", (unsigned)len);
 		return 0;
 	}
 
