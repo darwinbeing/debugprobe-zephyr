@@ -240,8 +240,8 @@ item-by-item during implementation.)
      read/write → flash program → reset → breakpoint run, full pass;
    - with the SWD clock at the same setting as the original (e.g. 24 MHz), flash
      programming time within 10% of the original;
-   - UART bridge bidirectional stress at 115200 and 921600 with no byte loss; autobaud
-     converges on common rates;
+   - UART bridge bidirectional stress at 115200 and 921600 with no byte loss
+     (autobaud convergence is a phase-4b acceptance item, deferred with the feature);
    - LED behavior, USB suspend/resume, unplug/replug match the original.
 
 ## Error Handling Principles
