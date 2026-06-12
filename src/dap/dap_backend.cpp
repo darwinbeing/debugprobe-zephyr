@@ -7,6 +7,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
 
 /* SWD backend selection (Kconfig PROBE_SWD_*):
@@ -40,6 +41,43 @@ namespace dap_backend {
 
 namespace {
 
+/* Flash unique ID as 16 uppercase hex chars, matching the USB serial
+ * descriptor produced by USBD_DESC_SERIAL_NUMBER_DEFINE + hwinfo.
+ * RP2040/RP2350 hwinfo_get_device_id returns 8 bytes → 16 hex chars.
+ */
+char g_serial[2 * 8 + 1];
+
+const char *build_serial()
+{
+	uint8_t id[8];
+	ssize_t n = hwinfo_get_device_id(id, sizeof(id));
+
+	if (n <= 0) {
+		return nullptr;
+	}
+	static const char hex[] = "0123456789ABCDEF";
+	size_t pos = 0;
+	for (ssize_t i = 0; i < n && pos + 2 < sizeof(g_serial); i++) {
+		g_serial[pos++] = hex[id[i] >> 4];
+		g_serial[pos++] = hex[id[i] & 0xF];
+	}
+	g_serial[pos] = '\0';
+	return g_serial;
+}
+
+dap::Config make_config()
+{
+	dap::Config c{};
+	c.vendor = "Raspberry Pi";
+	c.product = CONFIG_PROBE_PRODUCT_STRING;
+	c.serial = build_serial();
+	c.fw_version = "2.0.0";
+	c.packet_size = 64;
+	c.packet_count = 6;
+	c.timestamp_clock = 1000000;
+	return c;
+}
+
 #if defined(CONFIG_PROBE_SWD_NULL)
 NullSwdDriver g_driver;
 #elif defined(CONFIG_PROBE_SWD_PIO)
@@ -49,18 +87,12 @@ ZephyrSwdpDriver g_driver{DEVICE_DT_GET(DT_NODELABEL(swd_bitbang))};
 #endif
 LedHostStatus g_host;
 
-/* Engine configuration. serial is left nullptr until phase 4 wires the
- * hwinfo-derived serial number; DAP_Info(Serial) reports an empty string for
- * now (the original debugprobe also returned empty strings here).
+/* Engine configuration: serial is the flash unique ID (16 uppercase hex),
+ * matching the USB serial descriptor. Built once at C++ static-init time;
+ * hwinfo_get_device_id is a simple register read on RP2040/RP2350 and is
+ * safe to call before the Zephyr kernel starts.
  */
-dap::Config g_config = {
-	.vendor = "Raspberry Pi",
-	.product = CONFIG_PROBE_PRODUCT_STRING,
-	.serial = nullptr, /* TODO(phase 4): hwinfo serial number */
-	.fw_version = "2.0.0",
-	.packet_size = 64,
-	.packet_count = 6,
-};
+dap::Config g_config = make_config();
 
 dap::DapEngine g_engine{g_driver, g_host, g_config};
 
