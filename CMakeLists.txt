@@ -20,6 +20,7 @@ target_sources(app PRIVATE
   src/usb/msosv2.cpp
   src/dap/dap_backend.cpp
   src/leds.cpp
+  src/uart_bridge.cpp
 )
 
 # The swdp_api adapter (and its C shim over the non-C++-clean swdp.h) is only

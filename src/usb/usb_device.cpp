@@ -2,10 +2,10 @@
 #include "usb/dap_class.hpp"
 #include "usb/msosv2.hpp"
 #include "leds.hpp"
+#include "uart_bridge.hpp"
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
-#include <zephyr/drivers/uart/uart_bridge.h>
 #include <zephyr/usb/usbd.h>
 #include <zephyr/logging/log.h>
 
@@ -43,8 +43,7 @@ static void usb_msg_cb(struct usbd_context *const ctx, const struct usbd_msg *ms
 	switch (msg->type) {
 	case USBD_MSG_CDC_ACM_LINE_CODING:
 	case USBD_MSG_CDC_ACM_CONTROL_LINE_STATE:
-		uart_bridge_settings_update(msg->dev,
-					    DEVICE_DT_GET(DT_NODELABEL(uart_bridge0)));
+		probe::uart_bridge_line_coding(msg->dev);
 		break;
 	case USBD_MSG_CONFIGURATION:
 	case USBD_MSG_RESUME:

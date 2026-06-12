@@ -5,6 +5,7 @@
 #include <span>
 
 #include "usb/usb_device.hpp"
+#include "uart_bridge.hpp"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -32,6 +33,10 @@ int main()
 		LOG_ERR("USB init failed: %d", err);
 		return err;
 	}
+
+	/* Wire the CDC-ACM <-> uart1 data path (custom interrupt-driven bridge,
+	 * replacing zephyr,uart-bridge). */
+	probe::uart_bridge_init();
 
 	/* USB runs on the usbd thread + controller IRQs; nothing for main to do. */
 	return 0;

@@ -68,14 +68,11 @@
 		zephyr,shell-uart = &uart0;
 	};
 
-	/* CDC-ACM (USB) <-> uart1 (target) bridge: Zephyr's zephyr,uart-bridge
-	 * driver wires cdc_acm_uart0 to the hardware uart1 (already okay in the
-	 * board DTS), copying bytes both ways and propagating line coding.
+	/* CDC-ACM (USB) <-> uart1 (target) bridge is now a custom C++ UartBridge
+	 * (src/uart_bridge.cpp) that binds cdc_acm_uart0 and uart1 (already okay
+	 * in the board DTS) directly, so there is no zephyr,uart-bridge DT node
+	 * here anymore.
 	 */
-	uart_bridge0: uart-bridge0 {
-		compatible = "zephyr,uart-bridge";
-		peers = <&cdc_acm_uart0 &uart1>;
-	};
 
 	/* The real Raspberry Pi Debug Probe (PROBE_IO_SWDI, per
 	 * board_debug_probe_config.h): SWCLK=GP12, SWDIO output=GP14, separate
