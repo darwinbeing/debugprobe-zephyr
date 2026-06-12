@@ -182,14 +182,27 @@ USB (usbd-next):
 - **DAP v2 interface**: custom vendor class (bulk in/out) with MS OS 2.0 descriptors
   (automatic WinUSB binding) and BOS. Interface name contains "CMSIS-DAP" (host tools
   match on this).
-- **CDC-ACM ↔ uart1 bridge** (as built, phase 4 core): Zephyr's `zephyr,uart-bridge`
-  devicetree driver (`drivers/serial/uart_bridge.c`, `CONFIG_UART_BRIDGE=y`) — a
-  devicetree node `uart-bridge0` with `peers = <&cdc_acm_uart0 &uart1>`. The driver
-  copies bytes both ways via interrupt-driven UART and propagates CDC line-coding
-  (baud/parity/data bits) to the hardware UART via `uart_configure()`. No hand-written
-  `UartBridge` C++ class is needed. **Autobaud and TX/RX UART-activity LEDs are deferred
-  to phase 4b** (autobaud requires a PIO frequency-counter + DMA histogram; activity LEDs
-  require tapping the closed `uart_bridge` data path — both are separable efforts).
+- **CDC-ACM ↔ uart1 bridge** (as built, phase 4 core → replaced in phase 4b): Phase
+  4 core used Zephyr's `zephyr,uart-bridge` (`CONFIG_UART_BRIDGE=y`, DT node
+  `uart-bridge0`). **Phase 4b replaced it entirely** with a custom C++ `UartBridge`
+  (`src/uart_bridge.cpp`, modeled on Zephyr's `drivers/serial/uart_bridge.c`):
+  interrupt-driven, per-direction ring buffers, same `uart_configure()` line-coding
+  propagation — plus two taps the closed driver could not offer:
+  (1) **TX/RX activity LEDs** (debounced ~40 ms; `leds_uart_tx_activity()` /
+  `leds_uart_rx_activity()`; debug-probe GP8/GP7; no-op on Picos via
+  `GPIO_DT_SPEC_GET_OR`), and (2) **autobaud** triggered when the host sets
+  `MAGIC_BAUD` (9728 / `0x2600`) in the CDC line-coding. `zephyr,uart-bridge` (the
+  DT node + `CONFIG_UART_BRIDGE`) was removed. Decision recorded in the phase-4b
+  plan: the Zephyr driver exposes no per-byte hook and no autobaud integration point.
+  **Autobaud** is implemented as a PIO frequency counter (`drivers/dp_pio/autobaud.pio`
+  → `drivers/dp_pio/autobaud_pio.h`, assembled by `scripts/gen_pio.sh`) plus a
+  host-tested `autobaud::Estimator` (`src/autobaud/estimator.{hpp,cpp}` — a faithful
+  port of the original `autobaud.c` histogram / bit-time / validity logic, no heap).
+  The firmware glue (`src/autobaud/autobaud.cpp`) runs a dedicated Zephyr thread that
+  drains the PIO FIFO (no DMA — a thread drain is used; may drop samples at very high
+  baud, acceptable for a statistical estimate), feeds the estimator, and on a confident
+  result reconfigures uart1 to the detected baud. On-target end-to-end verification
+  requires a UART source driving the uart1 RX pin at a known baud.
 - VID/PID fixed at `0x2E8A`/`0x000C` (same for all three boards; only the product string
   differs, as in the original), strings and serial number (flash unique ID via `hwinfo`)
   identical to the original so existing openocd / probe-rs / pyocd configs work unchanged.
@@ -204,7 +217,9 @@ Application modules (as built):
   `usb-connected-led`). Any alias absent on a board is a no-op (uses
   `GPIO_DT_SPEC_GET_OR`). Replaces `NullHostStatus` in `dap_backend.cpp`. USB-connected
   LED is lit from the `usbd_msg` callback on `USBD_MSG_CONFIGURATION`. TX/RX
-  UART-activity LEDs are deferred to phase 4b.
+  UART-activity LEDs (`leds_uart_tx_activity` / `leds_uart_rx_activity`) were added in
+  phase 4b (see bridge section above); aliases `uart-tx-led` (GP8) / `uart-rx-led`
+  (GP7) on the debug-probe board, absent on Picos → no-op.
 - **CMSIS-DAP serial** (`src/dap/dap_backend.cpp`): `DAP_Info(SerialNumber)` returns the
   flash unique ID formatted as uppercase hex via `hwinfo_get_device_id()` — the same
   source as `USBD_DESC_SERIAL_NUMBER_DEFINE`, so the DAP serial matches the USB serial
@@ -212,8 +227,9 @@ Application modules (as built):
 - `UsbWatchdog` (RP2040 only, conditional compile): samples the SOF counter periodically;
   three identical readings ⇒ USB controller stuck ⇒ disconnect/reconnect USB
   (usbd disable/enable). RP2040 errata workaround.
-- Threads: `dap` Zephyr thread + system workqueue; the bridge runs in the Zephyr
-  `uart_bridge` driver's interrupt context (no separate bridge thread needed).
+- Threads: `dap` Zephyr thread + system workqueue + autobaud thread (phase 4b; drains
+  the PIO FIFO and feeds the estimator). The bridge itself runs in interrupt context
+  (custom `UartBridge` ISR, no separate bridge thread).
 
 ### Board differences (devicetree overlays)
 
@@ -240,8 +256,12 @@ item-by-item during implementation.)
      read/write → flash program → reset → breakpoint run, full pass;
    - with the SWD clock at the same setting as the original (e.g. 24 MHz), flash
      programming time within 10% of the original;
-   - UART bridge bidirectional stress at 115200 and 921600 with no byte loss
-     (autobaud convergence is a phase-4b acceptance item, deferred with the feature);
+   - UART bridge bidirectional stress at 115200 and 921600 with no byte loss;
+   - Autobaud: host sets MAGIC_BAUD (9728) on the CDC; firmware runs the PIO
+     frequency-counter thread-drain + `autobaud::Estimator`; uart1 is reconfigured to
+     the detected baud. Statistical estimator is host-tested (`OK: 76 tests`).
+     On-target end-to-end verification requires a UART source at a known baud driving
+     the uart1 RX pin (controller to arrange);
    - LED behavior, USB suspend/resume, unplug/replug match the original.
 
 ## Error Handling Principles
