@@ -9,11 +9,12 @@ if(CONFIG_SWDP_PIO)
   zephyr_library_sources(swdp_pio.c)
   zephyr_library_include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
-  # This out-of-tree library is added via add_subdirectory(), so it does not
-  # automatically inherit the build-order dependency on Zephyr's generated
-  # headers (heap_constants.h, offsets.h, syscalls, ...). Without this it can
-  # race ahead of header generation on a clean parallel build. Mirror what
-  # in-tree libraries get implicitly.
+  # This out-of-tree library is included as a Zephyr module (zephyr/module.yml),
+  # which runs in Zephyr's module loop early enough for the device objects to be
+  # collected into ZEPHYR_LIBS. However it does not automatically inherit the
+  # build-order dependency on Zephyr's generated headers (heap_constants.h,
+  # offsets.h, syscalls, ...) and can race ahead of header generation on a clean
+  # parallel build. Mirror what in-tree libraries get implicitly.
   if(TARGET zephyr_generated_headers)
     add_dependencies(${ZEPHYR_CURRENT_LIBRARY} zephyr_generated_headers)
   endif()
