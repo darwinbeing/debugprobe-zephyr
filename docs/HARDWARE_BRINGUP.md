@@ -139,3 +139,112 @@ re-run the script and commit the regenerated file.
 On all three boards the PIO driver loads **`probe.pio`** (1-bit side-set). The
 `probe_oen.pio` path (2-bit side-set with output-enable) is latent — it activates only
 if a board overlay includes `oen-gpios`, which none of the three shipped boards do.
+
+## Full on-target acceptance (phase 5)
+
+Run this acceptance suite per board × per backend and record results in
+`docs/PROJECT_STATUS.md`.  All commands assume the repo root as the working
+directory.
+
+> **Target note:** a multidrop RP2040 (e.g. Pico-as-target) fails the
+> `connect` + `reset halt` sequence even under the official debugprobe v2.3.1
+> (A/B-proven on the same hardware).  Use a **single-drop SWD target** such as
+> an STM32 Nucleo or a bare Cortex-M evaluation board.
+
+### Boards and backends
+
+| Board | PIO (default) | Bitbang (`CONFIG_PROBE_SWD_BITBANG`) |
+|---|---|---|
+| rpi_pico | build normally | edit `prj.conf` + board overlay (see [Switching to the bitbang backend](#switching-to-the-bitbang-backend)) |
+| rpi_pico2 | build normally | same overlay flip |
+| rpi_debug_probe | build normally | same overlay flip |
+
+### 1. openocd acceptance flow
+
+Connect the probe to a single-drop SWD target, then run openocd:
+
+```bash
+openocd \
+  -f interface/cmsis-dap.cfg \
+  -c "adapter speed 1000" \
+  -f target/<chip>.cfg
+```
+
+In a second terminal, use arm-none-eabi-gdb or telnet to drive the sequence:
+
+```
+monitor reset halt
+reg
+mdw 0x20000000 4          # read 4 words from RAM
+mww 0x20000004 0xdeadbeef # write to RAM
+mdw 0x20000004            # verify written value
+load <program>.elf        # flash program and verify_image implicitly
+monitor reset run
+break main
+continue                  # run to breakpoint
+step                      # single-step
+```
+
+Expected for each step: connect (openocd reports `Info : CMSIS-DAP: ...`),
+`reset halt` succeeds, register dump shows PC + SP in valid range, RAM round-trip
+echoes the written word, flash program + verify pass, `reset run` releases the
+target, breakpoint + step work.
+
+### 2. UART-bridge round-trip
+
+Wire GP4 (uart1 TX) to GP5 (uart1 RX) as a loopback.  Open the CDC-ACM serial
+port on the host and send data at two baud rates:
+
+```bash
+# 115 200 baud
+python3 - <<'PY'
+import serial, time
+p = serial.Serial('/dev/tty.usbmodem*', 115200, timeout=1)
+p.write(b'hello\n'); time.sleep(0.1); print(p.read(64))
+PY
+
+# repeat at a second baud, e.g. 9600
+```
+
+Expected: every byte written is echoed back (TX→RX loopback), at both baud
+rates, with no framing errors.
+
+### 3. Autobaud detection
+
+> **Hardware required:** an external UART source connected to GP5 (uart1 RX).
+> This step cannot be completed with a pure loopback.
+
+1. Open the CDC-ACM port at the sentinel baud rate 9728 (MAGIC_BAUD) — this
+   activates autobaud mode.
+2. Drive uart1 RX (GP5) from a known UART source at the target baud rate.
+3. The firmware measures the line rate, reconfigures uart1, and logs the detected
+   baud.
+4. Confirm the CDC↔uart1 bridge is alive and passes data at the newly detected
+   rate.
+
+### 4. LED checks
+
+| Board | LED | Expected behaviour |
+|---|---|---|
+| rpi_debug_probe | DAP connect LED | lights when openocd connects |
+| rpi_debug_probe | DAP run LED | lights when target is running (not halted) |
+| rpi_debug_probe | UART TX LED | blinks on CDC→uart1 traffic |
+| rpi_debug_probe | UART RX LED | blinks on uart1→CDC traffic |
+| rpi_pico / rpi_pico2 | onboard LED | follows DAP connect state |
+
+Verify by observing LEDs while running the openocd acceptance flow (step 1) and
+the UART round-trip (step 2).
+
+### 5. Record pass/fail
+
+For each (board, backend) combination, record the result of each step above in
+`docs/PROJECT_STATUS.md` under the phase 5 hardware section.  Use the format:
+
+```
+| rpi_pico   | PIO     | openocd accept | UART RT | autobaud | LEDs |
+| rpi_pico   | bitbang | ...            |         |          |      |
+| rpi_pico2  | PIO     | ...            |         |          |      |
+| rpi_pico2  | bitbang | ...            |         |          |      |
+| rpi_debug_probe | PIO | ...          |         |          |      |
+| rpi_debug_probe | bitbang | ...      |         |          |      |
+```
