@@ -1,0 +1,126 @@
+{
+  "info_vendor": {
+    "req": "0001",
+    "resp": "0000"
+  },
+  "info_product": {
+    "req": "0002",
+    "resp": "0000"
+  },
+  "info_serial": {
+    "req": "0003",
+    "resp": "0000"
+  },
+  "info_fw_version": {
+    "req": "0004",
+    "resp": "0006322e302e3000"
+  },
+  "info_device_vendor": {
+    "req": "0005",
+    "resp": "0000"
+  },
+  "info_device_name": {
+    "req": "0006",
+    "resp": "0000"
+  },
+  "info_capabilities": {
+    "req": "00f0",
+    "resp": "000131"
+  },
+  "info_timestamp_clk": {
+    "req": "00f1",
+    "resp": "000440420f00"
+  },
+  "info_swo_buf": {
+    "req": "00fd",
+    "resp": "0000"
+  },
+  "info_packet_count": {
+    "req": "00fe",
+    "resp": "000106"
+  },
+  "info_packet_size": {
+    "req": "00ff",
+    "resp": "00024000"
+  },
+  "hoststatus_conn_on": {
+    "req": "010001",
+    "resp": "0100"
+  },
+  "hoststatus_run_off": {
+    "req": "010100",
+    "resp": "0100"
+  },
+  "hoststatus_bad": {
+    "req": "010201",
+    "resp": "01ff"
+  },
+  "connect_default": {
+    "req": "0200",
+    "resp": "0201"
+  },
+  "connect_swd": {
+    "req": "0201",
+    "resp": "0201"
+  },
+  "connect_jtag": {
+    "req": "0202",
+    "resp": "0200"
+  },
+  "swj_clock_1mhz": {
+    "req": "1140420f00",
+    "resp": "1100"
+  },
+  "swj_clock_zero": {
+    "req": "1100000000",
+    "resp": "11ff"
+  },
+  "swj_pins_read": {
+    "req": "10000000000000",
+    "resp": "1080"
+  },
+  "swj_sequence": {
+    "req": "1210ff07",
+    "resp": "1200"
+  },
+  "swd_configure": {
+    "req": "1300",
+    "resp": "1300"
+  },
+  "transfer_configure": {
+    "req": "040064000000",
+    "resp": "0400"
+  },
+  "swd_sequence_out": {
+    "req": "1d01089e",
+    "resp": "1d00"
+  },
+  "delay": {
+    "req": "09e803",
+    "resp": "0900"
+  },
+  "reset_target": {
+    "req": "0a",
+    "resp": "0a0000"
+  },
+  "jtag_seq_err": {
+    "req": "140101aa",
+    "resp": "14ff"
+  },
+  "unknown_cmd": {
+    "req": "17",
+    "resp": "ff"
+  },
+  "vendor_echo": {
+    "req": "8501",
+    "resp": "85"
+  },
+  "execute_batch": {
+    "req": "7f020004096400",
+    "resp": "7f020006322e302e30000900"
+  },
+  "disconnect": {
+    "req": "03",
+    "resp": "0300"
+  }
+}

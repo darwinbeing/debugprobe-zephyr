@@ -62,11 +62,12 @@ Hold BOOTSEL again and copy `build/rpi_pico/zephyr/zephyr.uf2` back.
 
 **Board:** rpi_pico, USB 2e8a:000c, USB serial E661A4D41777B429.
 **Firmware under test:** Zephyr rewrite (phase 5), endpoints OUT=0x01/IN=0x81.
-**Reference:** official debugprobe v2.3.1 — **source-derived, not a live capture** (the live A/B re-flash is pending; see [Pending empirical confirmation](#pending-empirical-confirmation) below). For context, the official firmware enumerates with endpoints OUT=0x04/IN=0x85.
+**Reference:** official debugprobe v2.3.1 — **live-captured on hardware** (endpoints OUT=0x04/IN=0x85), and independently cross-checked against the firmware source. The live capture matches the source-derived prediction byte-for-byte on all 31 commands (see [Empirical confirmation](#empirical-confirmation-done-2026-06-12) below).
 
-**Headline: 28 of 31 responses byte-identical to the source-derived reference
+**Headline: 28 of 31 responses byte-identical to the official v2.3.1 firmware
 (`compare` → 0 unexpected mismatches); the other 3 are the deliberate,
-whitelisted DAP_Info string enhancements.**
+whitelisted DAP_Info string enhancements. Confirmed by a live on-hardware A/B
+capture (2026-06-12), which matched the source-derived prediction exactly.**
 
 Of those 28 identical responses, 27 are protocol-deterministic and 1
 (`swj_pins_read`) is environment-dependent — its byte reflects live pin levels
@@ -78,10 +79,11 @@ The `compare` tool has no separate "environment-dependent" bucket, so it counts
 
 ### Full cross-check table
 
-The live capture of our firmware was compared against the expected original
-responses derived by reading the official v2.3.1 source (`DAP.c`,
-`DAP_config.h`, `DAP_vendor.c`) in `~/Developer/debugprobe`.  See
-[Pending empirical confirmation](#pending-empirical-confirmation) below.
+The live capture of our firmware was compared against the official v2.3.1
+responses. The "original" column below was first derived by reading the official
+source (`DAP.c`, `DAP_config.h`, `DAP_vendor.c`) in `~/Developer/debugprobe`, then
+**confirmed byte-for-byte by a live capture of the official firmware** (see
+[Empirical confirmation](#empirical-confirmation-done-2026-06-12) below).
 
 | label | ours (live) | original (from source) | verdict |
 |---|---|---|---|
@@ -119,8 +121,9 @@ responses derived by reading the official v2.3.1 source (`DAP.c`,
 
 ### Compare tool output
 
-Running `compare` on `old_rpi_pico_source_derived.json` vs `new_rpi_pico.json`
-produced:
+Running `compare` on the live official capture
+`old_rpi_pico_official_live.json` vs our `new_rpi_pico.json` produced (the
+source-derived reference gives byte-identical output):
 
 ```
 [WHITELIST] info_vendor: old=0000 new=000d52617370626572727920506900  (original returns empty; ours = vendor string)
@@ -155,23 +158,36 @@ connected to the same host.
 The `swj_pins_read` response byte (`0x80` in our live capture, encoded as `1080`)
 reflects the live state of the SWDIO / SWDCLK / nRESET / TDO / TDI / nTRST pins
 at the instant the command was issued.  This value is inherently hardware- and
-wiring-dependent and is excluded from the byte-identical count.  Both firmwares
-implement `DAP_SWJ_Pins` identically; only the environment differs.
+wiring-dependent.  In the live A/B both firmwares read the identical byte
+(`1080`) on the same wiring, so `compare` counts it among the byte-identical
+responses; it is called out separately here only because its value is determined
+by the environment rather than by firmware logic.  Both firmwares implement
+`DAP_SWJ_Pins` identically.
 
-### Pending empirical confirmation
+### Empirical confirmation (done 2026-06-12)
 
-The reference file `tools/conformance/captures/old_rpi_pico_source_derived.json`
-was **derived by reading the official v2.3.1 source** — it is not a live capture.
-It represents the expected response for every command based on the compile-time
-constants and logic in `DAP.c`, `DAP_config.h`, and `DAP_vendor.c`.
+The live old-vs-new A/B has now been executed on hardware. The official
+`debugprobe_on_pico.uf2` v2.3.1 was flashed via a physical BOOTSEL re-flash
+(re-enumerated with endpoints OUT=0x04/IN=0x85, DAP_Info serial `0000`), captured
+live, then our firmware was re-flashed. The live official capture
+**matches the source-derived prediction byte-for-byte on all 31 commands**
+(including `swj_pins_read` = `1080`, identical on the same wiring), and the live
+A/B `compare` reproduced exactly the source-derived result:
 
-A live empirical capture of the official firmware requires physically pressing
-the BOOTSEL button on the probe board to force mass-storage mode for re-flashing
-(`picotool` cannot force a BOOTSEL reset on the debugprobe because it exposes no
-reset interface that picotool can address).  This live capture is a documented
-manual step for final sign-off and is expected to reproduce this exact result.
+```
+[WHITELIST] info_vendor: old=0000 new=000d52617370626572727920506900  (original returns empty; ours = vendor string)
+[WHITELIST] info_product: old=0000 new=001f446562756770726f6265206f6e205069636f2028434d5349532d4441502900  (original returns empty; ours = product string)
+[WHITELIST] info_serial: old=0000 new=00114536363141344434313737374234323900  (original returns empty; ours = hwinfo serial)
+
+OK: byte-identical on all non-whitelisted commands (3 whitelisted, 0 missing)
+```
+
+The source-derived reference is therefore confirmed accurate; the "original"
+column in the table above is now backed by a real official-firmware capture.
 
 Committed artifacts:
 - `tools/conformance/captures/new_rpi_pico.json` — live capture of our firmware.
+- `tools/conformance/captures/old_rpi_pico_official_live.json` — **live capture of
+  the official v2.3.1 firmware** (the empirical reference).
 - `tools/conformance/captures/old_rpi_pico_source_derived.json` — source-derived
-  reference; pending empirical confirmation via live BOOTSEL re-flash.
+  reference; confirmed byte-identical to the live official capture above.
