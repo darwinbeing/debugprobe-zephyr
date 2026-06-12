@@ -8,6 +8,45 @@
 
 namespace dap {
 
+namespace {
+
+/* Bytes a Transfer request (from the DAP index byte onward) occupies for its
+ * declared transfer count, per DAP_Dummy_Transfer (DAP.c:1200-1231) and the
+ * connected canceled-skip loop (DAP.c:872-885).  Clamped to req.size() so a
+ * truncated request never reports more than is present.
+ *
+ * Layout: req[0] = DAP index, req[1] = count, then per transfer one request
+ * byte plus 4 data bytes when it is a write (RnW clear) or a value-match read
+ * (RnW set AND MatchValue set); a plain read carries no extra bytes. */
+size_t transfer_consumed_len(std::span<const uint8_t> req)
+{
+	const size_t req_size = req.size();
+	size_t ri = 0;
+	if (ri < req_size) {
+		ri++; /* skip DAP index */
+	}
+	uint32_t request_count = (ri < req_size) ? req[ri++] : 0;
+	for (; request_count != 0U; request_count--) {
+		if (ri >= req_size) {
+			break;
+		}
+		const uint8_t request_value = req[ri++];
+		if ((request_value & kReqRnW) != 0U) {
+			if ((request_value & kReqMatchValue) != 0U) {
+				ri += 4; /* read with value match */
+			}
+		} else {
+			ri += 4; /* write */
+		}
+		if (ri > req_size) {
+			ri = req_size;
+		}
+	}
+	return ri;
+}
+
+} // namespace
+
 /* --- Task 3 implementations --- */
 
 uint8_t DapEngine::transfer_retry(uint8_t request, uint32_t *data)
@@ -88,19 +127,22 @@ DapEngine::Sizes DapEngine::cmd_transfer(std::span<const uint8_t> req,
 	 * poison this command. */
 	abort_.store(false, std::memory_order_relaxed);
 
-	/* Disconnected -> DAP_Dummy_Transfer parity (DAP.c:1538+):
-	 * {count=0, value=0}, consume the whole request. */
+	/* Disconnected -> DAP_Dummy_Transfer parity (DAP.c:1200-1231):
+	 * response {count=0, value=0}, but consume only this transfer's own
+	 * bytes so the ExecuteCommands dispatcher can find the next sub-command.
+	 * Over-consuming the whole remaining batch would silently drop them. */
 	if (!connected_) {
+		const size_t consumed = transfer_consumed_len(req);
 		if (resp.size() >= 2) {
 			resp[0] = 0;
 			resp[1] = 0;
-			return {req.size(), 2};
+			return {consumed, 2};
 		}
 		if (!resp.empty()) {
 			resp[0] = 0;
-			return {req.size(), 1};
+			return {consumed, 1};
 		}
-		return {req.size(), 0};
+		return {consumed, 0};
 	}
 
 	/* The dispatcher guarantees a 1-byte response body span; we need 2 (the

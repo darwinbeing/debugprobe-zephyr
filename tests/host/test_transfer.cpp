@@ -210,6 +210,28 @@ TEST(transfer_disconnected_dummy_response)
 	CHECK(drv.transfers.empty());
 }
 
+TEST(transfer_disconnected_stays_framed_in_batch)
+{
+	/* Disconnected DAP_Transfer (1 write) inside ExecuteCommands, followed
+	 * by Delay — the dummy transfer must consume only its own bytes so the
+	 * Delay still runs (DAP_Dummy_Transfer parity, DAP.c:1200-1231). */
+	MockSwdDriver drv;
+	MockHostStatus host;
+	dap::Config cfg;
+	dap::DapEngine engine{drv, host, cfg}; /* never connected */
+	uint8_t resp[64] = {};
+	/* batch count=2: Transfer{idx0,count1,write addr4 val 0x11223344}, Delay(50us) */
+	const uint8_t req[] = {0x7F, 0x02,
+			       0x05, 0x00, 0x01, 0x04, 0x44, 0x33, 0x22, 0x11,
+			       0x09, 0x32, 0x00};
+	size_t n = engine.process(req, resp);
+	const uint8_t want[] = {0x7F, 0x02,
+				0x05, 0x00, 0x00,         /* dummy transfer */
+				0x09, dap::kDapOk};        /* delay ran */
+	CHECK_BYTES(std::span<const uint8_t>(resp, n), want);
+	CHECK_EQ(drv.delays_us, 50u);
+}
+
 TEST(transfer_truncated_request_no_crash)
 {
 	Fixture f;
