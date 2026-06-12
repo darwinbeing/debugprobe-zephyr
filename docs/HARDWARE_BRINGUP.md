@@ -261,24 +261,24 @@ cmsis_dap_swd_switch_seq(): DORMANT-to-SWD
 cmsis_dap_swd_read_process(): SWD ack not OK @ 0 JUNK   <-- garbage ACK, repeated
 ```
 
-Diagnosis (confirmed 2026-06-12 on the bring-up rig): a **legacy** (non-multidrop)
-SWD connect reads a coherent `DPIDR 0x10212927`, so the probe's SWD path is
-electrically fine — but the longer, more signal-integrity-sensitive
-dormant→SWD multidrop wake-up returns a JUNK ack. This is **not** a probe-firmware
-or openocd-config problem: it reproduces at adapter speeds 100/200/500/1000 kHz
-and with `connect_assert_srst`, and the **official** `debugprobe_on_pico.uf2`
-v2.3.1 fails identically on the same rig (A/B-proven in phase 3). It is a target /
-wiring issue.
+**Root cause (resolved 2026-06-12 on the bring-up rig): a dirty target state, NOT
+the probe and NOT signal integrity.** While the target was running user code that
+reconfigured its SWD pads, the dormant→SWD multidrop wake-up returned a JUNK ack
+and a legacy connect read a garbage `DPIDR 0x10212927`. Speed sweeps
+(100/200/500/1000 kHz) and `connect_assert_srst` did not help, and the **official**
+`debugprobe_on_pico.uf2` v2.3.1 failed identically — confirming the probe firmware
+is not at fault. **The fix:** put the target into a clean state. With the target
+RP2040 held in **BOOTSEL** (bootrom owns the cores; nothing reconfigures the SWD
+pads), the multidrop DP connects on the first try, reads the genuine
+`DPIDR 0x0bc12477`, detects the Cortex-M0+, and the full acceptance (halt, step,
+mem R/W, flash erase/program/verify, reset run) passes.
 
 Remedies, in order of effectiveness:
-1. **Use a single-drop SWD target** (STM32 / nRF / bare Cortex-M). Standard SWD,
-   no dormant-multidrop dance — by far the most reliable way to finish the full
-   memory-R/W + flash acceptance.
-2. **Improve SWD signal integrity** (the dormant 128-bit alert is the most
-   SI-sensitive part of the handshake — that legacy line-reset works but dormant
-   does not is the classic signature): shorten the SWCLK/SWDIO leads, add a solid
-   common ground wire running alongside the signals, and ensure nothing else
-   drives GP2 (SWCLK) / GP3 (SWDIO).
-3. **Hold the target in a clean state**: power the target RP2040 with its BOOTSEL
-   held (bootrom owns the cores, no user code reconfiguring the SWD pads), or wire
-   the probe's RUN/nRESET to the target's RUN pin and use connect-under-reset.
+1. **Put the target in a clean state** — power the target RP2040 with its BOOTSEL
+   held (bootrom owns the cores), or wire the probe's RUN/nRESET to the target's
+   RUN pin and use connect-under-reset. This resolved it here.
+2. **Use a single-drop SWD target** (STM32 / nRF / bare Cortex-M) — standard SWD,
+   no dormant-multidrop dance, immune to target-pad reconfiguration.
+3. **If the JUNK ack persists even from a clean target**, then suspect signal
+   integrity: shorten the SWCLK/SWDIO leads, add a solid common ground wire
+   alongside the signals, and ensure nothing else drives GP2 (SWCLK) / GP3 (SWDIO).

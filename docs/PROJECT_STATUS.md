@@ -101,7 +101,7 @@ check the available hardware allows (see the note below the table):
 
 | Board | Backend | openocd accept | UART RT | autobaud | LEDs |
 |---|---|---|---|---|---|
-| rpi_pico | PIO | P* | ✓ | P* | n/a |
+| rpi_pico | PIO | ✓ | ✓ | P* | n/a |
 | rpi_pico | bitbang | — | — | — | — |
 | rpi_pico2 | PIO | — | — | — | — |
 | rpi_pico2 | bitbang | — | — | — | — |
@@ -109,18 +109,29 @@ check the available hardware allows (see the note below the table):
 | rpi_debug_probe | bitbang | — | — | — | — |
 
 **rpi_pico / PIO, executed 2026-06-12 (`P*` detail):**
-- **openocd accept (partial):** openocd 0.12.0 opens our CMSIS-DAP v2 interface,
-  reports `FW Version = 2.0.0` and `Serial# = E661A4D41777B429`, initialises SWD,
-  and reads `SWD DPIDR 0x10212927`. The full memory-R/W + flash step is **blocked
-  by the multidrop RP2040 target** (the only target wired here), an environment
-  limit, not a firmware defect. Two attempts on 2026-06-12 confirm this: a generic
-  `cortex_m` connect reads the DPIDR then reports "Could not find MEM-AP"; the
-  proper `target/rp2040.cfg` (multidrop-aware) reports `Failed to connect
-  multidrop rp2040.dap0`. Our SWD is proven electrically working (DPIDR read OK);
-  only the RP2040 multidrop DP-select fails — the same bus-contention issue that
-  fails the **official** firmware identically (A/B-proven in phase 3). Full
-  mem-R/W + flash acceptance still needs a single-drop SWD target (e.g. STM32 /
-  nRF / bare Cortex-M), or resolution of the RP2040 multidrop bus contention.
+- **openocd accept: ✓ FULL PASS (2026-06-12)** against an RP2040 target placed in
+  a clean state (target held in BOOTSEL so the bootrom owns the cores). openocd
+  0.12.0 opens our CMSIS-DAP v2 interface (`FW Version = 2.0.0`,
+  `Serial# = E661A4D41777B429`), connects multidrop (`DPIDR 0x0bc12477`, Cortex-M0+
+  r0p1 detected), and the full flow passes:
+  - `reset halt` → halted, PC `0x000000ea`, MSP `0x20041f00`;
+  - single-step ×2 → PC advances `0xea → 0xec → 0xee`;
+  - memory read → bootrom `0x20041f00`, XIP flash `0x4b32b500`;
+  - RAM write+readback at 0x20000000/04/0x20001000 → `c0ffee42` / `deadbeef` /
+    `11223344`, all verified;
+  - flash erase+program+verify (top sector 31) → wrote `0xa5a5a5a5`, read back
+    `0xa5a5a5a5` (flash chip `win w25q16jv`, 2 MB / 32 sectors detected);
+  - `reset run` → target running.
+
+  **Root cause of the earlier failure (corrected):** the initial
+  `Failed to connect multidrop rp2040.dap0` (and the garbage `DPIDR 0x10212927`)
+  was **target state**, not signal integrity and not the probe — putting the
+  target into a clean BOOTSEL/bootrom state made the multidrop DP connect on the
+  first try and read the genuine `DPIDR 0x0bc12477`. Speed sweeps and
+  connect-under-reset did not help because the target's user code was interfering
+  with the SWD pads; a clean target state was the fix. The probe firmware was
+  never at fault (consistent with the phase-3 A/B, where the official firmware
+  failed the same dirty-target setup identically).
 - **UART RT:** ✓ — CDC↔uart1 GP4→GP5 loopback verified in phase 4b (both directions).
 - **autobaud (partial):** ✓ no-wedge — the MAGIC_BAUD(9728)→115200 start/stop
   cycle leaves the bridge alive (race + stack-overflow fixes hold). The detection
@@ -143,6 +154,7 @@ check the available hardware allows (see the note below the table):
 - UART bridge + serial (phase 4-core): loopback echo both directions; serial from hwinfo propagated to DAP_Info and USB iSerialNumber.
 - Autobaud apply path (phase 4b): MAGIC_BAUD sentinel + 4 KB stack overflow + race fixes all hold.
 - Conformance A/B (phase 5): 27 protocol-deterministic byte-identical + 1 environment-dependent (`swj_pins_read`, matched) + 3 whitelisted DAP_Info strings, 0 unexpected mismatches vs official v2.3.1 (`compare` → 28 identical / 3 whitelisted → PASS).  **Live on-hardware A/B done 2026-06-12** — official firmware captured live, byte-for-byte identical to the source-derived prediction on all 31 commands.
+- **Full openocd debug acceptance (phase 5, rpi_pico/PIO, 2026-06-12): ✓ PASS** against an RP2040 target in a clean (BOOTSEL) state — multidrop connect (`DPIDR 0x0bc12477`, Cortex-M0+ detected), `reset halt`, single-step, memory read, RAM write+readback (3 locations), flash erase+program+verify (top sector), and `reset run` all pass. The earlier multidrop-connect failure was target state (dirty SWD pads from user code), not the probe — fixed by a clean target state.
 
 ### Pending (hardware-dependent)
 
@@ -151,10 +163,10 @@ check the available hardware allows (see the note below the table):
    loopback cannot trigger detection.  The estimator logic is fully host-tested
    and the apply path is on-target-verified.
 
-2. **Full openocd memory R/W + flash acceptance** — `mdw`/`mww` RAM round-trip
-   and `load <elf>` / `verify_image` require a single-drop SWD target (STM32 /
-   bare Cortex-M).  The multidrop RP2040 fails `connect` under both our firmware
-   and the official v2.3.1, so it cannot be used as a target for this check.
+2. **Acceptance on the remaining board × backend combinations** — the full debug
+   acceptance above was run on rpi_pico/PIO; the other five (rpi_pico/bitbang,
+   rpi_pico2 × {PIO, bitbang}, rpi_debug_probe × {PIO, bitbang}) follow the same
+   documented procedure and remain to be run when those boards are on the bench.
 
 ---
 
@@ -167,3 +179,8 @@ reference (27 protocol-deterministic plus `swj_pins_read`, which is
 environment-dependent and matched on the same wiring); the remaining 3 are
 deliberately enhanced (DAP_Info strings now populated, giving openocd a readable
 `Serial#`).  No unexpected mismatches were found.
+
+A full openocd debug acceptance (connect → halt → step → memory read/write →
+flash erase/program/verify → reset run) also passes end-to-end on rpi_pico/PIO
+against a real RP2040 target, confirming the probe works as a complete debug
+adapter, not just at the protocol level.
