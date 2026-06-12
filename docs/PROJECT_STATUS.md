@@ -95,18 +95,36 @@ mechanism, source-derived reference capture.
 
 Run the acceptance suite in [`docs/HARDWARE_BRINGUP.md` — Full on-target
 acceptance (phase 5)](HARDWARE_BRINGUP.md#full-on-target-acceptance-phase-5) and
-record results here. **All cells are blank pending hardware** — each `—` means
-that board × backend combination has not been run through the full suite yet
-(not a failure); fill them in as testing proceeds:
+record results here. A `—` means that board × backend combination has not been
+run through the full suite yet (not a failure). `P*` = partial: passed every
+check the available hardware allows (see the note below the table):
 
 | Board | Backend | openocd accept | UART RT | autobaud | LEDs |
 |---|---|---|---|---|---|
-| rpi_pico | PIO | — | — | — | — |
+| rpi_pico | PIO | P* | ✓ | P* | n/a |
 | rpi_pico | bitbang | — | — | — | — |
 | rpi_pico2 | PIO | — | — | — | — |
 | rpi_pico2 | bitbang | — | — | — | — |
 | rpi_debug_probe | PIO | — | — | — | — |
 | rpi_debug_probe | bitbang | — | — | — | — |
+
+**rpi_pico / PIO, executed 2026-06-12 (`P*` detail):**
+- **openocd accept (partial):** openocd 0.12.0 opens our CMSIS-DAP v2 interface,
+  reports `FW Version = 2.0.0` and `Serial# = E661A4D41777B429`, initialises SWD,
+  and reads `SWD DPIDR 0x10212927`. The subsequent "Could not find MEM-AP" /
+  full memory-R/W + flash step is **blocked by the multidrop RP2040 target** (the
+  only target wired here), which fails the official firmware identically — an
+  environment limit, not a firmware defect. Full mem-R/W acceptance still needs a
+  single-drop SWD target.
+- **UART RT:** ✓ — CDC↔uart1 GP4→GP5 loopback verified in phase 4b (both directions).
+- **autobaud (partial):** ✓ no-wedge — the MAGIC_BAUD(9728)→115200 start/stop
+  cycle leaves the bridge alive (race + stack-overflow fixes hold). The detection
+  happy-path still needs an external UART source on GP5.
+- **LEDs:** n/a on rpi_pico (no DAP/UART activity LEDs; onboard USB LED only —
+  the debug-probe board has the full LED set).
+- **USB descriptors + DAP serial:** ✓ — `check_descriptors.py` all checks pass
+  (3 interfaces, vendor CMSIS-DAP v2, WinUSB/MS-OS-2.0, DAP serial == USB serial).
+- **Conformance A/B:** ✓ PASS (see above / CONFORMANCE_RESULTS.md).
 
 ---
 
