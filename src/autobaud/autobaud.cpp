@@ -120,6 +120,19 @@ void run_once()
 	PIO pio = pio_rpi_pico_get_pio(pio_dev);
 	size_t sm = 0;
 
+	/* STOP-before-measure: if an autobaud_stop() already posted STOP (it
+	 * raced ahead of this thread in the same cooperative workqueue drain),
+	 * observe it here BEFORE claiming an SM or moving GP5 to PIO. Nothing has
+	 * been acquired yet, so teardown is just handing the UART pin back (the
+	 * thread re-enables RX in restore_uart_pin and posts STOPPED on return).
+	 * This is what stops a dropped STOP from wedging the bridge on an idle
+	 * line that never converges. */
+	if (k_event_test(&g_evt, kEvtStop)) {
+		LOG_INF("autobaud start cancelled by pending stop");
+		restore_uart_pin();
+		return;
+	}
+
 	/* Claim a free SM from the Zephyr-managed allocator (the SWD driver uses
 	 * the same call). autobaud.c:314 pio_claim_unused_sm. */
 	int ret = pio_rpi_pico_allocate_sm(pio_dev, &sm);
@@ -167,10 +180,22 @@ void run_once()
 
 	/* Drain loop. Equivalent to autobaud_thread's estimate_baud_rate poll
 	 * (autobaud.c:382-384) but pulling samples directly from the PIO RX FIFO
-	 * instead of a DMA ring. Stop on a confident estimate or a STOP event. */
+	 * instead of a DMA ring. Stop on a confident estimate, a STOP event, or a
+	 * hard total-time cap. The cap is defense-in-depth: even if a STOP were
+	 * ever lost again, an idle line that never converges self-heals (teardown
+	 * restores the pin + unclaims the SM) instead of wedging the bridge. */
+	constexpr int64_t kMeasureTimeoutMs = 5000; /* K_SECONDS(5) hard cap */
+	const int64_t start_ms = k_uptime_get();
 	bool converged = false;
+	bool timed_out = false;
 	while (true) {
 		if (k_event_test(&g_evt, kEvtStop)) {
+			break;
+		}
+		if (k_uptime_get() - start_ms >= kMeasureTimeoutMs) {
+			LOG_DBG("autobaud measurement timed out after %d ms",
+				(int)kMeasureTimeoutMs);
+			timed_out = true;
 			break;
 		}
 
@@ -218,7 +243,8 @@ void run_once()
 	pio_remove_program(pio, RPI_PICO_PIO_GET_PROGRAM(autobaud), offset);
 	restore_uart_pin();
 
-	LOG_INF("autobaud stopped (%s)", converged ? "converged" : "aborted");
+	LOG_INF("autobaud stopped (%s)",
+		converged ? "converged" : (timed_out ? "timeout" : "aborted"));
 }
 
 /* The autobaud thread. Mirrors autobaud_thread (autobaud.c:357-387): idle until
@@ -227,22 +253,34 @@ void thread_fn(void *, void *, void *)
 {
 	while (true) {
 		/* Idle: block until a START arrives (autobaud.c:363-365). Clear
-		 * any stale STOP/STOPPED so they do not affect the upcoming run. */
+		 * START and any stale STOPPED, but NOT STOP: a STOP posted by an
+		 * autobaud_stop() that raced ahead of us (same workqueue drain,
+		 * before this preemptible thread ran) MUST survive to be observed
+		 * at the top of run_once(), or we would leak the pin/SM forever. */
 		k_event_wait(&g_evt, kEvtStart, false, K_FOREVER);
-		k_event_clear(&g_evt, kEvtStart | kEvtStop | kEvtStopped);
+		k_event_clear(&g_evt, kEvtStart | kEvtStopped);
 
-		atomic_set(&g_running, 1);
+		/* g_running was set synchronously in autobaud_start() before START
+		 * was posted; do not set it here. */
 		/* Stop uart1 RX so the UART peripheral does not fight PIO for the
 		 * pad while PIO owns GP5; restored (re-enabled) in teardown. */
 		uart_irq_rx_disable(uart_dev);
 
 		run_once();
 
-		/* Mark not-running, THEN signal stopped: a caller waiting in
-		 * autobaud_stop() is released only after run_once()'s teardown has
-		 * restored the UART pin, so the bridge's follow-up uart_configure
-		 * never races a PIO-owned pad (autobaud_wait_stop, autobaud.c:351). */
+		/* Mark not-running FIRST: once g_running is 0, no further
+		 * autobaud_stop() can post a STOP (it early-returns), so the
+		 * subsequent clear cannot drop a STOP meant for a future run.
+		 * THEN clear the STOP for THIS run -- by now run_once has consumed
+		 * it (at its top or in the drain loop) and the pin is restored, so
+		 * it must not bleed into the next run; a STOP posted during the
+		 * start->run_once window above was still observable. THEN signal
+		 * STOPPED: a caller waiting in autobaud_stop() is released only
+		 * after run_once()'s teardown has restored the UART pin, so the
+		 * bridge's follow-up uart_configure never races a PIO-owned pad
+		 * (autobaud_wait_stop, autobaud.c:351). */
 		atomic_set(&g_running, 0);
+		k_event_clear(&g_evt, kEvtStop);
 		k_event_post(&g_evt, kEvtStopped);
 	}
 }
@@ -257,8 +295,16 @@ void autobaud_start()
 {
 	/* Idempotent: a no-op if a run is already in progress (autobaud.c's
 	 * autobaud_running guard, autobaud.c:363). The thread is spawned lazily
-	 * on the first start. */
-	if (atomic_get(&g_running)) {
+	 * on the first start.
+	 *
+	 * Mark running SYNCHRONOUSLY (before posting START) and atomically, so a
+	 * back-to-back autobaud_stop() in the same cooperative workqueue drain --
+	 * before the preemptible autobaud thread has had a chance to run -- sees
+	 * running=1 and takes the real stop path (posts STOP + waits) instead of
+	 * no-opping. atomic_cas also makes the "already running" check and the
+	 * set indivisible, so a second start (e.g. a DTR toggle while MAGIC_BAUD
+	 * is still set) cleanly no-ops rather than double-posting START. */
+	if (!atomic_cas(&g_running, 0, 1)) {
 		return;
 	}
 	if (g_tid == nullptr) {
