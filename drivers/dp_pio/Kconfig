@@ -1,0 +1,11 @@
+config SWDP_PIO
+	bool "PIO-accelerated SWD port driver"
+	default y
+	depends on PIO_RPI_PICO
+	help
+	  SWD port driver using the RP2 PIO, ported from the Raspberry Pi
+	  debugprobe firmware. Implements the swdp_api.
+
+	  Compiles whenever the misc PIO HAL (PIO_RPI_PICO) is available; a
+	  device is registered only when a raspberrypi,swdp-pio devicetree node
+	  is enabled (DT_INST_FOREACH_STATUS_OKAY).

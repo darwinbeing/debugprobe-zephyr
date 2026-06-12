@@ -5,6 +5,13 @@ project(debugprobe_zephyr LANGUAGES C CXX)
 
 add_subdirectory(lib/dap)
 
+# Out-of-tree PIO SWD port driver (drivers/dp_pio/). Compiled in-app via
+# add_subdirectory + zephyr_library (no module.yml needed); its DT binding lives
+# under the app's dts/bindings/, already on the binding search path. The source
+# itself is guarded on CONFIG_SWDP_PIO inside that CMakeLists.
+zephyr_include_directories(drivers/dp_pio)
+add_subdirectory(drivers/dp_pio)
+
 target_sources(app PRIVATE
   src/main.cpp
   src/usb/usb_device.cpp

@@ -4,6 +4,13 @@
 	};
 };
 
+/* Enable PIO0 so the misc PIO HAL (PIO_RPI_PICO) builds, which the dp_pio
+ * driver compiles against. The raspberrypi,swdp-pio instance is added in Task 5.
+ */
+&pio0 {
+	status = "okay";
+};
+
 / {
 	swd_dev: swd_dev {
 		compatible = "zephyr,swdp-gpio";

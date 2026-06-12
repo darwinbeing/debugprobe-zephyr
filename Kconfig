@@ -23,4 +23,7 @@ config PROBE_SWD_PIO
 
 endchoice
 
+# Out-of-tree PIO SWD port driver Kconfig.
+rsource "drivers/dp_pio/Kconfig"
+
 source "Kconfig.zephyr"
