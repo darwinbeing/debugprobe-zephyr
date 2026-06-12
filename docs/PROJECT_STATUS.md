@@ -89,7 +89,7 @@ mechanism, source-derived reference capture.
 |---|---|
 | Host tests | 76/76 pass |
 | 3-board build | All boards pass |
-| On-target hardware | **Verified (our firmware)** — live capture succeeded (`captured 31 responses`); macOS interface-claim fix validated end-to-end. Cross-checked vs the v2.3.1 source: **27 byte-identical / 3 whitelisted (DAP_Info strings) / 1 environment-dependent / 0 unexpected mismatches** (`compare` → PASS). Live official-firmware A/B re-flash still pending. See [CONFORMANCE_RESULTS.md](CONFORMANCE_RESULTS.md) for the full table. |
+| On-target hardware | **Verified (our firmware)** — live capture succeeded (`captured 31 responses`); macOS interface-claim fix validated end-to-end. Cross-checked vs the v2.3.1 source: **27 protocol-deterministic responses byte-identical + 1 environment-dependent (`swj_pins_read`, matched on the same wiring) + 3 whitelisted DAP_Info-string enhancements, 0 unexpected mismatches** (`compare` reports 28 identical / 3 whitelisted / 0 missing → PASS). Live official-firmware A/B re-flash still pending. See [CONFORMANCE_RESULTS.md](CONFORMANCE_RESULTS.md) for the full table. |
 
 ### Phase 5 hardware acceptance table (fill in per board × backend)
 
@@ -119,7 +119,7 @@ that board × backend combination has not been run through the full suite yet
 - SWD backends (phase 3): DPIDR read via both PIO and bitbang; matches official firmware.
 - UART bridge + serial (phase 4-core): loopback echo both directions; serial from hwinfo propagated to DAP_Info and USB iSerialNumber.
 - Autobaud apply path (phase 4b): MAGIC_BAUD sentinel + 4 KB stack overflow + race fixes all hold.
-- Conformance capture (phase 5): 27 byte-identical / 3 whitelisted / 1 env-dep / 0 unexpected mismatches vs official v2.3.1 source.  Live official firmware empirical capture pending a BOOTSEL re-flash.
+- Conformance capture (phase 5): 27 protocol-deterministic byte-identical + 1 environment-dependent (`swj_pins_read`, matched) + 3 whitelisted DAP_Info strings, 0 unexpected mismatches vs official v2.3.1 source (`compare` → 28 identical / 3 whitelisted → PASS).  Live official firmware empirical capture pending a BOOTSEL re-flash.
 
 ### Pending (hardware-dependent)
 
@@ -139,7 +139,8 @@ that board × backend combination has not been run through the full suite yet
 
 The rewrite is **feature-complete**.  On the hardware tested, it behaves
 identically to the official debugprobe v2.3.1 at the CMSIS-DAP protocol level:
-27 of 31 command responses are byte-for-byte identical, the remaining differences
-are either deliberately enhanced (3 DAP_Info strings now populated, giving
-openocd a readable `Serial#`) or environment-dependent (1 pin-state read).
-No unexpected mismatches were found.
+28 of 31 command responses are byte-for-byte identical to the source-derived
+reference (27 protocol-deterministic plus `swj_pins_read`, which is
+environment-dependent and matched on the same wiring); the remaining 3 are
+deliberately enhanced (DAP_Info strings now populated, giving openocd a readable
+`Serial#`).  No unexpected mismatches were found.

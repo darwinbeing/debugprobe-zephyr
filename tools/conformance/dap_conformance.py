@@ -43,7 +43,7 @@ SEQUENCE = [
     ("reset_target",       [0x0A]),
     ("jtag_seq_err",       [0x14, 0x01, 0x01, 0xAA]),  # degenerate JTAG_Sequence: TDI=1, 0 TCK cycles
     ("unknown_cmd",        [0x17]),
-    ("vendor_echo",        [0x85, 0x01]),
+    ("vendor_echo",        [0x85, 0x01]),  # DAP_Vendor5: DAP_vendor.c echoes only the command-ID byte (-> 85), no data
     ("execute_batch",      [0x7F, 0x02, 0x00, 0x04, 0x09, 0x64, 0x00]),  # DAP_ExecuteCommands: count=2 -> DAP_Info(0x04) + DAP_Delay(100us)
     ("disconnect",         [0x03]),
 ]

@@ -2,8 +2,10 @@
 
 Date: 2026-06-11
 Status: Implemented — all phases 1–5 complete and merged; hardware-verified on
-rpi_pico (CMSIS-DAP conformance: 27/31 responses byte-identical to official
-v2.3.1, 3 deliberate DAP_Info-string enhancements, 0 unexpected mismatches). See
+rpi_pico (CMSIS-DAP conformance: 28/31 responses byte-identical to official
+v2.3.1 — 27 protocol-deterministic plus the environment-dependent
+`swj_pins_read` — with 3 deliberate DAP_Info-string enhancements and 0 unexpected
+mismatches). See
 `docs/PROJECT_STATUS.md` and `docs/CONFORMANCE_RESULTS.md`.
 
 ## Background and Goal

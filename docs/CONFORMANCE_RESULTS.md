@@ -64,7 +64,17 @@ Hold BOOTSEL again and copy `build/rpi_pico/zephyr/zephyr.uf2` back.
 **Firmware under test:** Zephyr rewrite (phase 5), endpoints OUT=0x01/IN=0x81.
 **Reference:** official debugprobe v2.3.1 — **source-derived, not a live capture** (the live A/B re-flash is pending; see [Pending empirical confirmation](#pending-empirical-confirmation) below). For context, the official firmware enumerates with endpoints OUT=0x04/IN=0x85.
 
-**Headline: 27 byte-identical / 3 whitelisted / 1 environment-dependent / 0 unexpected mismatches.**
+**Headline: 28 of 31 responses byte-identical to the source-derived reference
+(`compare` → 0 unexpected mismatches); the other 3 are the deliberate,
+whitelisted DAP_Info string enhancements.**
+
+Of those 28 identical responses, 27 are protocol-deterministic and 1
+(`swj_pins_read`) is environment-dependent — its byte reflects live pin levels
+and matched here because both firmwares read the same wiring (see
+[Environment-dependent: swj_pins_read](#environment-dependent-swj_pins_read)).
+The `compare` tool has no separate "environment-dependent" bucket, so it counts
+`swj_pins_read` among the byte-identical responses and reports `3 whitelisted,
+0 missing`.
 
 ### Full cross-check table
 
@@ -94,7 +104,7 @@ responses derived by reading the official v2.3.1 source (`DAP.c`,
 | connect_jtag | `0200` | `0200` | MATCH |
 | swj_clock_1mhz | `1100` | `1100` | MATCH |
 | swj_clock_zero | `11ff` | `11ff` | MATCH |
-| swj_pins_read | `1080` | (env-dependent) | ENV-DEP |
+| swj_pins_read | `1080` | `1080` (env-dependent; reference uses the same wiring) | MATCH (ENV-DEP) |
 | swj_sequence | `1200` | `1200` | MATCH |
 | swd_configure | `1300` | `1300` | MATCH |
 | transfer_configure | `0400` | `0400` | MATCH |
