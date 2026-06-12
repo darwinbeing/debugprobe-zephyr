@@ -1,12 +1,25 @@
 #include "dap/dap_backend.hpp"
 
-#include "dap/null_swd_driver.hpp"
-
 #include "dap/constants.hpp"
 #include "dap/engine.hpp"
 #include "dap/interfaces.hpp"
 
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
+
+/* SWD backend selection (Kconfig PROBE_SWD_*):
+ *   NULL    -> NullSwdDriver (no SWD; bring-up only)
+ *   BITBANG -> ZephyrSwdpDriver over the zephyr,swdp-gpio device (swd_bitbang)
+ *   PIO     -> ZephyrSwdpDriver over the raspberrypi,swdp-pio device (swd_pio)
+ * Both real backends share the single adapter; the device is selected by
+ * devicetree (the swd_bitbang/swd_pio nodelabel) per the Kconfig choice.
+ */
+#if defined(CONFIG_PROBE_SWD_NULL)
+#include "dap/null_swd_driver.hpp"
+#else
+#include "dap/swdp_driver.hpp"
+#endif
 
 namespace probe {
 
@@ -20,6 +33,7 @@ public:
 	void running(bool) override {}
 };
 
+#if defined(CONFIG_PROBE_SWD_NULL)
 void NullSwdDriver::delay_us(uint32_t us)
 {
 	k_busy_wait(us);
@@ -29,12 +43,19 @@ uint32_t NullSwdDriver::timestamp()
 {
 	return k_cyc_to_us_floor32(k_cycle_get_32());
 }
+#endif
 
 namespace dap_backend {
 
 namespace {
 
+#if defined(CONFIG_PROBE_SWD_NULL)
 NullSwdDriver g_driver;
+#elif defined(CONFIG_PROBE_SWD_PIO)
+ZephyrSwdpDriver g_driver{DEVICE_DT_GET(DT_NODELABEL(swd_pio))};
+#else
+ZephyrSwdpDriver g_driver{DEVICE_DT_GET(DT_NODELABEL(swd_bitbang))};
+#endif
 NullHostStatus g_host;
 
 /* Engine configuration. serial is left nullptr until phase 4 wires the

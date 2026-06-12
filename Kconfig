@@ -6,4 +6,26 @@ config PROBE_PRODUCT_STRING
 	default "Debugprobe on Pico (CMSIS-DAP)" if BOARD_RPI_PICO || BOARD_RPI_PICO2
 	default "Debugprobe (CMSIS-DAP)"
 
+choice PROBE_SWD_BACKEND
+	prompt "SWD driver backend"
+	default PROBE_SWD_BITBANG
+	help
+	  Which SWD port driver backs the DAP engine.
+
+config PROBE_SWD_NULL
+	bool "Null (no SWD; bring-up only)"
+
+config PROBE_SWD_BITBANG
+	bool "Zephyr GPIO bitbang (zephyr,swdp-gpio)"
+
+config PROBE_SWD_PIO
+	bool "PIO-accelerated (raspberrypi,swdp-pio)"
+
+endchoice
+
+# The out-of-tree PIO SWD port driver Kconfig (drivers/dp_pio/Kconfig) is
+# sourced via the Zephyr module mechanism (zephyr/module.yml -> build.kconfig),
+# not rsource'd here, so it is registered alongside the driver's CMakeLists in
+# the module loop. Sourcing it both ways would redefine SWDP_PIO.
+
 source "Kconfig.zephyr"

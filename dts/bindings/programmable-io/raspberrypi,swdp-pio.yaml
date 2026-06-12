@@ -1,0 +1,51 @@
+# Copyright The Zephyr Project Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+description: Raspberry Pi PIO-accelerated SWD port
+
+compatible: "raspberrypi,swdp-pio"
+
+# base.yaml (status/compatible/etc). The plan suggested pin-controller.yaml,
+# but no such base binding exists in Zephyr and this node does not use pinctrl:
+# PIO pins are given as absolute GPIO numbers via swclk-pin/swdio-pin, and
+# nRESET/pull config goes through the *-gpios phandles. Same base the bitbang
+# zephyr,swdp-gpio binding uses.
+include: base.yaml
+
+properties:
+  piodev:
+    type: phandle
+    required: true
+    description: The PIO instance (pio0/pio1) hosting the SWD program.
+
+  clk-gpios:
+    type: phandle-array
+    required: true
+    description: SWCLK pin.
+
+  dio-gpios:
+    type: phandle-array
+    required: true
+    description: SWDIO pin (shared in/out on Pico; output on buffered probe).
+
+  din-gpios:
+    type: phandle-array
+    description: Separate SWDIO input pin (buffered Debug Probe only).
+
+  oen-gpios:
+    type: phandle-array
+    description: Output-enable pin for the level shifter (buffered probe only).
+
+  reset-gpios:
+    type: phandle-array
+    description: Target nRESET pin (open-drain emulation).
+
+  swclk-pin:
+    type: int
+    required: true
+    description: SWCLK GPIO number (PIO side-set base).
+
+  swdio-pin:
+    type: int
+    required: true
+    description: SWDIO GPIO number (PIO out/in base).

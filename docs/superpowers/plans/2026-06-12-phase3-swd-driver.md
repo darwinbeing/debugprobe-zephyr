@@ -44,9 +44,11 @@ ACK values are identical across both worlds: `SWDP_ACK_OK=BIT(0)=1`, `WAIT=BIT(1
 |---|---|---|---|---|---|---|
 | rpi_pico (RP2040) | probe.pio (shared SWDIO) | GP2 | GP3 | GP3 (same) | — | GP1 |
 | rpi_pico2 (RP2350) | probe.pio (shared SWDIO) | GP2 | GP3 | GP3 (same) | — | GP1 |
-| rpi_debug_probe (RP2040) | probe_oen.pio (buffered) | GP12 | GP14 | GP13 | GP15 region | (per board cfg) |
+| rpi_debug_probe (RP2040) | probe.pio (separate SWDI input) | GP12 | GP14 | GP13 | — | (none; no reset pin) |
 
-The debug-probe pin detail (separate SWDI input GP13, output-enable) MUST be re-verified against `board_debug_probe_config.h` during Task 5; the table is the starting point. The upstream `rpi_debug_probe.overlay` in the Zephyr dap sample already encodes clk=GP12/dio=GP14 for the bitbang case — reuse it.
+> **Amended during execution (2026-06-12):** The real Raspberry Pi Debug Probe is `PROBE_IO_SWDI` (verified in `~/Developer/debugprobe/include/board_debug_probe_config.h`: SWCLK=GP12, SWDI input=GP13, SWDIO output=GP14, **no OEn**), and `~/Developer/debugprobe/src/probe.c:154` uses `&probe_program` **unconditionally**. So ALL THREE of our boards use **probe.pio** (1-bit side-set, base = SWCLK). The Debug Probe differs from the Pico ONLY by reading a separate SWDI input pin (`din-gpios` = GP13) instead of the shared SWDIO. The `probe_oen.pio` 2-bit-side-set/output-enable program belongs to a different EXAMPLE board (`board_example_config.h`, `PROBE_IO_OEN`) that none of our targets use — it is a **latent** path (`oen-gpios`), kept correct but unshipped. The earlier "rpi_debug_probe → probe_oen.pio / OEn GP15" claim was the plan's premise being wrong; the driver models two independent axes: `use_swdi` (din-gpios → in_pins=SWDI, still probe.pio) and `use_oen` (oen-gpios → probe_oen.pio).
+
+The debug-probe pin detail was re-verified against `board_debug_probe_config.h` during Task 5. The upstream `rpi_debug_probe.overlay` in the Zephyr dap sample already encodes clk=GP12/dio=GP14 for the bitbang case — reuse it; the PIO overlay adds `din-gpios = <&gpio0 13 ...>` for the separate SWDI input.
 
 ---
 
@@ -747,7 +749,7 @@ In each overlay, give the bitbang node `status = "disabled"` by default and add 
 };
 ```
 
-For `boards/rpi_debug_probe.overlay`, the PIO node uses `probe_oen` (add `oen-gpios` + `din-gpios` per `board_debug_probe_config.h`), SWCLK=GP12, SWDIO=GP14, SWDI=GP13:
+For `boards/rpi_debug_probe.overlay`, the PIO node uses **probe.pio with a separate SWDI input** (`din-gpios`, per `board_debug_probe_config.h` `PROBE_IO_SWDI`), SWCLK=GP12, SWDIO(out)=GP14, SWDI(in)=GP13, and **no `oen-gpios`** (OEN is the latent example-board path, not the Debug Probe):
 
 ```dts
 &pio0 { status = "okay"; };
@@ -767,7 +769,6 @@ For `boards/rpi_debug_probe.overlay`, the PIO node uses `probe_oen` (add `oen-gp
 		clk-gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
 		dio-gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
 		din-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
-		oen-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
 		swclk-pin = <12>;
 		swdio-pin = <14>;
 		status = "okay";
@@ -775,7 +776,7 @@ For `boards/rpi_debug_probe.overlay`, the PIO node uses `probe_oen` (add `oen-gp
 };
 ```
 
-(Re-verify the Debug Probe OEn/SWDI pin numbers against `board_debug_probe_config.h` `PROBE_PIN_OFFSET`/`PROBE_PIN_SWDIOEN`/`PROBE_PIN_SWDI` — the table above is GP12-based; adjust and record.)
+(Verified against `board_debug_probe_config.h`: `PROBE_PIN_OFFSET=12`, `PROBE_PIN_SWCLK=12`, `PROBE_PIN_SWDI=13`, `PROBE_PIN_SWDIO=14`, `PROBE_IO_SWDI` defined, no `PROBE_IO_OEN`. The `din-gpios` presence sets the driver's `use_swdi` axis: `in_pins = SWDI` while the SM still loads `probe_program`. The binding keeps BOTH `oen-gpios` and `din-gpios` supported; only `din-gpios` is used here. To exercise the latent OEN path on a hypothetical example board, add `oen-gpios` — the driver then loads `probe_oen_program` with 2-bit side-set.)
 
 - [ ] **Step 2: Update `dap_backend.cpp`'s nodelabel selection to follow the backend choice**
 
@@ -896,5 +897,5 @@ git commit -m "docs: sync spec with as-built SWD backends; hardware bring-up gui
 - **`pio_rpi_pico` / pico-sdk PIO HAL availability**: the misc PIO driver (`CONFIG_PICO_PIO_RPI_PICO`) and `hardware/pio.h` must be enabled/visible; if the firmware build can't resolve `pio_sm_*`, enable the misc driver and confirm the hal_rpi_pico module include path (Task 4 Step 5).
 - **Out-of-tree driver glue**: app-local `drivers/dp_pio/` may need module wiring (`zephyr/module.yml` + `ZEPHYR_EXTRA_MODULES`) rather than a bare `add_subdirectory`; Task 4 Step 4 allows either — use whatever builds and record it.
 - **`swdp_api` signature drift vs Zephyr 4.4**: verify member names/signatures in `include/zephyr/drivers/swdp.h` before writing the adapter and the driver (Task 1/Task 4); the bitbang driver `drivers/dp/swdp_bitbang.c` is the authoritative example of a correct `swdp_api` implementation.
-- **Debug Probe buffered pins (OEn/SWDI)**: the `probe_oen` program + separate input pin path is the least-tested; re-verify pin numbers against `board_debug_probe_config.h` (Task 5 Step 1) and treat the Debug Probe PIO path as the highest-risk item for hardware bring-up.
+- **Debug Probe separate SWDI input**: the real Debug Probe is `PROBE_IO_SWDI` (probe.pio + `din-gpios` separate input), NOT OEN — verified against `board_debug_probe_config.h` and `probe.c:154` (`&probe_program` unconditional). The `use_swdi` path (in_pins=SWDI, still probe.pio) is the least-tested of the shipped configs; treat the Debug Probe PIO path as the highest-risk shipped item for hardware bring-up. The `probe_oen.pio` 2-bit-side-set path is latent (`oen-gpios`, no shipped board) but kept correctly configured (2-bit side-set base=OEn, in=SWDI, 3 output pindirs) so it is not shipped-wrong.
 
