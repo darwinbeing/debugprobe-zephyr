@@ -1699,6 +1699,8 @@ git commit -m "feat: dap SWJ_Sequence, SWD_Configure, SWD_Sequence"
 
 This is the heart of the protocol. Port `DAP_SWD_Transfer` (`DAP.c:657-940`) faithfully — same posting pipeline, same retry semantics, same response layout. Read that function before writing code.
 
+> **Amendment (2026-06-12):** The `check_write` trailing "check last write" RDBUFF read (`DAP.c:902-908`) was initially dropped; it is required for parity (a single DP write makes two SWD transfers). `transfer_single_dp_write` now expects 2 transfers, and a `transfer_write_fault_surfaces_via_trailing_read` regression test was added.
+
 **Files:**
 - Modify: `lib/dap/src/transfer.cpp`
 - Create: `tests/host/test_transfer.cpp`
@@ -1751,13 +1753,18 @@ TEST(transfer_configure_sets_state_and_acks)
 TEST(transfer_single_dp_write)
 {
 	Fixture f;
-	/* count=1: write DP addr 4 (0x04 -> A2 set), value 0x11223344 */
+	/* count=1: write DP addr 4 (0x04 -> A2 set), value 0x11223344.
+	 * The reference issues a trailing RDBUFF read (NULL data) to capture
+	 * the last write's ACK (DAP.c check_write, :902-908), so TWO SWD
+	 * transfers occur for one DP write. */
 	auto r = f.run({0x05, 0x00, 0x01, 0x04, 0x44, 0x33, 0x22, 0x11});
 	const uint8_t want[] = {0x05, 0x01, dap::kXferOk};
 	CHECK_BYTES(r, want);
-	CHECK_EQ(f.drv.transfers.size(), 1u);
+	CHECK_EQ(f.drv.transfers.size(), 2u);
 	CHECK_EQ(f.drv.transfers[0].request, 0x04);
 	CHECK_EQ(f.drv.transfers[0].write_data, 0x11223344u);
+	CHECK_EQ(f.drv.transfers[1].request, dap::kReqReadRdbuff);
+	CHECK(f.drv.transfers[1].data_null);
 }
 
 TEST(transfer_single_dp_read)
@@ -1940,10 +1947,11 @@ DapEngine::Sizes DapEngine::cmd_transfer_configure(std::span<const uint8_t> req,
   - **Read with MatchValue (bit4)**: consume 4 match bytes; if AP, first post with `transfer_retry(request, nullptr)`; then poll `transfer_retry(request, &data)` until `(data & match_mask_) == match_value` or `match_retry_` exhausted/abort; on residual mismatch OR `kXferMismatch` into response value and break.
   - **Plain read**: AP → post once (`transfer_retry(request, nullptr)`, set `post_read`, store timestamp if requested); DP → `transfer_retry(request, &data)` + store timestamp if requested + store data.
   - **Write with MatchMask (bit5)**: consume 4 bytes into `match_mask_`, response value OK, no driver call.
-  - **Plain write**: if `post_read` pending, flush via RDBUFF first and store its data, clear `post_read`; then consume 4 data bytes and `transfer_retry(request, &data)`; store timestamp if requested.
+  - **Plain write**: if `post_read` pending, flush via RDBUFF first and store its data, clear `post_read`; then consume 4 data bytes and `transfer_retry(request, &data)`; store timestamp if requested; set `check_write = true`.
+  - Track `check_write` alongside `post_read`: any plain read clears it (`DAP.c:815`), a plain write sets it (`DAP.c:863`), the match-mask write leaves it unchanged (`DAP.c:840-843`).
   - Increment completed count; break if `abort_` set.
 - After the loop: skip the remaining canceled request bytes to compute `consumed` (reads +0/+4 for match, writes +4 — `DAP.c:872-885`).
-- If response value still OK and `post_read` pending: final RDBUFF flush, store data.
+- If response value still OK and `post_read` pending: final RDBUFF flush, store data. Else if `check_write` (last completed op was a plain write): issue one trailing "check last write" RDBUFF read with NULL data (`transfer_retry(kReqReadRdbuff, nullptr)`) — stores nothing, only updates `response_value` so a FAULT on the last write surfaces. **Required for parity** (`DAP.c:902-908`); a single DP write therefore makes TWO SWD transfers.
 - Back-fill `resp[0] = count`, `resp[1] = response_value`. Return `{consumed, written}` where written = 2 + data bytes.
 - Disconnected (`!connected_`): respond `{0x00, 0x00}` (count 0, value 0), consume the whole request (`DAP_Dummy_Transfer`, `DAP.c:1538+`).
 - Bounds rule: before consuming any multi-byte field check remaining request size; before storing any 4-byte data check remaining response capacity; on violation stop the loop (treat like abort) — never read/write out of range.

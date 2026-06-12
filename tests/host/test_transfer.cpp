@@ -41,13 +41,32 @@ TEST(transfer_configure_sets_state_and_acks)
 TEST(transfer_single_dp_write)
 {
 	Fixture f;
-	/* count=1: write DP addr 4 (0x04 -> A2 set), value 0x11223344 */
+	/* count=1: write DP addr 4 (0x04 -> A2 set), value 0x11223344.
+	 * The reference issues a trailing RDBUFF read (NULL data) to capture
+	 * the last write's ACK (DAP.c check_write, :902-908), so TWO SWD
+	 * transfers occur for one DP write. */
 	auto r = f.run({0x05, 0x00, 0x01, 0x04, 0x44, 0x33, 0x22, 0x11});
 	const uint8_t want[] = {0x05, 0x01, dap::kXferOk};
 	CHECK_BYTES(r, want);
-	CHECK_EQ(f.drv.transfers.size(), 1u);
+	CHECK_EQ(f.drv.transfers.size(), 2u);
 	CHECK_EQ(f.drv.transfers[0].request, 0x04);
 	CHECK_EQ(f.drv.transfers[0].write_data, 0x11223344u);
+	CHECK_EQ(f.drv.transfers[1].request, dap::kReqReadRdbuff);
+	CHECK(f.drv.transfers[1].data_null);
+}
+
+TEST(transfer_write_fault_surfaces_via_trailing_read)
+{
+	Fixture f;
+	/* Write ACKs OK, but the trailing check-write RDBUFF read FAULTs.
+	 * The reference reports the write as completed (count=1) yet sets
+	 * response_value to the trailing read's FAULT. */
+	f.drv.script.push_back({dap::Ack::Ok, 0});    /* the write */
+	f.drv.script.push_back({dap::Ack::Fault, 0}); /* trailing RDBUFF read */
+	auto r = f.run({0x05, 0x00, 0x01, 0x04, 0x44, 0x33, 0x22, 0x11});
+	const uint8_t want[] = {0x05, 0x01, dap::kXferFault};
+	CHECK_BYTES(r, want);
+	CHECK_EQ(f.drv.transfers.size(), 2u);
 }
 
 TEST(transfer_single_dp_read)

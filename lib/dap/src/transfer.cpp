@@ -118,6 +118,7 @@ DapEngine::Sizes DapEngine::cmd_transfer(std::span<const uint8_t> req,
 	uint8_t response_count = 0;
 	uint8_t response_value = 0;
 	uint32_t post_read = 0;
+	bool check_write = false;
 	uint32_t data = 0;
 
 	/* req[0] = DAP index (ignored); req[1] = transfer count. */
@@ -261,6 +262,7 @@ DapEngine::Sizes DapEngine::cmd_transfer(std::span<const uint8_t> req,
 					}
 				}
 			}
+			check_write = false;
 		} else {
 			/* Write register */
 			if (post_read) {
@@ -305,6 +307,7 @@ DapEngine::Sizes DapEngine::cmd_transfer(std::span<const uint8_t> req,
 						break;
 					}
 				}
+				check_write = true;
 			}
 		}
 		response_count++;
@@ -332,12 +335,6 @@ DapEngine::Sizes DapEngine::cmd_transfer(std::span<const uint8_t> req,
 		}
 	}
 
-	/* Deliberate deviation from DAP_SWD_Transfer (DAP.c:902-908): the
-	 * reference issues a final "check last write" RDBUFF read after the last
-	 * transfer was a write (its check_write path). This library omits that
-	 * verification read — the plan's structural port and the host tests
-	 * (transfer_single_dp_write expects exactly one SWD transfer) define the
-	 * behavior. The posted-read final flush below is kept verbatim. */
 	if (response_value == kXferOk && !stop) {
 		if (post_read) {
 			/* Read previous data via RDBUFF. */
@@ -346,6 +343,11 @@ DapEngine::Sizes DapEngine::cmd_transfer(std::span<const uint8_t> req,
 				/* Store previous data if it fits. */
 				(void)store_word(data);
 			}
+		} else if (check_write) {
+			/* Check last write (DAP.c:902-908): issue a trailing
+			 * RDBUFF read with NULL data to capture the last write's
+			 * ACK. Stores no data; only response_value is updated. */
+			response_value = transfer_retry(kReqReadRdbuff, nullptr);
 		}
 	}
 
