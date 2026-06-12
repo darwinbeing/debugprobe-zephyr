@@ -93,8 +93,11 @@ mechanism, source-derived reference capture.
 
 ### Phase 5 hardware acceptance table (fill in per board × backend)
 
-Run the acceptance suite in `docs/HARDWARE_BRINGUP.md § Full on-target acceptance
-(phase 5)` and record results here:
+Run the acceptance suite in [`docs/HARDWARE_BRINGUP.md` — Full on-target
+acceptance (phase 5)](HARDWARE_BRINGUP.md#full-on-target-acceptance-phase-5) and
+record results here. **All cells are blank pending hardware** — each `—` means
+that board × backend combination has not been run through the full suite yet
+(not a failure); fill them in as testing proceeds:
 
 | Board | Backend | openocd accept | UART RT | autobaud | LEDs |
 |---|---|---|---|---|---|

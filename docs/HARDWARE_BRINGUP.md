@@ -196,10 +196,11 @@ Wire GP4 (uart1 TX) to GP5 (uart1 RX) as a loopback.  Open the CDC-ACM serial
 port on the host and send data at two baud rates:
 
 ```bash
-# 115 200 baud
+# 115 200 baud  (pyserial does NOT expand globs — resolve the port first)
 python3 - <<'PY'
-import serial, time
-p = serial.Serial('/dev/tty.usbmodem*', 115200, timeout=1)
+import serial, time, glob
+port = glob.glob('/dev/tty.usbmodem*')[0]   # pick the CDC-ACM port explicitly
+p = serial.Serial(port, 115200, timeout=1)
 p.write(b'hello\n'); time.sleep(0.1); print(p.read(64))
 PY
 
