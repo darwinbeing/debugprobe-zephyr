@@ -31,6 +31,24 @@
 			input-enable;
 		};
 	};
+
+	/* Autobaud pin-handoff states for uart1 RX (GP5). Two single-state
+	 * dev-configs (the robust two-node approach): while measuring, route GP5
+	 * to PIO0 so the frequency-counter SM sees the edges; on stop, route it
+	 * back to UART1 so the bridge's UART RX works again. Both keep
+	 * input-enable so the pad samples the incoming line. */
+	autobaud_pio_pins: autobaud_pio_pins {
+		rx_group {
+			pinmux = <PIO0_P5>;
+			input-enable;
+		};
+	};
+	autobaud_uart_pins: autobaud_uart_pins {
+		rx_group {
+			pinmux = <UART1_RX_P5>;
+			input-enable;
+		};
+	};
 };
 
 /* Enable uart1 as the bridge's hardware side. The board defaults the console
@@ -55,6 +73,27 @@
 	 * (src/uart_bridge.cpp) that binds cdc_acm_uart0 and uart1 directly, so
 	 * there is no zephyr,uart-bridge DT node here anymore.
 	 */
+
+	/* Autobaud pin-handoff anchors (compatible debugprobe,autobaud). The
+	 * autobaud module (src/autobaud/autobaud.cpp) references these two nodes
+	 * via DT_NODELABEL to obtain the two single-state pinctrl dev-configs:
+	 * autobaud_pio routes uart1 RX (GP5) to PIO0 while measuring;
+	 * autobaud_uart routes it back to UART1 on stop. rx-pin carries the RX
+	 * GPIO number for the PIO SM config. No driver binds these; the binding
+	 * exists only for the pinctrl + rx-pin DT codegen. */
+	autobaud_pio: autobaud_pio {
+		compatible = "debugprobe,autobaud";
+		rx-pin = <5>;
+		piodev = <&pio0>;
+		pinctrl-0 = <&autobaud_pio_pins>;
+		pinctrl-names = "default";
+	};
+	autobaud_uart: autobaud_uart {
+		compatible = "debugprobe,autobaud";
+		rx-pin = <5>;
+		pinctrl-0 = <&autobaud_uart_pins>;
+		pinctrl-names = "default";
+	};
 
 	/* Two SWD backends share these pins (GP2=SWCLK, GP3=shared SWDIO,
 	 * GP1=nRESET). Exactly one is enabled at a time: the PIO node is the

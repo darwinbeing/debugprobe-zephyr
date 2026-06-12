@@ -1,5 +1,6 @@
 #include "uart_bridge.hpp"
 #include "leds.hpp"
+#include "autobaud/autobaud.hpp"
 
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/ring_buffer.h>
@@ -187,7 +188,14 @@ void uart_bridge_line_coding(const struct device *cdc)
 	if (uart_config_get(cdc, &cfg) != 0) {
 		return;
 	}
-	/* TODO(Task 4): if (cfg.baudrate == 9728 / MAGIC_BAUD /) { autobaud_start(); return; } */
+	if (cfg.baudrate == probe::kMagicBaud) {
+		/* MAGIC_BAUD is a host-side sentinel, not a real rate: start
+		 * autobaud and do NOT push it to the target UART. */
+		probe::autobaud_start();
+		return;
+	}
+	/* A real baud cancels any running autobaud (it restores the RX pin). */
+	probe::autobaud_stop();
 	uart_configure(uart_dev, &cfg);
 }
 
