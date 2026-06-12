@@ -249,3 +249,36 @@ For each (board, backend) combination, record the result of each step above in
 | rpi_debug_probe | PIO | ...          |         |          |      |
 | rpi_debug_probe | bitbang | ...      |         |          |      |
 ```
+
+### Troubleshooting: RP2040 target won't connect (`Failed to connect multidrop`)
+
+An RP2040 **target** requires multidrop SWD. If openocd reports
+`Error: Failed to connect multidrop rp2040.dap0`, run `-d3` and look at the
+switch sequence:
+
+```
+cmsis_dap_swd_switch_seq(): DORMANT-to-SWD
+cmsis_dap_swd_read_process(): SWD ack not OK @ 0 JUNK   <-- garbage ACK, repeated
+```
+
+Diagnosis (confirmed 2026-06-12 on the bring-up rig): a **legacy** (non-multidrop)
+SWD connect reads a coherent `DPIDR 0x10212927`, so the probe's SWD path is
+electrically fine — but the longer, more signal-integrity-sensitive
+dormant→SWD multidrop wake-up returns a JUNK ack. This is **not** a probe-firmware
+or openocd-config problem: it reproduces at adapter speeds 100/200/500/1000 kHz
+and with `connect_assert_srst`, and the **official** `debugprobe_on_pico.uf2`
+v2.3.1 fails identically on the same rig (A/B-proven in phase 3). It is a target /
+wiring issue.
+
+Remedies, in order of effectiveness:
+1. **Use a single-drop SWD target** (STM32 / nRF / bare Cortex-M). Standard SWD,
+   no dormant-multidrop dance — by far the most reliable way to finish the full
+   memory-R/W + flash acceptance.
+2. **Improve SWD signal integrity** (the dormant 128-bit alert is the most
+   SI-sensitive part of the handshake — that legacy line-reset works but dormant
+   does not is the classic signature): shorten the SWCLK/SWDIO leads, add a solid
+   common ground wire running alongside the signals, and ensure nothing else
+   drives GP2 (SWCLK) / GP3 (SWDIO).
+3. **Hold the target in a clean state**: power the target RP2040 with its BOOTSEL
+   held (bootrom owns the cores, no user code reconfiguring the SWD pads), or wire
+   the probe's RUN/nRESET to the target's RUN pin and use connect-under-reset.
