@@ -5,12 +5,11 @@ description: Raspberry Pi PIO-accelerated SWD port
 
 compatible: "raspberrypi,swdp-pio"
 
-# base.yaml (status/compatible/etc). The plan suggested pin-controller.yaml,
-# but no such base binding exists in Zephyr and this node does not use pinctrl:
-# PIO pins are given as absolute GPIO numbers via swclk-pin/swdio-pin, and
-# nRESET/pull config goes through the *-gpios phandles. Same base the bitbang
-# zephyr,swdp-gpio binding uses.
-include: base.yaml
+# base.yaml: status/compatible/etc. pinctrl-device.yaml: pinctrl-0/pinctrl-names,
+# used (the Zephyr way, as in raspberrypi,pico-uart-pio) to route SWCLK/SWDIO/SWDI
+# to the PIO funcsel. swclk-pin/swdio-pin still give the PIO SM its side-set/out/in
+# pin numbers; nRESET goes through reset-gpios.
+include: [base.yaml, pinctrl-device.yaml]
 
 properties:
   piodev:

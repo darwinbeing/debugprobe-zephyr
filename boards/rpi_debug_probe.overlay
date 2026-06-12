@@ -1,6 +1,28 @@
+#include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+
 &zephyr_udc0 {
 	cdc_acm_uart0: cdc_acm_uart0 {
 		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+/* Route the Debug Probe's PIO SWD pins to PIO0 (the Zephyr way, via pinctrl).
+ * SWCLK=GP12 (output), SWDIO=GP14 (output only -- the probe has a separate
+ * input), SWDI=GP13 (the read pin: input-enable + pull-up).
+ */
+&pinctrl {
+	swd_pio_default: swd_pio_default {
+		clk_pins {
+			pinmux = <PIO0_P12>;
+		};
+		dio_pins {
+			pinmux = <PIO0_P14>;
+		};
+		din_pins {
+			pinmux = <PIO0_P13>;
+			input-enable;
+			bias-pull-up;
+		};
 	};
 };
 
@@ -31,6 +53,8 @@
 	swd_pio: swd_pio {
 		compatible = "raspberrypi,swdp-pio";
 		piodev = <&pio0>;
+		pinctrl-0 = <&swd_pio_default>;
+		pinctrl-names = "default";
 		clk-gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
 		dio-gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
 		din-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
