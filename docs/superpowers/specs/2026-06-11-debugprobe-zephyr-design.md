@@ -53,7 +53,7 @@ debugprobe-zephyr/                      west T2 topology (app repo is the manife
 ├── CMakeLists.txt
 ├── Kconfig                             # app-level options (USB watchdog switch, etc.)
 ├── prj.conf                            # CONFIG_CPP=y, CONFIG_STD_CPP20=y, usbd-next
-├── lib/dap/                            # ① pure C++20 CMSIS-DAP protocol library (zero Zephyr deps)
+├── lib/dap/                            # ① pure C++20 CMSIS-DAP protocol library (zero Zephyr deps) + tests/host
 │   ├── include/dap/...                 #    public headers: DapEngine, SwdDriver, Pins, ...
 │   └── src/...
 ├── drivers/
@@ -73,7 +73,7 @@ debugprobe-zephyr/                      west T2 topology (app repo is the manife
 │   ├── rpi_debug_probe.overlay/.conf
 │   ├── rpi_pico.overlay/.conf
 │   └── rpi_pico2_rp2350a_m33.overlay/.conf
-├── tests/dap_lib/                      # ztest (native_sim) protocol library unit tests
+├── tests/host/                         # host unit tests (plain CMake, no Zephyr)
 ├── tools/conformance/                  # Python (pyusb) old-vs-new protocol conformance tool
 └── docs/superpowers/specs/             # this document and subsequent plans
 ```
@@ -200,9 +200,7 @@ item-by-item during implementation.)
 
 ## Testing and Acceptance
 
-1. **Unit tests** (`tests/dap_lib`, `west twister -p native_sim`): mock `SwdDriver`
-   injection; cover encode/decode of every command, WAIT/FAULT retries, match transfers,
-   out-of-bounds/truncated request error paths. CI-runnable (no hardware).
+1. **Unit tests** (`tests/host`, `scripts/run_host_tests.sh`): a plain host CMake binary built with the system compiler (no Zephyr — `native_sim` is Linux-only and development is on macOS); a micro test harness with a mock `SwdDriver` injection covers every command's encode/decode, WAIT/FAULT retries, match transfers, posted-read pipelines, the check-write trailing read, TransferBlock, abort, ExecuteCommands batching/framing, and truncated-request / response-capacity error paths. ASan mode via `SANITIZE=1`. CI-runnable on any POSIX host.
 2. **Protocol conformance** (`tools/conformance/`): Python + pyusb sends the same DAP
    request sequences (including randomized Transfer batches) to the old and the new
    firmware and compares responses byte-for-byte; `DAP_Info` version/serial strings go

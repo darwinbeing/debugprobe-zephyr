@@ -707,6 +707,8 @@ git commit -m "feat: dap library public interfaces, mock driver, host compile te
 
 ### Task 2: Engine dispatch + Info / HostStatus / Delay / unknown / vendor / ExecuteCommands
 
+> **Amended during execution:** response-capacity enforcement in process()/dispatch()/cmd_info (OOB findings), ASan mode in run_host_tests.sh.
+
 **Files:**
 - Create: `lib/dap/src/engine.cpp` (replace the Task-1 placeholder)
 - Create: `tests/host/test_engine_basics.cpp`
@@ -914,6 +916,8 @@ Expected: link error (engine symbols missing) — that counts as the failing sta
 
 - [ ] **Step 3: Implement `lib/dap/src/engine.cpp`** — constructor, `process()` (ExecuteCommands loop mirroring `DAP_ExecuteCommand`, `DAP.c:1728-1746`), `dispatch()` mirroring `DAP_ProcessCommand` (`DAP.c:1615-1720`), and the handlers covered by the tests above. Implementation skeleton (complete for this task's scope; transfer/swj handlers are declared but defined in `swj.cpp`/`transfer.cpp` — for THIS task give them temporary definitions returning `{rest-of-request, kDapError}`-style stubs in their own files so the build links; Tasks 3-6 replace them):
 
+  > **Amended during execution:** vendor/JTAG consumed-byte parity for ExecuteCommands batches; cmd_info empty-request guard.
+
 ```cpp
 #include "dap/engine.hpp"
 
@@ -985,7 +989,7 @@ DapEngine::Sizes DapEngine::dispatch(std::span<const uint8_t> req, std::span<uin
 
 	if (cmd >= kCmdVendorFirst && cmd <= kCmdVendorLast) {
 		resp[0] = cmd; /* default DAP_vendor.c: echo only */
-		return {req.size(), 1};
+		return {1, 1};
 	}
 
 	resp[0] = cmd;
@@ -1027,17 +1031,19 @@ DapEngine::Sizes DapEngine::dispatch(std::span<const uint8_t> req, std::span<uin
 	case kCmdSwdSequence:
 		s = cmd_swd_sequence(body_req, body_resp);
 		break;
-	case kCmdJtagSequence: /* JTAG not available on this probe */
+	case kCmdJtagSequence: /* JTAG not available: error, but walk the body */
 		body_resp[0] = kDapError;
-		s = {body_req.size(), 1};
+		s = {jtag_sequence_body_len(body_req), 1};
 		break;
-	case kCmdJtagConfigure:
+	case kCmdJtagConfigure: {
 		body_resp[0] = kDapError;
-		s = {body_req.size(), 1};
+		size_t n = body_req.empty() ? 0 : 1 + static_cast<size_t>(body_req[0]);
+		s = {n > body_req.size() ? body_req.size() : n, 1};
 		break;
-	case kCmdJtagIdcode: /* JTAG compiled out: 1-byte error (DAP.c id_error) */
+	}
+	case kCmdJtagIdcode:   /* JTAG compiled out: 1-byte error (DAP.c id_error) */
 		body_resp[0] = kDapError;
-		s = {body_req.size(), 1};
+		s = {body_req.empty() ? 0u : 1u, 1};
 		break;
 	case kCmdTransferConfigure:
 		s = cmd_transfer_configure(body_req, body_resp);
@@ -1693,6 +1699,8 @@ git commit -m "feat: dap SWJ_Sequence, SWD_Configure, SWD_Sequence"
 
 This is the heart of the protocol. Port `DAP_SWD_Transfer` (`DAP.c:657-940`) faithfully — same posting pipeline, same retry semantics, same response layout. Read that function before writing code.
 
+> **Amendment (2026-06-12):** The `check_write` trailing "check last write" RDBUFF read (`DAP.c:902-908`) was initially dropped; it is required for parity (a single DP write makes two SWD transfers). `transfer_single_dp_write` now expects 2 transfers, and a `transfer_write_fault_surfaces_via_trailing_read` regression test was added.
+
 **Files:**
 - Modify: `lib/dap/src/transfer.cpp`
 - Create: `tests/host/test_transfer.cpp`
@@ -1745,13 +1753,18 @@ TEST(transfer_configure_sets_state_and_acks)
 TEST(transfer_single_dp_write)
 {
 	Fixture f;
-	/* count=1: write DP addr 4 (0x04 -> A2 set), value 0x11223344 */
+	/* count=1: write DP addr 4 (0x04 -> A2 set), value 0x11223344.
+	 * The reference issues a trailing RDBUFF read (NULL data) to capture
+	 * the last write's ACK (DAP.c check_write, :902-908), so TWO SWD
+	 * transfers occur for one DP write. */
 	auto r = f.run({0x05, 0x00, 0x01, 0x04, 0x44, 0x33, 0x22, 0x11});
 	const uint8_t want[] = {0x05, 0x01, dap::kXferOk};
 	CHECK_BYTES(r, want);
-	CHECK_EQ(f.drv.transfers.size(), 1u);
+	CHECK_EQ(f.drv.transfers.size(), 2u);
 	CHECK_EQ(f.drv.transfers[0].request, 0x04);
 	CHECK_EQ(f.drv.transfers[0].write_data, 0x11223344u);
+	CHECK_EQ(f.drv.transfers[1].request, dap::kReqReadRdbuff);
+	CHECK(f.drv.transfers[1].data_null);
 }
 
 TEST(transfer_single_dp_read)
@@ -1934,10 +1947,11 @@ DapEngine::Sizes DapEngine::cmd_transfer_configure(std::span<const uint8_t> req,
   - **Read with MatchValue (bit4)**: consume 4 match bytes; if AP, first post with `transfer_retry(request, nullptr)`; then poll `transfer_retry(request, &data)` until `(data & match_mask_) == match_value` or `match_retry_` exhausted/abort; on residual mismatch OR `kXferMismatch` into response value and break.
   - **Plain read**: AP → post once (`transfer_retry(request, nullptr)`, set `post_read`, store timestamp if requested); DP → `transfer_retry(request, &data)` + store timestamp if requested + store data.
   - **Write with MatchMask (bit5)**: consume 4 bytes into `match_mask_`, response value OK, no driver call.
-  - **Plain write**: if `post_read` pending, flush via RDBUFF first and store its data, clear `post_read`; then consume 4 data bytes and `transfer_retry(request, &data)`; store timestamp if requested.
+  - **Plain write**: if `post_read` pending, flush via RDBUFF first and store its data, clear `post_read`; then consume 4 data bytes and `transfer_retry(request, &data)`; store timestamp if requested; set `check_write = true`.
+  - Track `check_write` alongside `post_read`: any plain read clears it (`DAP.c:815`), a plain write sets it (`DAP.c:863`), the match-mask write leaves it unchanged (`DAP.c:840-843`).
   - Increment completed count; break if `abort_` set.
 - After the loop: skip the remaining canceled request bytes to compute `consumed` (reads +0/+4 for match, writes +4 — `DAP.c:872-885`).
-- If response value still OK and `post_read` pending: final RDBUFF flush, store data.
+- If response value still OK and `post_read` pending: final RDBUFF flush, store data. Else if `check_write` (last completed op was a plain write): issue one trailing "check last write" RDBUFF read with NULL data (`transfer_retry(kReqReadRdbuff, nullptr)`) — stores nothing, only updates `response_value` so a FAULT on the last write surfaces. **Required for parity** (`DAP.c:902-908`); a single DP write therefore makes TWO SWD transfers.
 - Back-fill `resp[0] = count`, `resp[1] = response_value`. Return `{consumed, written}` where written = 2 + data bytes.
 - Disconnected (`!connected_`): respond `{0x00, 0x00}` (count 0, value 0), consume the whole request (`DAP_Dummy_Transfer`, `DAP.c:1538+`).
 - Bounds rule: before consuming any multi-byte field check remaining request size; before storing any 4-byte data check remaining response capacity; on violation stop the loop (treat like abort) — never read/write out of range.
@@ -2123,7 +2137,14 @@ TEST(transfer_abort_mid_batch_stops)
 
 - [ ] **Step 2: Run — new tests FAIL.**
 
-- [ ] **Step 3: Implement `cmd_transfer_block`** as a faithful port of `DAP_SWD_TransferBlock` (`DAP.c:1267-1460`), with the same bounds rules as Task 5. Disconnected → `{count=0(2 bytes), value=0}` consuming the whole request. Also confirm `cmd_transfer` clears `abort_` at entry (`abort_.store(false)`) — Task 6's first abort test depends on it; `cmd_transfer_block` does the same.
+- [ ] **Step 3: Implement `cmd_transfer_block`** as a faithful port of `DAP_SWD_TransferBlock` (`DAP.c:1267-1460`), with the same bounds rules as Task 5. Also confirm `cmd_transfer` clears `abort_` at entry (`abort_.store(false)`) — Task 6's first abort test depends on it; `cmd_transfer_block` does the same.
+
+  **Header-computed consumed length (CRITICAL framing parity, `DAP_TransferBlock` wrapper `DAP.c:1501-1507`):** the request-consumed length is computed from the HEADER ALONE — `body[0]`=DAP index, `body[1..2]`=count (LE 16-bit), `body[3]`=request value — independent of how many transfers completed or of connect state:
+  - read block (`body[3]` has RnW set): consumed = **4** (index + count(2) + value(1)); a read block carries no per-transfer request data.
+  - write block (RnW clear): consumed = **4 + count*4**.
+  - This holds even when the block FAULTS early (e.g. write 2 of 3 faults → still 4+3*4=16) and even when DISCONNECTED. Clamp the final consumed to `req.size()` (never claim more than exists), but compute it from the header first. A cursor-based consumed would desync an ExecuteCommands batch when a write block faults mid-way; the header computation keeps the next sub-command framed. Disconnected → `{count=0(2 bytes), value=0}` with this same header-computed consumed (read→4, write→4+count*4, clamped).
+
+  > **Amended during execution:** consumed length is header-computed (read→4, write→4+count*4, clamped, independent of completed count / connect state), not cursor-based — verified by `block_write_fault_stays_framed_in_batch`. Two plan-Step-1 count assertions were corrected to faithful reference behavior: `block_write_two_words` expects 3 SWD transfers (2 writes + the unconditional trailing "check last write" RDBUFF read, `DAP.c:1344-1348`), and `transfer_abort_mid_batch_stops` expects 2 transfers (the write plus `cmd_transfer`'s trailing check-write RDBUFF, `DAP.c:902-908`, which still fires after the abort breaks the loop).
 
 - [ ] **Step 4: Run tests — all green.**
 
@@ -2209,7 +2230,9 @@ void request_abort();
 } // namespace probe::dap_backend
 ```
 
-Implementation: static `NullSwdDriver`, static `NullHostStatus`, static `dap::Config` populated with `CONFIG_PROBE_PRODUCT_STRING` as product, vendor `"Raspberry Pi"`, serial left nullptr for now (hwinfo wiring lands in phase 4 alongside the real DAP_Info parity work — record this as a known gap in the commit message), `fw_version "2.0.0"`, packet_size 64, packet_count 6; static `dap::DapEngine`. `process()` forwards; `request_abort()` forwards. If `request[0] == 0x07` (TransferAbort) the caller must invoke `request_abort()` instead of `process()` — implement that check inside `process()` for phase 2 simplicity (matching the original's transport, which handles 0x07 out-of-band; the simplification is acceptable until the phase-4 double-buffered transport lands, note it in a comment).
+Implementation: static `NullSwdDriver`, static `NullHostStatus`, static `dap::Config` populated with `CONFIG_PROBE_PRODUCT_STRING` as product, vendor `"Raspberry Pi"`, serial left nullptr for now (hwinfo wiring lands in phase 4 alongside the real DAP_Info parity work — record this as a known gap in the commit message), `fw_version "2.0.0"`, packet_size 64, packet_count 6; static `dap::DapEngine`. `process()` forwards every packet — including 0x07 — straight to the engine; `request_abort()` forwards to `g_engine.request_abort()`. Let 0x07 flow to the engine → DAP_Invalid (parity with the RP2040 debugprobe, which does not intercept it — DAP_ProcessCommand has no case for ID_DAP_TransferAbort, so it falls to `default:` → 0xFF); `request_abort()` stays for the phase-4 async transport that can call it out-of-band.
+
+> **Amendment (2026-06-12):** The original Task 7 spec said to special-case 0x07 inside `process()`. That was corrected: the actual RP2040 debugprobe transport (`src/tusb_edpt_handler.c`) queues every OUT packet through `DAP_ExecuteCommand` → `DAP_ProcessCommand` with no 0x07 intercept; a raw TransferAbort packet therefore returns `{0xFF}` (DAP_Invalid) from the real firmware. The 0x07 special-case was removed from `dap_backend.cpp::process()` so our engine response matches byte-for-byte. The `test_transfer_abort_packet_returns_invalid` test in `test_engine_basics.cpp` pins this decision.
 
 - [ ] **Step 3: Replace the stub in src/usb/dap_class.cpp** — in `dap_request_handler`, replace the `LOG_HEXDUMP_INF` stub block with: copy the OUT buffer, call `probe::dap_backend::process()` into a 64-byte response buffer, allocate an IN buffer from the pool, `usbd_ep_enqueue` it, then re-arm OUT. Bump `UDC_BUF_POOL_DEFINE` count from 2 to 3 (the pool comment from phase 1 anticipated this). Keep all error paths non-escalating (return 0) as established.
 
