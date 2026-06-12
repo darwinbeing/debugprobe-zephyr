@@ -20,6 +20,9 @@ target_sources(app PRIVATE
   src/usb/msosv2.cpp
   src/dap/dap_backend.cpp
   src/leds.cpp
+  src/uart_bridge.cpp
+  src/autobaud/autobaud.cpp
+  src/autobaud/estimator.cpp
 )
 
 # The swdp_api adapter (and its C shim over the non-C++-clean swdp.h) is only
@@ -32,4 +35,8 @@ if(NOT CONFIG_PROBE_SWD_NULL)
 endif()
 
 target_include_directories(app PRIVATE src)
+# The autobaud module (src/autobaud/autobaud.cpp) includes the generated
+# autobaud_pio.h (PIO opcodes), which lives alongside the out-of-tree PIO
+# driver in drivers/dp_pio/.
+target_include_directories(app PRIVATE drivers/dp_pio)
 target_link_libraries(app PRIVATE dap)

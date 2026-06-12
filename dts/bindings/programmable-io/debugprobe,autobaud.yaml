@@ -1,0 +1,28 @@
+# Copyright The Zephyr Project Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  Autobaud pin-handoff anchor. Carries a single pinctrl state used by the
+  autobaud module (src/autobaud/autobaud.cpp) to route uart1's RX pin either to
+  PIO0 (while the frequency counter measures) or back to UART1 (on stop). No
+  driver binds these nodes; the binding exists only so devicetree emits the
+  pinctrl-0/pinctrl-names metadata and the rx-pin property.
+
+compatible: "debugprobe,autobaud"
+
+# pinctrl-device.yaml provides pinctrl-0/pinctrl-names codegen (the same include
+# raspberrypi,swdp-pio uses to route pins to the PIO funcsel).
+include: [base.yaml, pinctrl-device.yaml]
+
+properties:
+  rx-pin:
+    type: int
+    required: true
+    description: uart1 RX GPIO number, passed to the PIO SM as in_pins/jmp_pin.
+
+  piodev:
+    type: phandle
+    description: |
+      The PIO instance (pio0) the autobaud frequency counter runs on. A phandle
+      (not DT_NODELABEL(pio0)) so the reference survives the pico-sdk
+      hardware/pio.h `#define pio0 pio0_hw` token collision.
