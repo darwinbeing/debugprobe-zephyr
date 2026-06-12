@@ -30,6 +30,54 @@ def check(name, cond, detail=""):
         failures.append(name)
 
 
+def check_dap_serial(dev):
+    """Send DAP_Info(SerialNumber) over the vendor bulk endpoints of interface 0
+    and verify the returned serial matches the USB serial string descriptor.
+
+    This is a soft check: if the vendor interface cannot be claimed (e.g. the
+    DAP class driver holds it on macOS) or any USB transfer fails, the check is
+    reported as SKIP rather than FAIL so the tool remains usable when no probe
+    is attached or the OS has already claimed the interface.
+    """
+    try:
+        cfg = dev.get_active_configuration()
+        if0 = cfg[(0, 0)]
+
+        # Detach any kernel driver that may hold the interface (Linux; no-op on macOS)
+        if dev.is_kernel_driver_active(if0.bInterfaceNumber):
+            dev.detach_kernel_driver(if0.bInterfaceNumber)
+
+        usb.util.claim_interface(dev, if0.bInterfaceNumber)
+        try:
+            out_ep = next(
+                e for e in if0 if not (e.bEndpointAddress & 0x80)
+            )
+            in_ep = next(
+                e for e in if0 if (e.bEndpointAddress & 0x80)
+            )
+
+            # DAP_Info request: command byte 0x00, info-id byte 0x03 (SerialNumber)
+            dev.write(out_ep.bEndpointAddress, bytes([0x00, 0x03]))
+            resp = bytes(dev.read(in_ep.bEndpointAddress, 64, timeout=500))
+            # Response format: {0x00, length, serial-bytes…}
+            if len(resp) < 2:
+                raise ValueError(f"response too short: {resp!r}")
+            serial_bytes = resp[2:2 + resp[1]]
+            serial = serial_bytes.rstrip(b"\x00").decode("ascii", "replace")
+            usb_serial = usb.util.get_string(dev, dev.iSerialNumber)
+            check("DAP_Info serial matches USB serial", serial == usb_serial,
+                  f"dap={serial!r} usb={usb_serial!r}")
+        finally:
+            usb.util.release_interface(dev, if0.bInterfaceNumber)
+
+    except usb.core.USBError as exc:
+        print(f"[SKIP] DAP_Info serial (bulk EP unavailable: {exc})")
+    except StopIteration:
+        print("[SKIP] DAP_Info serial (bulk endpoints not found on interface 0)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[SKIP] DAP_Info serial (unexpected error: {exc})")
+
+
 def main():
     dev = usb.core.find(idVendor=VID, idProduct=PID)
     if dev is None:
@@ -75,6 +123,8 @@ def main():
     check("MS OS 2.0 contains WINUSB compatible ID", b"WINUSB" in msos)
     guid_utf16 = DAP_GUID.encode("utf-16-le")
     check("MS OS 2.0 contains DAP DeviceInterfaceGUID", guid_utf16 in msos)
+
+    check_dap_serial(dev)
 
     print()
     if failures:

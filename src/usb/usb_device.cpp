@@ -1,8 +1,11 @@
 #include "usb/usb_device.hpp"
 #include "usb/dap_class.hpp"
 #include "usb/msosv2.hpp"
+#include "leds.hpp"
 
 #include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/uart/uart_bridge.h>
 #include <zephyr/usb/usbd.h>
 #include <zephyr/logging/log.h>
 
@@ -25,6 +28,37 @@ USBD_DESC_CONFIG_DEFINE(probe_fs_cfg_desc, "");
  * same as the original configuration descriptor.
  */
 USBD_CONFIGURATION_DEFINE(probe_fs_config, 0, 50, &probe_fs_cfg_desc);
+
+/* Handle USB device state changes and CDC line-coding updates.
+ *
+ * Drives the USB-connected LED from real enumeration events so it goes off on
+ * suspend/reset/VBUS removal instead of staying on until reboot.
+ * Also propagates CDC line coding / control line state onto the hardware UART
+ * so uart1 follows the host's baud/parity instead of being stuck at the DTS
+ * default. Referenced by name in init(), so keep it at file scope.
+ */
+static void usb_msg_cb(struct usbd_context *const ctx, const struct usbd_msg *msg)
+{
+	ARG_UNUSED(ctx);
+	switch (msg->type) {
+	case USBD_MSG_CDC_ACM_LINE_CODING:
+	case USBD_MSG_CDC_ACM_CONTROL_LINE_STATE:
+		uart_bridge_settings_update(msg->dev,
+					    DEVICE_DT_GET(DT_NODELABEL(uart_bridge0)));
+		break;
+	case USBD_MSG_CONFIGURATION:
+	case USBD_MSG_RESUME:
+		probe::leds_usb_connected(true);
+		break;
+	case USBD_MSG_SUSPEND:
+	case USBD_MSG_RESET:
+	case USBD_MSG_VBUS_REMOVED:
+		probe::leds_usb_connected(false);
+		break;
+	default:
+		break;
+	}
+}
 
 namespace probe::usb {
 
@@ -118,10 +152,21 @@ int init()
 		return err;
 	}
 
+	err = check(usbd_msg_register_cb(&probe_usbd, usb_msg_cb),
+		    "register usbd msg cb");
+	if (err) {
+		return err;
+	}
+
 	err = check(usbd_enable(&probe_usbd), "usbd_enable");
 	if (err) {
 		return err;
 	}
+
+	/* USB-connected LED is now driven by usb_msg_cb (USBD_MSG_CONFIGURATION
+	 * fires on enumeration; USBD_MSG_SUSPEND/RESET/VBUS_REMOVED turn it off).
+	 * No explicit set here — the callback will fire when the host enumerates.
+	 */
 
 	LOG_INF("USB device enabled");
 	return 0;

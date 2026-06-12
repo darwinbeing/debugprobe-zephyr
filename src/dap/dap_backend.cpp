@@ -3,9 +3,11 @@
 #include "dap/constants.hpp"
 #include "dap/engine.hpp"
 #include "dap/interfaces.hpp"
+#include "leds.hpp"
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
 
 /* SWD backend selection (Kconfig PROBE_SWD_*):
@@ -23,16 +25,6 @@
 
 namespace probe {
 
-/* No LEDs in phase 2: host-status requests are accepted but do nothing.
- * Phase 4 replaces this with the LED adapter alongside the real DAP_Info
- * parity work.
- */
-class NullHostStatus final : public dap::HostStatus {
-public:
-	void connected(bool) override {}
-	void running(bool) override {}
-};
-
 #if defined(CONFIG_PROBE_SWD_NULL)
 void NullSwdDriver::delay_us(uint32_t us)
 {
@@ -49,6 +41,42 @@ namespace dap_backend {
 
 namespace {
 
+/* RP2040/RP2350 hwinfo device id is 8 bytes -> 16 uppercase hex chars,
+ * matching the USB serial descriptor (USBD_DESC_SERIAL_NUMBER). */
+constexpr size_t kSerialIdBytes = 8;
+
+const char *build_serial()
+{
+	static char serial[2 * kSerialIdBytes + 1];
+	uint8_t id[kSerialIdBytes];
+	ssize_t n = hwinfo_get_device_id(id, kSerialIdBytes);
+
+	if (n <= 0) {
+		return nullptr;
+	}
+	static const char hex[] = "0123456789ABCDEF";
+	size_t pos = 0;
+	for (ssize_t i = 0; i < n && pos + 2 < sizeof(serial); i++) {
+		serial[pos++] = hex[id[i] >> 4];
+		serial[pos++] = hex[id[i] & 0xF];
+	}
+	serial[pos] = '\0';
+	return serial;
+}
+
+dap::Config make_config()
+{
+	dap::Config c{};
+	c.vendor = "Raspberry Pi";
+	c.product = CONFIG_PROBE_PRODUCT_STRING;
+	c.serial = build_serial();
+	c.fw_version = "2.0.0";
+	c.packet_size = 64;
+	c.packet_count = 6;
+	c.timestamp_clock = 1000000;
+	return c;
+}
+
 #if defined(CONFIG_PROBE_SWD_NULL)
 NullSwdDriver g_driver;
 #elif defined(CONFIG_PROBE_SWD_PIO)
@@ -56,20 +84,14 @@ ZephyrSwdpDriver g_driver{DEVICE_DT_GET(DT_NODELABEL(swd_pio))};
 #else
 ZephyrSwdpDriver g_driver{DEVICE_DT_GET(DT_NODELABEL(swd_bitbang))};
 #endif
-NullHostStatus g_host;
+LedHostStatus g_host;
 
-/* Engine configuration. serial is left nullptr until phase 4 wires the
- * hwinfo-derived serial number; DAP_Info(Serial) reports an empty string for
- * now (the original debugprobe also returned empty strings here).
+/* Engine configuration: serial is the flash unique ID (16 uppercase hex),
+ * matching the USB serial descriptor. Built once at C++ static-init time;
+ * hwinfo_get_device_id is a simple register read on RP2040/RP2350 and is
+ * safe to call before the Zephyr kernel starts.
  */
-dap::Config g_config = {
-	.vendor = "Raspberry Pi",
-	.product = CONFIG_PROBE_PRODUCT_STRING,
-	.serial = nullptr, /* TODO(phase 4): hwinfo serial number */
-	.fw_version = "2.0.0",
-	.packet_size = 64,
-	.packet_count = 6,
-};
+dap::Config g_config = make_config();
 
 dap::DapEngine g_engine{g_driver, g_host, g_config};
 

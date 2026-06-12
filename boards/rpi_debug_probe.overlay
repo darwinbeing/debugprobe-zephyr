@@ -24,6 +24,31 @@
 			bias-pull-up;
 		};
 	};
+
+	/* Console UART (uart0): TX=GP0, RX=GP1. The board defaults the console
+	 * to uart1, but uart1 is the bridge target here, so the console moves to
+	 * uart0 (chosen below) and needs its own pinctrl (the board DTS only
+	 * defines uart1_default).
+	 */
+	uart0_default: uart0_default {
+		tx_group {
+			pinmux = <UART0_TX_P0>;
+		};
+		rx_group {
+			pinmux = <UART0_RX_P1>;
+			input-enable;
+		};
+	};
+};
+
+/* Move the console/shell off uart1 (the board DTS chose uart1) so the bridge
+ * owns uart1 exclusively, and enable uart0 as the console UART.
+ */
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
 };
 
 /* Enable PIO0 so the misc PIO HAL (PIO_RPI_PICO) builds, which the dp_pio
@@ -34,6 +59,24 @@
 };
 
 / {
+	/* uart1 is already enabled (status=okay, uart1_default pinctrl) in the
+	 * board DTS and was the console -- move the console/shell to uart0 so the
+	 * CDC-ACM <-> uart1 bridge owns uart1.
+	 */
+	chosen {
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+	};
+
+	/* CDC-ACM (USB) <-> uart1 (target) bridge: Zephyr's zephyr,uart-bridge
+	 * driver wires cdc_acm_uart0 to the hardware uart1 (already okay in the
+	 * board DTS), copying bytes both ways and propagating line coding.
+	 */
+	uart_bridge0: uart-bridge0 {
+		compatible = "zephyr,uart-bridge";
+		peers = <&cdc_acm_uart0 &uart1>;
+	};
+
 	/* The real Raspberry Pi Debug Probe (PROBE_IO_SWDI, per
 	 * board_debug_probe_config.h): SWCLK=GP12, SWDIO output=GP14, separate
 	 * SWDI input=GP13, no OEn, no nRESET pin. The PIO node carries a
@@ -61,5 +104,15 @@
 		swclk-pin = <12>;
 		swdio-pin = <14>;
 		status = "okay";
+	};
+
+	/* Status LEDs (gpio-leds nodes in the board DTS), matching the original
+	 * debug-probe mapping: DAP_CONNECTED=GP15 (green_led_dbug),
+	 * DAP_RUNNING=GP16 (yellow_led_dbug), USB=GP2 (red_led).
+	 */
+	aliases {
+		dap-connected-led = &green_led_dbug;
+		dap-running-led = &yellow_led_dbug;
+		usb-connected-led = &red_led;
 	};
 };
