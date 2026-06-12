@@ -87,6 +87,12 @@ void handle_rx(const struct device *dev)
 		return;
 	}
 
+	/* Spurious RX-ready IRQs (e.g. CDC-ACM) can yield recv_len == 0; skip
+	 * the LED blink and peer TX-enable when no bytes were actually read. */
+	if (recv_len == 0) {
+		return;
+	}
+
 	/* Activity LEDs: data read FROM the CDC (host→target) = TX; data read
 	 * FROM uart1 (target→host) = RX. Mirrors original cdc_uart.c blink. */
 	if (dev == cdc_dev) {
