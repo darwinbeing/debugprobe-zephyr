@@ -41,28 +41,27 @@ namespace dap_backend {
 
 namespace {
 
-/* Flash unique ID as 16 uppercase hex chars, matching the USB serial
- * descriptor produced by USBD_DESC_SERIAL_NUMBER_DEFINE + hwinfo.
- * RP2040/RP2350 hwinfo_get_device_id returns 8 bytes → 16 hex chars.
- */
-char g_serial[2 * 8 + 1];
+/* RP2040/RP2350 hwinfo device id is 8 bytes -> 16 uppercase hex chars,
+ * matching the USB serial descriptor (USBD_DESC_SERIAL_NUMBER). */
+constexpr size_t kSerialIdBytes = 8;
 
 const char *build_serial()
 {
-	uint8_t id[8];
-	ssize_t n = hwinfo_get_device_id(id, sizeof(id));
+	static char serial[2 * kSerialIdBytes + 1];
+	uint8_t id[kSerialIdBytes];
+	ssize_t n = hwinfo_get_device_id(id, kSerialIdBytes);
 
 	if (n <= 0) {
 		return nullptr;
 	}
 	static const char hex[] = "0123456789ABCDEF";
 	size_t pos = 0;
-	for (ssize_t i = 0; i < n && pos + 2 < sizeof(g_serial); i++) {
-		g_serial[pos++] = hex[id[i] >> 4];
-		g_serial[pos++] = hex[id[i] & 0xF];
+	for (ssize_t i = 0; i < n && pos + 2 < sizeof(serial); i++) {
+		serial[pos++] = hex[id[i] >> 4];
+		serial[pos++] = hex[id[i] & 0xF];
 	}
-	g_serial[pos] = '\0';
-	return g_serial;
+	serial[pos] = '\0';
+	return serial;
 }
 
 dap::Config make_config()
