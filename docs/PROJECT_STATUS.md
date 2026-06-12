@@ -111,11 +111,16 @@ check the available hardware allows (see the note below the table):
 **rpi_pico / PIO, executed 2026-06-12 (`P*` detail):**
 - **openocd accept (partial):** openocd 0.12.0 opens our CMSIS-DAP v2 interface,
   reports `FW Version = 2.0.0` and `Serial# = E661A4D41777B429`, initialises SWD,
-  and reads `SWD DPIDR 0x10212927`. The subsequent "Could not find MEM-AP" /
-  full memory-R/W + flash step is **blocked by the multidrop RP2040 target** (the
-  only target wired here), which fails the official firmware identically — an
-  environment limit, not a firmware defect. Full mem-R/W acceptance still needs a
-  single-drop SWD target.
+  and reads `SWD DPIDR 0x10212927`. The full memory-R/W + flash step is **blocked
+  by the multidrop RP2040 target** (the only target wired here), an environment
+  limit, not a firmware defect. Two attempts on 2026-06-12 confirm this: a generic
+  `cortex_m` connect reads the DPIDR then reports "Could not find MEM-AP"; the
+  proper `target/rp2040.cfg` (multidrop-aware) reports `Failed to connect
+  multidrop rp2040.dap0`. Our SWD is proven electrically working (DPIDR read OK);
+  only the RP2040 multidrop DP-select fails — the same bus-contention issue that
+  fails the **official** firmware identically (A/B-proven in phase 3). Full
+  mem-R/W + flash acceptance still needs a single-drop SWD target (e.g. STM32 /
+  nRF / bare Cortex-M), or resolution of the RP2040 multidrop bus contention.
 - **UART RT:** ✓ — CDC↔uart1 GP4→GP5 loopback verified in phase 4b (both directions).
 - **autobaud (partial):** ✓ no-wedge — the MAGIC_BAUD(9728)→115200 start/stop
   cycle leaves the bridge alive (race + stack-overflow fixes hold). The detection
