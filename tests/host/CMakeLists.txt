@@ -15,5 +15,10 @@ add_executable(dap_tests
   test_sequences.cpp
   test_transfer.cpp
   test_transfer_block.cpp
+  test_autobaud.cpp
+  # The autobaud estimator is pure C++ (zero Zephyr deps), so it compiles
+  # straight into the host test binary -- identical source as the firmware.
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src/autobaud/estimator.cpp
 )
+target_include_directories(dap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(dap_tests PRIVATE dap)

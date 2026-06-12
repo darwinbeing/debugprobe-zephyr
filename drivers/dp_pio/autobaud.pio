@@ -1,0 +1,19 @@
+.program autobaud
+
+.wrap_target
+
+falling_edge:
+    wait 0 pin 0                    ; falling edge detected
+    set x, 0                        ; set cycle counter to 0
+    mov x, ~x                       ; x = 0xFFFFFFFF, to decrement x
+
+count_cycles:
+    jmp pin rising_edge             ; if line went high, save current cycle count
+    jmp x-- count_cycles            ; otherwise, decrement and enter loop again
+
+rising_edge:
+    mov isr, x                      ; save elapsed cycle count in ISR
+    push noblock                    ; nonblocking push of the ISR content
+    jmp falling_edge                ; repeat sampling process
+
+.wrap
