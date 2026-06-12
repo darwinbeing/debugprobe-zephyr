@@ -36,6 +36,31 @@ TEST(transfer_configure_sets_state_and_acks)
 	auto r = f.run({0x04, 0x02, 0x50, 0x00, 0x10, 0x00});
 	const uint8_t want[] = {0x04, dap::kDapOk};
 	CHECK_BYTES(r, want);
+	CHECK_EQ(f.drv.last_idle_cycles, 2u);
+}
+
+TEST(transfer_configure_forwards_idle_cycles)
+{
+	Fixture f;
+	auto r = f.run({0x04, 0x07, 0x64, 0x00, 0x00, 0x00}); /* idle=7 */
+	const uint8_t want[] = {0x04, dap::kDapOk};
+	CHECK_BYTES(r, want);
+	CHECK_EQ(f.drv.last_idle_cycles, 7u);
+}
+
+TEST(transfer_protocol_error_surfaces_in_response_value)
+{
+	Fixture f; /* connected */
+	f.drv.script.push_back({dap::Ack::ProtocolError, 0});
+	/* single DP read (request byte 0x02 = RnW, DP addr 0); driver reports a
+	 * protocol error. Ack::ProtocolError casts to 0x0F (0x08|0x07).
+	 * transfer_retry returns 0x0F immediately (not kXferWait), the retry loop
+	 * exits, response_value != kXferOk so the transfer loop breaks with
+	 * response_count=0 and response_value=0x0F. */
+	auto r = f.run({0x05, 0x00, 0x01, 0x02});
+	/* response: cmd(0x05), count(0), response_value(0x0F) */
+	const uint8_t want[] = {0x05, 0x00, 0x0F};
+	CHECK_BYTES(r, want);
 }
 
 TEST(transfer_single_dp_write)

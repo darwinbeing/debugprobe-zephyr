@@ -13,6 +13,7 @@ public:
 	void connect() override {}
 	void disconnect() override {}
 	void configure(uint8_t, bool) override {}
+	void set_idle_cycles(uint8_t) override {}
 	void swj_sequence(std::span<const uint8_t>, size_t) override {}
 	void swd_output(std::span<const uint8_t>, size_t) override {}
 	void swd_input(std::span<uint8_t> data, size_t) override

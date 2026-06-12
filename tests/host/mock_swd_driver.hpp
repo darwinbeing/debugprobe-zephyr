@@ -31,6 +31,7 @@ public:
 	std::vector<uint8_t> swj_bits;   /* concatenated swj_sequence payloads */
 	size_t swj_bit_count = 0;
 	uint32_t last_clock = 0;
+	uint8_t last_idle_cycles = 0;
 	uint8_t last_turnaround = 0;
 	bool last_data_phase = false;
 	uint8_t last_pin_select = 0, last_pin_value = 0;
@@ -50,6 +51,11 @@ public:
 		last_turnaround = turnaround;
 		last_data_phase = data_phase;
 		events.push_back("configure");
+	}
+	void set_idle_cycles(uint8_t cycles) override
+	{
+		last_idle_cycles = cycles;
+		events.push_back("set_idle_cycles");
 	}
 	void swj_sequence(std::span<const uint8_t> data, size_t bits) override
 	{

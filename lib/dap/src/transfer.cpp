@@ -97,6 +97,7 @@ DapEngine::Sizes DapEngine::cmd_transfer_configure(std::span<const uint8_t> req,
 		return {req.size(), 1};
 	}
 	idle_cycles_ = req[0];
+	driver_.set_idle_cycles(idle_cycles_);
 	retry_count_ = static_cast<uint16_t>(req[1] | (req[2] << 8));
 	match_retry_ = static_cast<uint16_t>(req[3] | (req[4] << 8));
 	resp[0] = kDapOk;

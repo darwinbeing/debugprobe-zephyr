@@ -25,6 +25,8 @@ public:
 	virtual void connect() = 0;    /* claim pins, SWD mode (PORT_SWD_SETUP) */
 	virtual void disconnect() = 0; /* release pins (PORT_OFF) */
 	virtual void configure(uint8_t turnaround_cycles, bool data_phase) = 0;
+	/* Idle cycles clocked after each transfer; set by DAP_TransferConfigure. */
+	virtual void set_idle_cycles(uint8_t cycles) = 0;
 
 	/* Clock out bit_count bits from data (LSB of data[0] first) on SWDIO. */
 	virtual void swj_sequence(std::span<const uint8_t> data, size_t bit_count) = 0;
