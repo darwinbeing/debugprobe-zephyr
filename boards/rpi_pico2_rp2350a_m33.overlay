@@ -4,12 +4,36 @@
 	};
 };
 
+/* Enable PIO0 so the misc PIO HAL (PIO_RPI_PICO) builds, which the dp_pio
+ * driver compiles against, and so the raspberrypi,swdp-pio instance can run.
+ */
+&pio0 {
+	status = "okay";
+};
+
 / {
-	swd_dev: swd_dev {
+	/* Two SWD backends share these pins (GP2=SWCLK, GP3=shared SWDIO,
+	 * GP1=nRESET). Exactly one is enabled at a time: the PIO node is the
+	 * default (CONFIG_PROBE_SWD_PIO=y); to use bitbang, flip both the
+	 * Kconfig choice and these two status values.
+	 */
+	swd_bitbang: swd_bitbang {
 		compatible = "zephyr,swdp-gpio";
 		clk-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
 		dio-gpios = <&gpio0 3 (GPIO_PULL_UP | GPIO_ACTIVE_HIGH)>;
 		reset-gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
 		port-write-cycles = <2>;
+		status = "disabled";
+	};
+
+	swd_pio: swd_pio {
+		compatible = "raspberrypi,swdp-pio";
+		piodev = <&pio0>;
+		clk-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+		dio-gpios = <&gpio0 3 (GPIO_PULL_UP | GPIO_ACTIVE_HIGH)>;
+		reset-gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+		swclk-pin = <2>;
+		swdio-pin = <3>;
+		status = "okay";
 	};
 };

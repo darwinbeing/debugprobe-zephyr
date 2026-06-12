@@ -10,10 +10,10 @@
 
 /* SWD backend selection (Kconfig PROBE_SWD_*):
  *   NULL    -> NullSwdDriver (no SWD; bring-up only)
- *   BITBANG -> ZephyrSwdpDriver over the zephyr,swdp-gpio device (swd_dev)
- *   PIO     -> ZephyrSwdpDriver over the raspberrypi,swdp-pio device (Task 4)
+ *   BITBANG -> ZephyrSwdpDriver over the zephyr,swdp-gpio device (swd_bitbang)
+ *   PIO     -> ZephyrSwdpDriver over the raspberrypi,swdp-pio device (swd_pio)
  * Both real backends share the single adapter; the device is selected by
- * devicetree (the node carrying the `swd_dev` nodelabel).
+ * devicetree (the swd_bitbang/swd_pio nodelabel) per the Kconfig choice.
  */
 #if defined(CONFIG_PROBE_SWD_NULL)
 #include "dap/null_swd_driver.hpp"
@@ -51,8 +51,10 @@ namespace {
 
 #if defined(CONFIG_PROBE_SWD_NULL)
 NullSwdDriver g_driver;
+#elif defined(CONFIG_PROBE_SWD_PIO)
+ZephyrSwdpDriver g_driver{DEVICE_DT_GET(DT_NODELABEL(swd_pio))};
 #else
-ZephyrSwdpDriver g_driver{DEVICE_DT_GET(DT_NODELABEL(swd_dev))};
+ZephyrSwdpDriver g_driver{DEVICE_DT_GET(DT_NODELABEL(swd_bitbang))};
 #endif
 NullHostStatus g_host;
 

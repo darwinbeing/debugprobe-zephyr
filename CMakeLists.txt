@@ -1,16 +1,17 @@
 cmake_minimum_required(VERSION 3.20.0)
 
+# Register this repo as a Zephyr module (see zephyr/module.yml) so the
+# out-of-tree PIO SWD driver in drivers/dp_pio/ is processed during Zephyr's
+# module loop. That runs before Zephyr captures ZEPHYR_LIBS and builds the
+# whole-archive link group; an app-local add_subdirectory() would register the
+# driver too late, so its DEVICE_DT_INST_DEFINE device objects would be dropped
+# and DEVICE_DT_GET(swd_pio) would fail to link. Must precede find_package().
+list(APPEND EXTRA_ZEPHYR_MODULES ${CMAKE_CURRENT_SOURCE_DIR})
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(debugprobe_zephyr LANGUAGES C CXX)
 
 add_subdirectory(lib/dap)
-
-# Out-of-tree PIO SWD port driver (drivers/dp_pio/). Compiled in-app via
-# add_subdirectory + zephyr_library (no module.yml needed); its DT binding lives
-# under the app's dts/bindings/, already on the binding search path. The source
-# itself is guarded on CONFIG_SWDP_PIO inside that CMakeLists.
-zephyr_include_directories(drivers/dp_pio)
-add_subdirectory(drivers/dp_pio)
 
 target_sources(app PRIVATE
   src/main.cpp

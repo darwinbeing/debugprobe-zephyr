@@ -4,11 +4,38 @@
 	};
 };
 
+/* Enable PIO0 so the misc PIO HAL (PIO_RPI_PICO) builds, which the dp_pio
+ * driver compiles against, and so the raspberrypi,swdp-pio instance can run.
+ */
+&pio0 {
+	status = "okay";
+};
+
 / {
-	swd_dev: swd_dev {
+	/* The real Raspberry Pi Debug Probe (PROBE_IO_SWDI, per
+	 * board_debug_probe_config.h): SWCLK=GP12, SWDIO output=GP14, separate
+	 * SWDI input=GP13, no OEn, no nRESET pin. The PIO node carries a
+	 * din-gpios for the separate input (driver use_swdi axis, still
+	 * probe.pio). Exactly one backend is enabled: PIO is the default
+	 * (CONFIG_PROBE_SWD_PIO=y); to use bitbang, flip both the Kconfig
+	 * choice and these two status values.
+	 */
+	swd_bitbang: swd_bitbang {
 		compatible = "zephyr,swdp-gpio";
 		clk-gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
 		dio-gpios = <&gpio0 14 (GPIO_PULL_UP | GPIO_ACTIVE_HIGH)>;
 		port-write-cycles = <2>;
+		status = "disabled";
+	};
+
+	swd_pio: swd_pio {
+		compatible = "raspberrypi,swdp-pio";
+		piodev = <&pio0>;
+		clk-gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
+		dio-gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
+		din-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
+		swclk-pin = <12>;
+		swdio-pin = <14>;
+		status = "okay";
 	};
 };

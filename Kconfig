@@ -23,7 +23,9 @@ config PROBE_SWD_PIO
 
 endchoice
 
-# Out-of-tree PIO SWD port driver Kconfig.
-rsource "drivers/dp_pio/Kconfig"
+# The out-of-tree PIO SWD port driver Kconfig (drivers/dp_pio/Kconfig) is
+# sourced via the Zephyr module mechanism (zephyr/module.yml -> build.kconfig),
+# not rsource'd here, so it is registered alongside the driver's CMakeLists in
+# the module loop. Sourcing it both ways would redefine SWDP_PIO.
 
 source "Kconfig.zephyr"
