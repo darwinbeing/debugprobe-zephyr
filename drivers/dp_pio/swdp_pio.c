@@ -46,9 +46,19 @@ struct swdp_pio_config {
 	struct gpio_dt_spec reset_gpio; /* may be {0} if absent */
 	uint8_t swclk_pin;
 	uint8_t swdio_pin;
-	uint8_t swdi_pin;  /* separate input pin (buffered probe); else == swdio */
-	uint8_t oen_pin;   /* output-enable pin (buffered probe); valid iff use_oen */
-	bool use_oen;      /* probe_oen program vs probe */
+	uint8_t swdi_pin;  /* separate SWD input pin; == swdio_pin when shared */
+	uint8_t oen_pin;   /* level-shifter output-enable pin; valid iff use_oen */
+	/* Two independent axes (the real Debug Probe is PROBE_IO_SWDI, not OEN):
+	 *  - use_swdi: a separate SWD input pin (din-gpios) exists. The real
+	 *    Debug Probe sets this (SWDI=GP13). in_pins reads swdi_pin; the SM
+	 *    still uses probe_program (1-bit side-set, base = swclk). This is the
+	 *    ONLY difference between the Pico (shared SWDIO) and the Debug Probe.
+	 *  - use_oen: a level-shifter output-enable pin (oen-gpios) exists. This
+	 *    selects probe_oen_program (2-bit side-set, base = oen, 3 pindirs).
+	 *    None of our three boards set oen-gpios, so this path is latent.
+	 */
+	bool use_swdi;     /* separate SWD input pin (din-gpios) present */
+	bool use_oen;      /* probe_oen program vs probe (oen-gpios present) */
 };
 
 struct swdp_pio_data {
@@ -421,12 +431,19 @@ static int sw_configure(const struct device *dev, uint8_t turnaround,
 	return 0;
 }
 
-/* probe_sm_init -- replicates probe.pio c-sdk probe_sm_init (probe.pio:102-124):
- * side-set = SWCLK, out/set pins = SWDIO, in pins = SWDI (== SWDIO when shared),
- * initial pindirs out for SWCLK+SWDIO, both shift dirs right (LSB-first) with
- * autopull/autopush off. The .side_set "1 opt" (probe.pio:46) is applied via the
- * default config's sm_config_set_sideset(c, 1, true, false), matching the
- * pioasm-generated probe_program_get_default_config used by the original.
+/* probe_sm_init -- replicates the c-sdk probe_sm_init block of probe.pio
+ * (probe.pio:102-124) OR probe_oen.pio (probe_oen.pio:81-98), selected by
+ * cfg->use_oen. Both set out/set pins = SWDIO, both shift dirs right (LSB-first)
+ * with autopull/autopush off. The two variants differ ONLY in:
+ *   - side-set: probe.pio is `.side_set 1 opt` base = SWCLK (probe.pio:46,105);
+ *     probe_oen.pio is `.side_set 2 opt` base = SWDIOEN (probe_oen.pio:14,84).
+ *   - initial output pindirs: probe.pio drives SWCLK+SWDIO (count 2 from
+ *     PROBE_PIN_OFFSET=SWCLK, probe.pio:118); probe_oen.pio drives
+ *     SWDIOEN+SWCLK+SWDIO (count 3 from PROBE_PIN_OFFSET=SWDIOEN, probe_oen.pio:92).
+ *   - in_pins: SWDI when a separate input pin exists (probe_oen always; probe
+ *     only when PROBE_IO_SWDI, probe.pio:110-114 / probe_oen.pio:89), else SWDIO.
+ * We do sm_config_set_sideset() explicitly because Zephyr's
+ * RPI_PICO_PIO_DEFINE_PROGRAM emits no *_get_default_config helper.
  */
 static void probe_sm_init(const struct device *dev, pio_sm_config *sm_config)
 {
@@ -434,32 +451,50 @@ static void probe_sm_init(const struct device *dev, pio_sm_config *sm_config)
 	PIO pio = pio_rpi_pico_get_pio(cfg->piodev);
 	struct swdp_pio_data *d = dev->data;
 
-	/* .side_set 1 opt (probe.pio:46): bit_count=1, optional=true, pindirs=false.
-	 * The pioasm get_default_config does this; we do it explicitly because
-	 * Zephyr's RPI_PICO_PIO_DEFINE_PROGRAM emits no *_get_default_config.
-	 */
-	sm_config_set_sideset(sm_config, 1, true, false);
+	if (cfg->use_oen) {
+		/* probe_oen.pio:14 `.side_set 2 opt`, base = SWDIOEN (probe_oen.pio:84):
+		 * bit_count=2, optional=true, pindirs=false.
+		 */
+		sm_config_set_sideset(sm_config, 2, true, false);
+		sm_config_set_sideset_pins(sm_config, cfg->oen_pin);
+	} else {
+		/* probe.pio:46 `.side_set 1 opt`, base = SWCLK (probe.pio:105):
+		 * bit_count=1, optional=true, pindirs=false.
+		 */
+		sm_config_set_sideset(sm_config, 1, true, false);
+		sm_config_set_sideset_pins(sm_config, cfg->swclk_pin);
+	}
 
-	/* Set SWCLK as a sideset pin -- probe.pio:105. */
-	sm_config_set_sideset_pins(sm_config, cfg->swclk_pin);
-
-	/* Set SWDIO offset (out/set) -- probe.pio:108-109. */
+	/* Set SWDIO offset (out/set) -- probe.pio:108-109 / probe_oen.pio:87-88. */
 	sm_config_set_out_pins(sm_config, cfg->swdio_pin, 1);
 	sm_config_set_set_pins(sm_config, cfg->swdio_pin, 1);
 
-	/* in pins: separate SWDI on the buffered probe, else SWDIO -- probe.pio:110-114. */
-	sm_config_set_in_pins(sm_config, cfg->swdi_pin);
+	/* in pins: SWDI when a separate input pin exists (OEN always reads SWDI,
+	 * the Debug Probe reads SWDI via use_swdi); else the shared SWDIO. Because
+	 * swdi_pin defaults to swdio_pin when neither flag is set, reading swdi_pin
+	 * is correct for all three cases -- probe.pio:110-114 / probe_oen.pio:89.
+	 */
+	if (cfg->use_oen || cfg->use_swdi) {
+		sm_config_set_in_pins(sm_config, cfg->swdi_pin);
+	} else {
+		sm_config_set_in_pins(sm_config, cfg->swdio_pin);
+	}
 
-	/* SWCLK then SWDIO as output to start. The original sets 2 consecutive
-	 * pindirs from PROBE_PIN_OFFSET (== SWCLK, with SWDIO == SWCLK+1) -- probe.pio:118.
-	 * Zephyr's pins are not guaranteed consecutive, so set each pindir out.
+	/* Initial output pindirs. The originals set N consecutive pindirs from
+	 * PROBE_PIN_OFFSET (probe.pio:118 count 2 = SWCLK,SWDIO; probe_oen.pio:92
+	 * count 3 = SWDIOEN,SWCLK,SWDIO). Zephyr pins are not guaranteed
+	 * consecutive, so set each pindir out individually. The PIO flips SWDIO via
+	 * `out pindirs,1` at runtime.
 	 */
 	pio_sm_set_consecutive_pindirs(pio, d->sm, cfg->swclk_pin, 1, true);
 	pio_sm_set_consecutive_pindirs(pio, d->sm, cfg->swdio_pin, 1, true);
+	if (cfg->use_oen) {
+		pio_sm_set_consecutive_pindirs(pio, d->sm, cfg->oen_pin, 1, true);
+	}
 
-	/* shift output right, autopull off -- probe.pio:121. */
+	/* shift output right, autopull off -- probe.pio:121 / probe_oen.pio:95. */
 	sm_config_set_out_shift(sm_config, true, false, 0);
-	/* shift input right (swd is lsb first), autopush off -- probe.pio:123. */
+	/* shift input right (swd is lsb first), autopush off -- probe.pio:123 / probe_oen.pio:97. */
 	sm_config_set_in_shift(sm_config, true, false, 0);
 }
 
@@ -493,10 +528,15 @@ static int sw_port_on(const struct device *dev)
 	}
 	pio_gpio_init(pio, cfg->swclk_pin);
 	pio_gpio_init(pio, cfg->swdio_pin);
-	if (cfg->use_oen) {
-		/* Buffered probe: drive the level-shifter OEn and the separate SWDI. */
-		pio_gpio_init(pio, cfg->oen_pin);
+	/* Separate SWD input pin (real Debug Probe SWDI, or the OEN board's SWDI):
+	 * funcsel it to the PIO so `in pins` reads it. Skipped when SWDIO is shared.
+	 */
+	if (cfg->use_swdi || cfg->use_oen) {
 		pio_gpio_init(pio, cfg->swdi_pin);
+	}
+	/* Level-shifter output-enable, only on the (latent) OEN board. */
+	if (cfg->use_oen) {
+		pio_gpio_init(pio, cfg->oen_pin);
 	}
 
 	/* Load the matching program and configure the SM. */
@@ -579,8 +619,10 @@ static int swdp_pio_init(const struct device *dev)
 }
 
 /* swclk-pin / swdio-pin are the PIO side-set/out/in base GPIO numbers. swdi-pin
- * defaults to swdio-pin (shared bus) when din-gpios is absent; oen-pin is the
- * level-shifter output-enable on the buffered probe.
+ * comes from din-gpios (a separate SWD input: the real Debug Probe's SWDI), and
+ * defaults to swdio-pin (shared bus) when absent. oen-pin comes from oen-gpios
+ * (a level-shifter output-enable; latent example-board path, no shipped board).
+ * use_swdi and use_oen are two independent axes -- see swdp_pio_config.
  */
 #define SWDP_PIO_DEFINE(n)							\
 	static const struct swdp_pio_config swdp_pio_cfg_##n = {		\
@@ -593,6 +635,7 @@ static int swdp_pio_init(const struct device *dev)
 			(DT_INST_PROP(n, swdio_pin))),			\
 		.oen_pin = COND_CODE_1(DT_INST_NODE_HAS_PROP(n, oen_gpios), \
 			(DT_INST_GPIO_PIN(n, oen_gpios)), (0)),		\
+		.use_swdi = DT_INST_NODE_HAS_PROP(n, din_gpios),	\
 		.use_oen = DT_INST_NODE_HAS_PROP(n, oen_gpios),		\
 	};								\
 	static struct swdp_pio_data swdp_pio_data_##n;			\
