@@ -3,6 +3,7 @@
 #include "dap/constants.hpp"
 #include "dap/engine.hpp"
 #include "dap/interfaces.hpp"
+#include "leds.hpp"
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
@@ -22,16 +23,6 @@
 #endif
 
 namespace probe {
-
-/* No LEDs in phase 2: host-status requests are accepted but do nothing.
- * Phase 4 replaces this with the LED adapter alongside the real DAP_Info
- * parity work.
- */
-class NullHostStatus final : public dap::HostStatus {
-public:
-	void connected(bool) override {}
-	void running(bool) override {}
-};
 
 #if defined(CONFIG_PROBE_SWD_NULL)
 void NullSwdDriver::delay_us(uint32_t us)
@@ -56,7 +47,7 @@ ZephyrSwdpDriver g_driver{DEVICE_DT_GET(DT_NODELABEL(swd_pio))};
 #else
 ZephyrSwdpDriver g_driver{DEVICE_DT_GET(DT_NODELABEL(swd_bitbang))};
 #endif
-NullHostStatus g_host;
+LedHostStatus g_host;
 
 /* Engine configuration. serial is left nullptr until phase 4 wires the
  * hwinfo-derived serial number; DAP_Info(Serial) reports an empty string for

@@ -1,6 +1,7 @@
 #include "usb/usb_device.hpp"
 #include "usb/dap_class.hpp"
 #include "usb/msosv2.hpp"
+#include "leds.hpp"
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
@@ -145,6 +146,11 @@ int init()
 	if (err) {
 		return err;
 	}
+
+	/* USB is up: light the USB-connected indicator (no-op on boards without
+	 * a usb-connected-led alias). It stays lit while the device runs.
+	 */
+	probe::leds_usb_connected(true);
 
 	LOG_INF("USB device enabled");
 	return 0;

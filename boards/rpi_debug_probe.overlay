@@ -105,4 +105,14 @@
 		swdio-pin = <14>;
 		status = "okay";
 	};
+
+	/* Status LEDs (gpio-leds nodes in the board DTS), matching the original
+	 * debug-probe mapping: DAP_CONNECTED=GP15 (green_led_dbug),
+	 * DAP_RUNNING=GP16 (yellow_led_dbug), USB=GP2 (red_led).
+	 */
+	aliases {
+		dap-connected-led = &green_led_dbug;
+		dap-running-led = &yellow_led_dbug;
+		usb-connected-led = &red_led;
+	};
 };

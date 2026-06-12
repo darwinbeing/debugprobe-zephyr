@@ -87,4 +87,12 @@
 		swdio-pin = <3>;
 		status = "okay";
 	};
+
+	/* Single onboard LED (led0 = GP25): use it as the USB-connected
+	 * indicator. There are no separate DAP connect/run LEDs on this board,
+	 * so those aliases are absent and their helpers no-op.
+	 */
+	aliases {
+		usb-connected-led = &led0;
+	};
 };
