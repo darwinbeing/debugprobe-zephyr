@@ -97,6 +97,14 @@ TEST(swj_pins_sets_and_reads)
 	CHECK_EQ(f.drv.last_pin_wait, 10u);
 }
 
+TEST(swj_pins_wait_clamped_to_3s)
+{
+	Fixture f;
+	auto r = f.run({0x10, 0x00, dap::kPinNreset, 0xFF, 0xFF, 0xFF, 0xFF});
+	CHECK_EQ(r.size(), 2u);
+	CHECK_EQ(f.drv.last_pin_wait, 3000000u);
+}
+
 TEST(write_abort_when_connected)
 {
 	Fixture f;

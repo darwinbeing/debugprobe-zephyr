@@ -32,6 +32,11 @@ DapEngine::Sizes DapEngine::cmd_write_abort(std::span<const uint8_t> req,
 			 (static_cast<uint32_t>(req[2]) << 8) |
 			 (static_cast<uint32_t>(req[3]) << 16) |
 			 (static_cast<uint32_t>(req[4]) << 24);
+	/* Knowing divergence from DAP.c DAP_SWD_WriteAbort, which issues the
+	 * ABORT write exactly once and always answers DAP_OK: we retry on WAIT
+	 * and report failures. ADIv5 DPs do not WAIT on ABORT, so hosts see no
+	 * difference in practice; conformance allowlists this.
+	 */
 	/* DP write, address 0 (ABORT): request byte 0x00 */
 	const uint8_t ack = transfer_retry(0x00, &value);
 	resp[0] = (ack == kXferOk) ? kDapOk : kDapError;

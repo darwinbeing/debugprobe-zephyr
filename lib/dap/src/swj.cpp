@@ -71,10 +71,15 @@ DapEngine::Sizes DapEngine::cmd_swj_pins(std::span<const uint8_t> req,
 	}
 	const uint8_t value = req[0];
 	const uint8_t select = req[1];
-	const uint32_t wait_us = static_cast<uint32_t>(req[2]) |
-				 (static_cast<uint32_t>(req[3]) << 8) |
-				 (static_cast<uint32_t>(req[4]) << 16) |
-				 (static_cast<uint32_t>(req[5]) << 24);
+	uint32_t wait_us = static_cast<uint32_t>(req[2]) |
+			   (static_cast<uint32_t>(req[3]) << 8) |
+			   (static_cast<uint32_t>(req[4]) << 16) |
+			   (static_cast<uint32_t>(req[5]) << 24);
+	/* Reference caps the wait at 3 s (DAP.c DAP_SWJ_Pins); prevents a host
+	 * from hanging the DAP thread with a huge wait. */
+	if (wait_us > 3000000U) {
+		wait_us = 3000000U;
+	}
 	driver_.set_pins(select, value, wait_us);
 	resp[0] = driver_.read_pins();
 	return {6, 1};
