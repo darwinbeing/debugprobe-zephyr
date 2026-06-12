@@ -56,6 +56,13 @@ namespace {
  * (PIO_CLOCK_FREQUENCY 125000000). The clkdiv below scales clk_sys down to it. */
 constexpr uint32_t kPioClockHz = 125000000U;
 
+/* Single estimator instance in BSS (not the stack).  The ~4 KB table_[509]
+ * (509 * 8 bytes = 4072 bytes) previously lived on run_once()'s stack frame
+ * and overflowed the 2 KB autobaud thread stack on every run.  Moving it here
+ * puts it in .bss; reset() is called at the top of each run so behaviour is
+ * identical to constructing a fresh object each time. */
+static autobaud::Estimator g_estimator{kPioClockHz};
+
 /* clk_sys, the PIO source clock (compile-time DT constant, as in swdp_pio.c:43).
  * div = clk_sys / 125MHz mirrors autobaud.c:323. */
 constexpr uint32_t kClkSysHz = DT_PROP(DT_NODELABEL(clk_sys), clock_frequency);
@@ -173,8 +180,9 @@ void run_once()
 	pio_sm_clear_fifos(pio, sm);
 	pio_sm_set_enabled(pio, sm, true); /* autobaud.c:325 */
 
-	/* Fresh estimator per run (autobaud.c:327-328 create_table). */
-	autobaud::Estimator est(kPioClockHz);
+	/* Reset the static estimator so each run starts with a clean slate,
+	 * identical to the original's create_table (autobaud.c:327-328). */
+	g_estimator.reset();
 
 	LOG_INF("autobaud measuring on GP%u (PIO SM %u)", kRxPin, (unsigned)sm);
 
@@ -203,7 +211,7 @@ void run_once()
 		while (!pio_sm_is_rx_fifo_empty(pio, sm)) {
 			drained_any = true;
 			uint32_t raw = pio_sm_get(pio, sm);          /* autobaud.c:217 */
-			autobaud::Result r = est.add_sample(raw);    /* autobaud.c:219-258 */
+			autobaud::Result r = g_estimator.add_sample(raw); /* autobaud.c:219-258 */
 			if (r.valid) {
 				/* Apply the detected baud to uart1 (replaces the
 				 * original's queue push to cdc_thread,
@@ -285,7 +293,7 @@ void thread_fn(void *, void *, void *)
 	}
 }
 
-K_THREAD_STACK_DEFINE(g_stack, 2048);
+K_THREAD_STACK_DEFINE(g_stack, 4096);
 struct k_thread g_thread;
 k_tid_t g_tid;
 
