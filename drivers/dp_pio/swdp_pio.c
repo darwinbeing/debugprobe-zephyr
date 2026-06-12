@@ -21,6 +21,7 @@
 #include <zephyr/drivers/swdp.h>
 #include <zephyr/drivers/misc/pio_rpi_pico/pio_rpi_pico.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/pinctrl.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
@@ -43,6 +44,7 @@ LOG_MODULE_REGISTER(swdp_pio, LOG_LEVEL_INF);
 
 struct swdp_pio_config {
 	const struct device *piodev;
+	const struct pinctrl_dev_config *pcfg; /* SWCLK/SWDIO/SWDI funcsel via pinctrl */
 	struct gpio_dt_spec reset_gpio; /* may be {0} if absent */
 	uint8_t swclk_pin;
 	uint8_t swdio_pin;
@@ -453,16 +455,20 @@ static void probe_sm_init(const struct device *dev, pio_sm_config *sm_config)
 	struct swdp_pio_data *d = dev->data;
 
 	if (cfg->use_oen) {
-		/* probe_oen.pio:14 `.side_set 2 opt`, base = SWDIOEN (probe_oen.pio:84):
-		 * bit_count=2, optional=true, pindirs=false.
+		/* probe_oen.pio:14 `.side_set 2 opt`, base = SWDIOEN (probe_oen.pio:84).
+		 * sm_config_set_sideset bit_count INCLUDES the optional-enable bit
+		 * (pico-sdk: "bits to steal from the delay field"), so 2 data + 1 opt
+		 * = 3 -- matching pioasm's generated probe_oen_program_get_default_config.
 		 */
-		sm_config_set_sideset(sm_config, 2, true, false);
+		sm_config_set_sideset(sm_config, 3, true, false);
 		sm_config_set_sideset_pins(sm_config, cfg->oen_pin);
 	} else {
-		/* probe.pio:46 `.side_set 1 opt`, base = SWCLK (probe.pio:105):
-		 * bit_count=1, optional=true, pindirs=false.
+		/* probe.pio:46 `.side_set 1 opt`, base = SWCLK (probe.pio:105).
+		 * bit_count INCLUDES the optional bit: 1 data + 1 opt = 2 -- matching
+		 * pioasm's probe_program_get_default_config. (Was 1, which mis-decoded
+		 * the side-set/delay field and broke SWCLK timing -> junk SWD ACK.)
 		 */
-		sm_config_set_sideset(sm_config, 1, true, false);
+		sm_config_set_sideset(sm_config, 2, true, false);
 		sm_config_set_sideset_pins(sm_config, cfg->swclk_pin);
 	}
 
@@ -536,19 +542,17 @@ static int sw_port_on(const struct device *dev)
 			return ret;
 		}
 
-		/* probe_gpio_init (probe.pio:74-87): funcsel SWDIO/SWCLK to PIO. */
-		pio_gpio_init(pio, cfg->swclk_pin);
-		pio_gpio_init(pio, cfg->swdio_pin);
-		/* Separate SWD input pin (real Debug Probe SWDI, or the OEN board's
-		 * SWDI): funcsel it to the PIO so `in pins` reads it. Skipped when
-		 * SWDIO is shared.
+		/* Route SWCLK/SWDIO (and the separate SWDI / OEN pins when present)
+		 * to the PIO via Zephyr pinctrl -- the Zephyr way (as in
+		 * uart_rpi_pico_pio), instead of the pico-sdk pio_gpio_init. The
+		 * board overlay's pinctrl-0 state sets each pad's PIO funcsel plus
+		 * input-enable/pull (input-enable on the read pin is required for
+		 * `in pins` to sample SWDIO). Equivalent of probe_gpio_init
+		 * (probe.pio:74-87).
 		 */
-		if (cfg->use_swdi || cfg->use_oen) {
-			pio_gpio_init(pio, cfg->swdi_pin);
-		}
-		/* Level-shifter output-enable, only on the (latent) OEN board. */
-		if (cfg->use_oen) {
-			pio_gpio_init(pio, cfg->oen_pin);
+		ret = pinctrl_apply_state(cfg->pcfg, PINCTRL_STATE_DEFAULT);
+		if (ret < 0) {
+			return ret;
 		}
 
 		/* Add the matching program once -- probe.c:154. */
@@ -659,8 +663,10 @@ static int swdp_pio_init(const struct device *dev)
  * use_swdi and use_oen are two independent axes -- see swdp_pio_config.
  */
 #define SWDP_PIO_DEFINE(n)							\
+	PINCTRL_DT_INST_DEFINE(n);					\
 	static const struct swdp_pio_config swdp_pio_cfg_##n = {		\
 		.piodev = DEVICE_DT_GET(DT_INST_PHANDLE(n, piodev)),	\
+		.pcfg = PINCTRL_DT_INST_DEV_CONFIG_GET(n),		\
 		.reset_gpio = GPIO_DT_SPEC_INST_GET_OR(n, reset_gpios, {0}), \
 		.swclk_pin = DT_INST_PROP(n, swclk_pin),		\
 		.swdio_pin = DT_INST_PROP(n, swdio_pin),		\

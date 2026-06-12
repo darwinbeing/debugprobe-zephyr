@@ -1,6 +1,25 @@
+#include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+
 &zephyr_udc0 {
 	cdc_acm_uart0: cdc_acm_uart0 {
 		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+/* Route the PIO SWD pins to the PIO0 function (the Zephyr way, via pinctrl).
+ * SWCLK=GP2 (PIO output), SWDIO=GP3 (shared in/out: input-enable so `in pins`
+ * can sample it, pull-up for the idle-high SWD bus).
+ */
+&pinctrl {
+	swd_pio_default: swd_pio_default {
+		clk_pins {
+			pinmux = <PIO0_P2>;
+		};
+		dio_pins {
+			pinmux = <PIO0_P3>;
+			input-enable;
+			bias-pull-up;
+		};
 	};
 };
 
@@ -29,6 +48,8 @@
 	swd_pio: swd_pio {
 		compatible = "raspberrypi,swdp-pio";
 		piodev = <&pio0>;
+		pinctrl-0 = <&swd_pio_default>;
+		pinctrl-names = "default";
 		clk-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
 		dio-gpios = <&gpio0 3 (GPIO_PULL_UP | GPIO_ACTIVE_HIGH)>;
 		reset-gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
