@@ -914,6 +914,8 @@ Expected: link error (engine symbols missing) — that counts as the failing sta
 
 - [ ] **Step 3: Implement `lib/dap/src/engine.cpp`** — constructor, `process()` (ExecuteCommands loop mirroring `DAP_ExecuteCommand`, `DAP.c:1728-1746`), `dispatch()` mirroring `DAP_ProcessCommand` (`DAP.c:1615-1720`), and the handlers covered by the tests above. Implementation skeleton (complete for this task's scope; transfer/swj handlers are declared but defined in `swj.cpp`/`transfer.cpp` — for THIS task give them temporary definitions returning `{rest-of-request, kDapError}`-style stubs in their own files so the build links; Tasks 3-6 replace them):
 
+  > **Amended during execution:** vendor/JTAG consumed-byte parity for ExecuteCommands batches; cmd_info empty-request guard.
+
 ```cpp
 #include "dap/engine.hpp"
 
@@ -985,7 +987,7 @@ DapEngine::Sizes DapEngine::dispatch(std::span<const uint8_t> req, std::span<uin
 
 	if (cmd >= kCmdVendorFirst && cmd <= kCmdVendorLast) {
 		resp[0] = cmd; /* default DAP_vendor.c: echo only */
-		return {req.size(), 1};
+		return {1, 1};
 	}
 
 	resp[0] = cmd;
@@ -1027,17 +1029,19 @@ DapEngine::Sizes DapEngine::dispatch(std::span<const uint8_t> req, std::span<uin
 	case kCmdSwdSequence:
 		s = cmd_swd_sequence(body_req, body_resp);
 		break;
-	case kCmdJtagSequence: /* JTAG not available on this probe */
+	case kCmdJtagSequence: /* JTAG not available: error, but walk the body */
 		body_resp[0] = kDapError;
-		s = {body_req.size(), 1};
+		s = {jtag_sequence_body_len(body_req), 1};
 		break;
-	case kCmdJtagConfigure:
+	case kCmdJtagConfigure: {
 		body_resp[0] = kDapError;
-		s = {body_req.size(), 1};
+		size_t n = body_req.empty() ? 0 : 1 + static_cast<size_t>(body_req[0]);
+		s = {n > body_req.size() ? body_req.size() : n, 1};
 		break;
-	case kCmdJtagIdcode: /* JTAG compiled out: 1-byte error (DAP.c id_error) */
+	}
+	case kCmdJtagIdcode:   /* JTAG compiled out: 1-byte error (DAP.c id_error) */
 		body_resp[0] = kDapError;
-		s = {body_req.size(), 1};
+		s = {body_req.empty() ? 0u : 1u, 1};
 		break;
 	case kCmdTransferConfigure:
 		s = cmd_transfer_configure(body_req, body_resp);

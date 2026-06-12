@@ -188,3 +188,43 @@ TEST(truncated_info_request_no_crash)
 	const uint8_t want[] = {0x00, 0};
 	CHECK_BYTES(r, want);
 }
+
+TEST(execute_commands_vendor_mid_batch_stays_in_sync)
+{
+	Fixture f;
+	/* batch: Vendor5(no payload), Delay(100us) — vendor must consume 1 byte */
+	auto r = f.run({0x7F, 0x02, 0x85, 0x09, 0x64, 0x00});
+	const uint8_t want[] = {0x7F, 0x02, 0x85, 0x09, dap::kDapOk};
+	CHECK_BYTES(r, want);
+	CHECK_EQ(f.drv.delays_us, 100u);
+}
+
+TEST(execute_commands_jtag_configure_mid_batch_stays_in_sync)
+{
+	Fixture f;
+	/* batch: JTAG_Configure(count=2, ir lengths 4,5), then Delay(7us) */
+	auto r = f.run({0x7F, 0x02, 0x15, 0x02, 0x04, 0x05, 0x09, 0x07, 0x00});
+	const uint8_t want[] = {0x7F, 0x02, 0x15, dap::kDapError, 0x09, dap::kDapOk};
+	CHECK_BYTES(r, want);
+	CHECK_EQ(f.drv.delays_us, 7u);
+}
+
+TEST(execute_commands_jtag_sequence_mid_batch_stays_in_sync)
+{
+	Fixture f;
+	/* JTAG_Sequence: 1 sequence, info 0x08 (8 TCK cycles -> 1 data byte),
+	 * data 0xAA; then Delay(7us) */
+	auto r = f.run({0x7F, 0x02, 0x14, 0x01, 0x08, 0xAA, 0x09, 0x07, 0x00});
+	const uint8_t want[] = {0x7F, 0x02, 0x14, dap::kDapError, 0x09, dap::kDapOk};
+	CHECK_BYTES(r, want);
+	CHECK_EQ(f.drv.delays_us, 7u);
+}
+
+TEST(execute_commands_jtag_idcode_mid_batch_stays_in_sync)
+{
+	Fixture f;
+	auto r = f.run({0x7F, 0x02, 0x16, 0x00, 0x09, 0x07, 0x00});
+	const uint8_t want[] = {0x7F, 0x02, 0x16, dap::kDapError, 0x09, dap::kDapOk};
+	CHECK_BYTES(r, want);
+	CHECK_EQ(f.drv.delays_us, 7u);
+}

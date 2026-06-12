@@ -21,6 +21,25 @@ size_t string_info(const char *s, uint8_t *out, size_t cap)
 	return len;
 }
 
+/* Bytes a JTAG_Sequence body occupies (count byte + sequences), clamped. */
+size_t jtag_sequence_body_len(std::span<const uint8_t> body)
+{
+	if (body.empty()) {
+		return 0;
+	}
+	size_t off = 1;
+	size_t seq_count = body[0];
+	while (seq_count-- && off < body.size()) {
+		const uint8_t info = body[off++];
+		size_t cycles = info & 0x3FU;
+		if (cycles == 0) {
+			cycles = 64;
+		}
+		off += (cycles + 7) / 8;
+	}
+	return off > body.size() ? body.size() : off;
+}
+
 } // namespace
 
 DapEngine::DapEngine(SwdDriver &driver, HostStatus &host, const Config &config)
@@ -68,7 +87,7 @@ DapEngine::Sizes DapEngine::dispatch(std::span<const uint8_t> req, std::span<uin
 
 	if (cmd >= kCmdVendorFirst && cmd <= kCmdVendorLast) {
 		resp[0] = cmd; /* default DAP_vendor.c: echo only */
-		return {req.size(), 1};
+		return {1, 1};
 	}
 
 	resp[0] = cmd;
@@ -110,17 +129,19 @@ DapEngine::Sizes DapEngine::dispatch(std::span<const uint8_t> req, std::span<uin
 	case kCmdSwdSequence:
 		s = cmd_swd_sequence(body_req, body_resp);
 		break;
-	case kCmdJtagSequence: /* JTAG not available on this probe */
+	case kCmdJtagSequence: /* JTAG not available: error, but walk the body */
 		body_resp[0] = kDapError;
-		s = {body_req.size(), 1};
+		s = {jtag_sequence_body_len(body_req), 1};
 		break;
-	case kCmdJtagConfigure:
+	case kCmdJtagConfigure: {
 		body_resp[0] = kDapError;
-		s = {body_req.size(), 1};
+		size_t n = body_req.empty() ? 0 : 1 + static_cast<size_t>(body_req[0]);
+		s = {n > body_req.size() ? body_req.size() : n, 1};
 		break;
-	case kCmdJtagIdcode: /* JTAG compiled out: 1-byte error (DAP.c id_error) */
+	}
+	case kCmdJtagIdcode:   /* JTAG compiled out: 1-byte error (DAP.c id_error) */
 		body_resp[0] = kDapError;
-		s = {body_req.size(), 1};
+		s = {body_req.empty() ? 0u : 1u, 1};
 		break;
 	case kCmdTransferConfigure:
 		s = cmd_transfer_configure(body_req, body_resp);
