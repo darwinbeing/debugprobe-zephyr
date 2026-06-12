@@ -13,6 +13,7 @@
 - Endpoint addresses: the original uses EP 0x04/0x85 for DAP and 0x81/0x02/0x83 for CDC; Zephyr usbd assigns addresses automatically in registration order (DAP will get 0x01/0x81). CMSIS-DAP v2 hosts (openocd/pyocd/probe-rs) discover endpoints from descriptors, so compatibility is unaffected.
 - MS OS 2.0 descriptor set: the original includes a configuration subset header (total length 0xB2); this implementation follows the Zephyr sample structure (set header + function subset + compatible ID + registry property). Windows accepts both layouts; the key content (WINUSB compatible ID, DeviceInterfaceGUID `{CDB3B5AD-293B-4663-AA36-1AAE46463776}`) is identical.
 - `bcdDevice` is tentatively 0x0231 (same as the original v2.31); version management is decided in phase 5.
+- CDC ACM management functional descriptor `bmCapabilities`: the original patches it to 0x06 (adds SendBreak support); Zephyr's CDC-ACM class emits 0x02. Recorded for the phase-5 conformance allowlist; phase 4 decides whether break support is needed for UART-bridge parity.
 
 **Reference files** (consult during implementation):
 

@@ -200,11 +200,9 @@ static int dap_init(struct usbd_class_data *const c_data)
 	return 0;
 }
 
-/* Member order must follow struct usbd_class_api declaration in usbd.h:
- * feature_halt, update, control_to_dev, control_to_host, request,
- * suspended, resumed, sof, enable, disable, init, shutdown, get_desc.
- * The plan listed only {request, enable, disable, init, get_desc}; the
- * full-order initializer below is required for C++ designated initializers.
+/* C++ designated initializers must appear in declaration order
+ * (usbd.h: ... request ... enable, disable, init ... get_desc);
+ * this subset already is — keep it that way when adding members.
  */
 static struct usbd_class_api dap_class_api = {
 	.request = dap_request_handler,
