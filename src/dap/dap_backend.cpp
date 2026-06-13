@@ -4,6 +4,7 @@
 #include "dap/engine.hpp"
 #include "dap/interfaces.hpp"
 #include "leds.hpp"
+#include "usb/dap_class.hpp"
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
@@ -71,7 +72,7 @@ dap::Config make_config()
 	c.product = CONFIG_PROBE_PRODUCT_STRING;
 	c.serial = build_serial();
 	c.fw_version = "2.0.0";
-	c.packet_size = 64;
+	c.packet_size = probe::usb::kDapPacketSize;
 	c.packet_count = 6;
 	c.timestamp_clock = 1000000;
 	return c;

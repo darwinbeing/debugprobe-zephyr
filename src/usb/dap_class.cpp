@@ -16,7 +16,8 @@ LOG_MODULE_REGISTER(dap_usb, LOG_LEVEL_INF);
 
 namespace {
 
-constexpr uint16_t kPacketSize = 64;
+using probe::usb::kDapPacketSize;
+using probe::usb::kUsbBulkMaxPacket;
 
 struct DapDesc {
 	struct usb_if_descriptor if0;
@@ -35,11 +36,12 @@ struct DapData {
 
 /* Count 3 is load-bearing: during reconfiguration the cancelled OUT buffer's
  * completion event can still hold one buffer while enable() arms a fresh one;
- * phase 2 adds an IN response buffer drawn from this same pool while the OUT
- * buffer is still in flight, so the pool must hold OUT + IN + the cancelled
- * straggler concurrently.
+ * the IN response buffer is drawn from this same pool while the OUT buffer is
+ * still in flight, so the pool must hold OUT + IN + the cancelled straggler
+ * concurrently.  Each buffer is a full DAP packet (kDapPacketSize), which the
+ * UDC driver fills/drains across multiple 64-byte USB packets.
  */
-UDC_BUF_POOL_DEFINE(dap_buf_pool, 3, kPacketSize,
+UDC_BUF_POOL_DEFINE(dap_buf_pool, 3, kDapPacketSize,
 		    sizeof(struct udc_buf_info), nullptr);
 
 USBD_DESC_STRING_DEFINE(dap_if_str_desc, "CMSIS-DAP v2 Interface",
@@ -62,7 +64,7 @@ static DapDesc dap_desc = {
 		.bDescriptorType = USB_DESC_ENDPOINT,
 		.bEndpointAddress = 0x01,
 		.bmAttributes = USB_EP_TYPE_BULK,
-		.wMaxPacketSize = sys_cpu_to_le16(kPacketSize),
+		.wMaxPacketSize = sys_cpu_to_le16(kUsbBulkMaxPacket),
 		.bInterval = 0,
 	},
 	.if0_in_ep = {
@@ -70,7 +72,7 @@ static DapDesc dap_desc = {
 		.bDescriptorType = USB_DESC_ENDPOINT,
 		.bEndpointAddress = 0x81,
 		.bmAttributes = USB_EP_TYPE_BULK,
-		.wMaxPacketSize = sys_cpu_to_le16(kPacketSize),
+		.wMaxPacketSize = sys_cpu_to_le16(kUsbBulkMaxPacket),
 		.bInterval = 0,
 	},
 	.nil_desc = {
@@ -150,35 +152,29 @@ static int dap_request_handler(struct usbd_class_data *const c_data,
 	const bool is_out = (bi->ep == dap_bulk_out_ep(c_data));
 
 	if (err == 0 && is_out) {
-		/* Copy the request out of the OUT buffer before we free it, run
-		 * the DAP engine, and ship the response on the IN endpoint.
+		/* Run the DAP engine straight from the OUT buffer into a fresh IN
+		 * buffer.  No stack bounce: buffers are up to kDapPacketSize (512)
+		 * which would blow the usbd thread stack as locals.
 		 */
-		uint8_t request[kPacketSize];
-		uint8_t response[kPacketSize];
-		const size_t req_len = MIN(buf->len, sizeof(request));
+		struct net_buf *in_buf = dap_buf_alloc(dap_bulk_in_ep(c_data));
 
-		std::memcpy(request, buf->data, req_len);
+		if (in_buf == nullptr) {
+			/* Pool exhausted: drop the response rather than escalate;
+			 * the host will time out and retry. */
+			LOG_ERR("IN buffer alloc failed");
+		} else {
+			const size_t resp_len = probe::dap_backend::process(
+				std::span<const uint8_t>(buf->data, buf->len),
+				std::span<uint8_t>(net_buf_tail(in_buf),
+						   net_buf_tailroom(in_buf)));
 
-		const size_t resp_len = probe::dap_backend::process(
-			std::span<const uint8_t>(request, req_len),
-			std::span<uint8_t>(response, sizeof(response)));
-
-		/* resp_len == 0 means "no response" (e.g. DAP_TransferAbort,
-		 * handled out-of-band): skip the IN transfer entirely.
-		 */
-		if (resp_len != 0) {
-			struct net_buf *in_buf =
-				dap_buf_alloc(dap_bulk_in_ep(c_data));
-
-			if (in_buf == nullptr) {
-				/* Pool exhausted: drop the response rather than
-				 * escalate; the host will time out and retry.
-				 */
-				LOG_ERR("IN buffer alloc failed");
+			/* resp_len == 0 means "no response" (e.g. DAP_TransferAbort,
+			 * handled out-of-band): skip the IN transfer entirely.
+			 */
+			if (resp_len == 0) {
+				usbd_ep_buf_free(ctx, in_buf);
 			} else {
-				net_buf_add_mem(in_buf, response,
-						MIN(resp_len,
-						    net_buf_tailroom(in_buf)));
+				net_buf_add(in_buf, resp_len);
 
 				if (usbd_ep_enqueue(c_data, in_buf)) {
 					LOG_ERR("IN enqueue failed");

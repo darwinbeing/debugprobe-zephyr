@@ -72,6 +72,30 @@ TEST(block_read_ap_uses_pipeline)
 	CHECK_EQ(f.drv.transfers[2].request, dap::kReqReadRdbuff);
 }
 
+/* The big-packet throughput fix relies on the engine filling a response far
+ * larger than one 64-byte USB packet.  A 100-word DP read => 404-byte response;
+ * verify it is produced intact (no hidden 64-byte cap, correct framing). */
+TEST(block_read_large_fills_response_over_64_bytes)
+{
+	Fixture f;
+	const uint16_t N = 100;
+	for (uint16_t i = 0; i < N; i++) {
+		f.drv.script.push_back({dap::Ack::Ok, 0x01000000u + i});
+	}
+	auto r = f.run({0x06, 0x00, static_cast<uint8_t>(N & 0xff),
+			static_cast<uint8_t>(N >> 8), 0x06}); /* DP read addr 4 */
+	CHECK_EQ(r.size(), static_cast<size_t>(4 + 4 * N)); /* 404 > 64 */
+	CHECK_EQ(r[0], 0x06);
+	CHECK_EQ(r[1], static_cast<uint8_t>(N & 0xff));
+	CHECK_EQ(r[2], static_cast<uint8_t>(N >> 8));
+	CHECK_EQ(r[3], dap::kXferOk);
+	/* last word, little-endian, must be intact at the very end */
+	const size_t off = 4 + 4 * (N - 1);
+	const uint32_t got = r[off] | (r[off + 1] << 8) | (r[off + 2] << 16) |
+			     (static_cast<uint32_t>(r[off + 3]) << 24);
+	CHECK_EQ(got, 0x01000000u + (N - 1));
+}
+
 TEST(block_fault_reports_partial_count)
 {
 	Fixture f;
