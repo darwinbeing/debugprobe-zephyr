@@ -269,6 +269,10 @@ TEST(dp_parse_parity_error)
 
 	/* W0 is good, transfer 1 has bad parity — stops there */
 	CHECK_EQ(res.completed, 1u);
+	/* A parity failure must surface as TRANSFER_ERROR (0x08), matching the
+	 * CPU path (sw_transfer sets ack = DAP_TRANSFER_ERROR); reporting OK
+	 * would hide data corruption from the host. */
+	CHECK_EQ(res.ack, 0x08u);
 }
 
 /* ---- capacity guard: build returns 0 if buffer too small ---- */

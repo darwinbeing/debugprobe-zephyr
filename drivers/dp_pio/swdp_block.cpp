@@ -142,7 +142,9 @@ ReadParse parse_read_response(const StreamCfg& c, bool is_ap, uint16_t count,
 		uint8_t par_calc = static_cast<uint8_t>(__builtin_popcount(data) & 1u);
 
 		if (par_got != par_calc) {
-			/* Parity error: stop without storing this word. */
+			/* Parity error: report DAP_TRANSFER_ERROR (BIT(3)) like the
+			 * CPU path (sw_transfer), and stop without storing. */
+			result.ack = 0x08u;
 			break;
 		}
 
