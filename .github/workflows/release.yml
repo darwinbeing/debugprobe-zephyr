@@ -53,6 +53,11 @@ jobs:
           app-path: debugprobe-zephyr
           toolchains: arm-zephyr-eabi
 
+      # west update re-fetches the trees clean, so patches must go on *after*
+      # setup and *before* the build. See patches/README.md.
+      - name: Apply out-of-tree patches
+        run: ZEPHYR_WORKSPACE="$GITHUB_WORKSPACE" debugprobe-zephyr/scripts/apply_patches.sh
+
       - name: Build ${{ matrix.board }}
         run: west build -p always -b ${{ matrix.board }} debugprobe-zephyr -d build
 

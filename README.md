@@ -26,3 +26,17 @@ mkdir debugprobe-ws && cd debugprobe-ws
 west init -m <this repository URL>
 west update
 ```
+
+## Out-of-tree patches
+
+`patches/` holds latent-bug fixes for the pinned Zephyr / hal_rpi_pico trees.
+`west update` re-fetches those trees clean, so re-apply after every update
+(idempotent):
+
+```bash
+scripts/apply_patches.sh
+```
+
+CI applies them automatically. They are insurance — debugprobe doesn't trip
+either bug today; see `patches/README.md` for what each fixes and when it
+becomes mandatory.
