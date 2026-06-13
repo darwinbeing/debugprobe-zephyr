@@ -127,22 +127,30 @@ Requires `CONFIG_DMA=y` + `CONFIG_DMA_RPI_PICO=y` and the `dma` node
 - **Buffers:** static, sized for the maximum block from a 512 B packet (~127
   transfers): TX ≈ 3.6 KB, RX ≈ 1.5 KB. (RAM budget: firmware currently ~11%.)
 
-### ④ Optimistic fault recovery
+### ④ Optimistic + verify + report (no firmware-side resume)
+
+The DMA read path is **purely additive**. The engine *attempts* it; if the
+driver has no DMA (bitbang/null), or the block is ineligible (a write in phase 1,
+oversized, or `count == 0`), the engine's existing faithful per-word loop runs
+**unchanged**. The DMA path never replaces the engine pipeline, so the WAIT-retry
+logic and all existing host tests stay exactly as they are.
 
 If `parse_block_response` reports `first_fault = k < count`:
 
-1. Transfers `0..k-1` (all OK) are valid → keep their data, `completed = k`.
-2. Words `k+1..` were clocked optimistically and are meaningless (and may have
-   desynced the bus). **Re-synchronize:** drive idle clocks / line reset as
-   needed and clear sticky errors via `DAP_WriteABORT`.
-3. **Redo from word `k`** on the CPU `sw_transfer` path, which performs the
-   real WAIT-retry / FAULT handling. Its result (further completed count + final
-   ACK) is appended, producing the same `{count, ack, data...}` the all-CPU path
-   would have. Matches `DAP_TransferBlock` partial-count semantics
-   (DAP.c:1267-1460).
+1. Transfers `0..k-1` (all OK) are valid → return `data[0..k)`, `completed = k`,
+   `ack =` that non-OK ACK.
+2. **No firmware-side resume or re-run.** Re-running is unsafe with AP TAR
+   auto-increment (the optimistic stream already advanced TAR) and unnecessary:
+   `DAP_TransferBlock` reports the completed count + failing ACK and the **host
+   (openocd) performs recovery** — it resets TAR, clears sticky errors via
+   `DAP_WriteABORT`, and re-issues. This is the same recovery contract the CPU
+   path relies on (DAP.c:1267-1460).
 
-Healthy RAM block reads almost never fault, so the fast path dominates; the
-fallback exists purely for correctness parity.
+The only behavioral difference from the CPU path: the DMA path does **not**
+internally WAIT-retry (it reports a WAIT as a stop), so a WAIT bounces to the
+host one round earlier. WAIT is rare on healthy RAM reads, and the CPU fallback
+(used whenever DMA is unavailable) still WAIT-retries as today. No conformance
+impact (the fixed conformance sequence contains no WAIT/FAULT).
 
 ## Testing and Acceptance
 
@@ -174,8 +182,9 @@ fallback exists purely for correctness parity.
    reads. Prove on the benchmark + integrity checks. (Highest value, provable.)
 2. **Write-block DMA** — extend builder/parser for the write template and the
    per-word payload interleave; reuse the same DMA machinery.
-3. **Fault fallback hardening** — re-sync + CPU redo from word k; forced-fault
-   acceptance.
+3. **Fault-report validation** — confirm on hardware that a forced non-OK ACK
+   reports the right completed-count + ACK and the host recovers cleanly
+   (forced-fault acceptance). No firmware resume.
 
 Each phase is independently testable; read-block alone already captures the
 benchmark win.

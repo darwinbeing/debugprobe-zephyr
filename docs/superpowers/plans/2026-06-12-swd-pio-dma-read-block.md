@@ -64,60 +64,87 @@ git commit -m "build: enable Zephyr DMA (dma_rpi_pico) for SWD block DMA"
 
 ---
 
-## Task 2: `SwdDriver::transfer_block` default (CPU pipeline) + engine delegation
+## Task 2: Additive `transfer_block_read` hook in the SWD driver + engine
 
-The pipeline (post AP read / per-word read / RDBUFF flush) moves from `cmd_transfer_block` into a default `transfer_block` so it is the single reference, the fallback, and what mock/bitbang use. Behavior must be identical — the existing `tests/host/test_transfer_block.cpp` read tests are the guard.
+The DMA read path is **purely additive**. Add an opt-in driver method; the engine
+*attempts* it and, if it returns `false` (no DMA / ineligible), runs its existing
+faithful per-word loop **unchanged**. No pipeline move, no WAIT-retry relocation —
+so all existing read-block tests stay green by construction. The DMA writes its
+LE data words straight into the response buffer (no large stack array on the 1 KB
+usbd thread).
 
 **Files:**
 - Modify: `lib/dap/include/dap/interfaces.hpp`
-- Create: `lib/dap/src/transfer_block_loop.cpp`
 - Modify: `lib/dap/src/transfer.cpp` (read path of `cmd_transfer_block`)
-- Modify: `lib/dap/CMakeLists.txt` (add the new source)
+- Modify: `tests/host/mock_swd_driver.hpp`, `tests/host/test_transfer_block.cpp`
 
-- [ ] **Step 1: Run existing block tests to capture the green baseline**
+- [ ] **Step 1: Green baseline.** Run `bash scripts/run_host_tests.sh` → `OK: 77 tests`.
 
-Run: `bash scripts/run_host_tests.sh`
-Expected: `OK: 77 tests` (these read-block tests must stay green through the refactor).
-
-- [ ] **Step 2: Add the interface method**
+- [ ] **Step 2: Add the opt-in interface method (default = not handled)**
 
 In `interfaces.hpp` `class SwdDriver`, after `transfer`:
 ```cpp
-/* Read a register block: `count` transfers of `request` (RnW set), returning
- * each data word in `data[0..count)`. Implements the AP post/RDBUFF pipeline.
- * Returns the count actually completed; `*ack` gets the final ACK. Default
- * impl loops `transfer`; drivers may override (e.g. DMA). */
-virtual uint16_t transfer_block_read(uint8_t request, uint16_t count,
-                                     uint32_t *data, uint8_t *ack);
+/* Optional DMA fast path for a register READ block. Writes up to
+ * `out_cap/4` little-endian data words to `out`, sets `*completed` to the
+ * number of OK transfers (stops at the first WAIT/FAULT) and `*ack` to the
+ * final ACK. Returns true if it handled the block (out/completed/ack valid);
+ * false => caller must use the normal per-word path. Default: not handled. */
+virtual bool transfer_block_read(uint8_t request, uint16_t count, uint8_t *out,
+                                 size_t out_cap, uint16_t *completed,
+                                 uint8_t *ack) {
+    (void)request; (void)count; (void)out; (void)out_cap;
+    (void)completed; (void)ack;
+    return false;
+}
 ```
 
-- [ ] **Step 3: Implement the default by lifting the engine's read pipeline verbatim**
+- [ ] **Step 3: Write the failing engine test** (mock returns a DMA block; engine must frame it)
 
-Create `lib/dap/src/transfer_block_loop.cpp` with `SwdDriver::transfer_block_read` containing the exact AP-post / per-word / last-RDBUFF logic currently in `cmd_transfer_block` (transfer.cpp:523-540...), calling `this->transfer(req, &data)`; accumulate completed count + final ack. (Copy the existing loop body; do not re-derive.)
-
-- [ ] **Step 4: Refactor the engine read path to delegate**
-
-In `cmd_transfer_block` (transfer.cpp), replace the read-branch per-word loop with:
+In `mock_swd_driver.hpp` add overridable hooks: a `bool block_enabled=false`, a `std::vector<uint32_t> block_words`, `uint8_t block_ack=dap::kXferOk`, `uint16_t block_completed` (defaults to `block_words.size()`); override `transfer_block_read` to, when `block_enabled`, write `block_completed` LE words from `block_words` into `out` (bounded by `out_cap/4`), set `*completed`/`*ack`, return true; else return false.
+In `test_transfer_block.cpp`:
 ```cpp
-uint8_t ack = 0;
-uint16_t done = driver_.transfer_block_read(static_cast<uint8_t>(request_value),
-                                            static_cast<uint16_t>(request_count),
-                                            block_words, &ack);
-response_value = ack;
-for (uint16_t i = 0; i < done; i++) { if (!store_word(block_words[i])) break; }
-response_count = done;
+TEST(block_read_uses_dma_path_when_available) {
+  Fixture f;
+  f.drv.block_enabled = true;
+  f.drv.block_words = {0xAABBCCDDu, 0x11223344u};
+  f.drv.block_completed = 2; f.drv.block_ack = dap::kXferOk;
+  auto r = f.run({0x06, 0x00, 0x02, 0x00, 0x06}); /* DP read addr 4, count 2 */
+  const uint8_t want[] = {0x06, 0x02, 0x00, dap::kXferOk,
+                          0xDD,0xCC,0xBB,0xAA, 0x44,0x33,0x22,0x11};
+  CHECK_BYTES(r, want);
+}
 ```
-(`block_words` = a `std::array<uint32_t, kMaxBlockWords>` local sized from packet_size; the write path is unchanged in phase 1.)
 
-- [ ] **Step 5: Run tests — refactor must be behavior-preserving**
+- [ ] **Step 4: Run it — FAIL** (engine ignores the hook). `bash scripts/run_host_tests.sh`.
 
-Run: `bash scripts/run_host_tests.sh`
-Expected: `OK: 77 tests` (unchanged). If any read-block test fails, the lift diverged — fix to match.
+- [ ] **Step 5: Wire the hook into the engine read branch**
 
-- [ ] **Step 6: Commit**
+In `cmd_transfer_block` (transfer.cpp), at the very top of the read branch (before the AP post), insert:
+```cpp
+{
+    uint16_t done = 0; uint8_t blk_ack = 0;
+    if (request_count > 0 &&
+        driver_.transfer_block_read(static_cast<uint8_t>(request_value),
+                                    static_cast<uint16_t>(request_count),
+                                    resp.data() + wi, resp.size() - wi,
+                                    &done, &blk_ack)) {
+        size_t avail = (resp.size() - wi) / 4;
+        if (done > avail) { done = static_cast<uint16_t>(avail); }
+        wi += static_cast<size_t>(done) * 4;
+        response_count = done;
+        response_value = blk_ack;
+        goto end;
+    }
+}
+```
+(The existing per-word loop below is untouched and remains the fallback.)
+
+- [ ] **Step 6: Run tests green.** Expected: `OK: 78 tests` (new test passes; the 77 existing — whose mock returns `false` — are byte-identical to before).
+
+- [ ] **Step 7: Commit**
 ```bash
-git add lib/dap
-git commit -m "refactor: SwdDriver.transfer_block_read default + engine delegates (no behavior change)"
+git add lib/dap tests/host
+git commit -m "feat: additive DMA read-block hook in SwdDriver + engine (CPU path unchanged)"
 ```
 
 ---
