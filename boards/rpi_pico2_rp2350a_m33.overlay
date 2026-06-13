@@ -68,6 +68,8 @@
 	status = "okay";
 };
 
+&dma { status = "okay"; };
+
 / {
 	/* CDC-ACM (USB) <-> uart1 (target) bridge is now a custom C++ UartBridge
 	 * (src/uart_bridge.cpp) that binds cdc_acm_uart0 and uart1 directly, so

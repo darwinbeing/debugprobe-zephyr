@@ -76,6 +76,8 @@
 	status = "okay";
 };
 
+&dma { status = "okay"; };
+
 / {
 	/* uart1 is already enabled (status=okay, uart1_default pinctrl) in the
 	 * board DTS and was the console -- move the console/shell to uart0 so the
