@@ -16,9 +16,13 @@ add_executable(dap_tests
   test_transfer.cpp
   test_transfer_block.cpp
   test_autobaud.cpp
+  test_swdp_block.cpp
   # The autobaud estimator is pure C++ (zero Zephyr deps), so it compiles
   # straight into the host test binary -- identical source as the firmware.
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src/autobaud/estimator.cpp
+  # Pure C++ PIO stream-builder / response-parser (zero Zephyr deps).
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/dp_pio/swdp_block.cpp
 )
 target_include_directories(dap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+target_include_directories(dap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../drivers/dp_pio)
 target_link_libraries(dap_tests PRIVATE dap)
