@@ -22,12 +22,14 @@
 #include <zephyr/drivers/misc/pio_rpi_pico/pio_rpi_pico.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pinctrl.h>
+#include <zephyr/drivers/dma.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
 #include <hardware/pio.h>
 
 #include "probe_pio.h"
+#include "swdp_block_c.h"
 
 /* Out-of-tree driver: use a literal log level (not CONFIG_DP_DRIVER_LOG_LEVEL,
  * which belongs to the in-tree DP_DRIVER module).
@@ -70,6 +72,13 @@ struct swdp_pio_data {
 	uint8_t turnaround; /* swd_conf.turnaround (1-based) */
 	bool data_phase;    /* swd_conf.data_phase */
 	uint32_t cached_khz;
+	/* DMA read-block fast path (drivers/dp_pio/swdp_block.cpp builds/parses;
+	 * Zephyr DMA streams the PIO FIFOs). dma_ready gates use. */
+	const struct device *dma_dev;
+	uint32_t dma_tx_ch;
+	uint32_t dma_rx_ch;
+	struct k_sem dma_done;
+	bool dma_ready;
 };
 
 /* probe_pio_command_t -- probe.c:91-96. Each enum is an index that, added to
@@ -626,6 +635,117 @@ static int sw_port_off(const struct device *dev)
 	return 0;
 }
 
+/* --- DMA read-block fast path -------------------------------------------- */
+
+/* Sized for the largest block from a 512-byte DAP packet (~127 transfers):
+ * 7 TX words + 3 RX words per transfer, +1 leading AP-post transfer. Shared
+ * (one PIO SWD device; DAP processing is serialized on the usbd thread). */
+#define SWDP_DMA_MAX_TRANSFERS 128
+static uint32_t swdp_dma_tx_buf[(SWDP_DMA_MAX_TRANSFERS + 1) * 7];
+static uint32_t swdp_dma_rx_buf[(SWDP_DMA_MAX_TRANSFERS + 1) * 3];
+
+static void swdp_dma_done_cb(const struct device *dma, void *user_data,
+			     uint32_t channel, int status)
+{
+	struct swdp_pio_data *d = user_data;
+
+	ARG_UNUSED(dma);
+	ARG_UNUSED(channel);
+	ARG_UNUSED(status);
+	k_sem_give(&d->dma_done);
+}
+
+/* DMA fast path for a register READ block. Streams the whole block through the
+ * PIO via two DMA channels (TX = mem->PIO FIFO, RX = PIO FIFO->mem), then parses
+ * the captured RX. Returns 0 if handled (out, completed and ack set; on WAIT/
+ * FAULT, completed is the verified prefix and ack the failing ACK). Returns a
+ * negative errno to DECLINE, so the caller uses the per-word CPU path. */
+int swdp_pio_transfer_block_read(const struct device *dev, uint8_t request,
+				 uint16_t count, uint8_t *out, size_t out_cap,
+				 uint16_t *completed, uint8_t *ack)
+{
+	const struct swdp_pio_config *cfg = dev->config;
+	struct swdp_pio_data *d = dev->data;
+	PIO pio;
+	int is_ap;
+	uint16_t cmd_write, cmd_read, cmd_turn;
+	size_t txn, rxn;
+
+	if (!d->dma_ready || cfg->use_oen || count == 0u ||
+	    count > SWDP_DMA_MAX_TRANSFERS) {
+		return -ENOTSUP;
+	}
+
+	pio = pio_rpi_pico_get_pio(cfg->piodev);
+	is_ap = (request & 0x01u) ? 1 : 0; /* APnDP bit */
+	cmd_write = (uint16_t)(d->offset + probe_offset_write_cmd);
+	cmd_read = (uint16_t)(d->offset + probe_offset_read_cmd);
+	cmd_turn = (uint16_t)(d->offset + probe_offset_turnaround_cmd);
+
+	/* 0x0E = RnW | A2 | A3 = DP read of RDBUFF (kReqReadRdbuff), flushing the
+	 * last AP read in the pipeline. */
+	txn = swdp_block_build_read(cmd_write, cmd_read, cmd_turn, d->turnaround,
+				    request, 0x0Eu, is_ap, count, swdp_dma_tx_buf,
+				    ARRAY_SIZE(swdp_dma_tx_buf));
+	if (txn == 0u) {
+		return -ENOTSUP;
+	}
+	rxn = swdp_block_read_rx_count(is_ap, count);
+
+	struct dma_block_config rx_block = {
+		.source_address = (uint32_t)(uintptr_t)&pio->rxf[d->sm],
+		.dest_address = (uint32_t)(uintptr_t)swdp_dma_rx_buf,
+		.block_size = (uint32_t)(rxn * 4u),
+		.source_addr_adj = DMA_ADDR_ADJ_NO_CHANGE,
+		.dest_addr_adj = DMA_ADDR_ADJ_INCREMENT,
+	};
+	struct dma_config rx_cfg = {
+		.dma_slot = (~pio_get_dreq(pio, d->sm, false)) & 0x3Fu,
+		.channel_direction = PERIPHERAL_TO_MEMORY,
+		.source_data_size = 4u,
+		.dest_data_size = 4u,
+		.block_count = 1u,
+		.head_block = &rx_block,
+		.dma_callback = swdp_dma_done_cb,
+		.user_data = d,
+	};
+	struct dma_block_config tx_block = {
+		.source_address = (uint32_t)(uintptr_t)swdp_dma_tx_buf,
+		.dest_address = (uint32_t)(uintptr_t)&pio->txf[d->sm],
+		.block_size = (uint32_t)(txn * 4u),
+		.source_addr_adj = DMA_ADDR_ADJ_INCREMENT,
+		.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE,
+	};
+	struct dma_config tx_cfg = {
+		.dma_slot = (~pio_get_dreq(pio, d->sm, true)) & 0x3Fu,
+		.channel_direction = MEMORY_TO_PERIPHERAL,
+		.source_data_size = 4u,
+		.dest_data_size = 4u,
+		.block_count = 1u,
+		.head_block = &tx_block,
+	};
+
+	k_sem_reset(&d->dma_done);
+	if (dma_config(d->dma_dev, d->dma_rx_ch, &rx_cfg) != 0 ||
+	    dma_config(d->dma_dev, d->dma_tx_ch, &tx_cfg) != 0) {
+		return -ENOTSUP;
+	}
+	/* RX armed first so it cannot miss the SM's first push, then TX. */
+	dma_start(d->dma_dev, d->dma_rx_ch);
+	dma_start(d->dma_dev, d->dma_tx_ch);
+
+	if (k_sem_take(&d->dma_done, K_MSEC(100)) != 0) {
+		dma_stop(d->dma_dev, d->dma_tx_ch);
+		dma_stop(d->dma_dev, d->dma_rx_ch);
+		return -ETIMEDOUT;
+	}
+
+	*completed = swdp_block_parse_read(d->turnaround, is_ap, count,
+					   swdp_dma_rx_buf, rxn, out, out_cap,
+					   ack);
+	return 0;
+}
+
 static struct swdp_api swdp_pio_api = {
 	.swdp_output_sequence = sw_output_sequence,
 	.swdp_input_sequence = sw_input_sequence,
@@ -641,6 +761,7 @@ static struct swdp_api swdp_pio_api = {
 static int swdp_pio_init(const struct device *dev)
 {
 	const struct swdp_pio_config *cfg = dev->config;
+	struct swdp_pio_data *d = dev->data;
 
 	if (!device_is_ready(cfg->piodev)) {
 		return -ENODEV;
@@ -651,6 +772,28 @@ static int swdp_pio_init(const struct device *dev)
 	 */
 	if (cfg->reset_gpio.port) {
 		gpio_pin_configure_dt(&cfg->reset_gpio, GPIO_INPUT);
+	}
+
+	/* Claim two DMA channels for the read-block fast path. Optional: if the
+	 * controller or a channel is unavailable, dma_ready stays false and the
+	 * driver transparently uses the per-word CPU path. */
+	d->dma_ready = false;
+	d->dma_dev = DEVICE_DT_GET(DT_NODELABEL(dma));
+	if (device_is_ready(d->dma_dev)) {
+		int tx_ch = dma_request_channel(d->dma_dev, NULL);
+		int rx_ch = dma_request_channel(d->dma_dev, NULL);
+
+		if (tx_ch >= 0 && rx_ch >= 0) {
+			d->dma_tx_ch = (uint32_t)tx_ch;
+			d->dma_rx_ch = (uint32_t)rx_ch;
+			k_sem_init(&d->dma_done, 0, 1);
+			d->dma_ready = true;
+		} else {
+			LOG_WRN("DMA channel request failed (%d,%d); CPU SWD path",
+				tx_ch, rx_ch);
+		}
+	} else {
+		LOG_WRN("DMA device not ready; CPU SWD path only");
 	}
 
 	return 0;

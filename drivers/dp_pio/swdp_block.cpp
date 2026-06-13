@@ -167,3 +167,36 @@ ReadParse parse_read_response(const StreamCfg& c, bool is_ap, uint16_t count,
 }
 
 } /* namespace probe::swdp_block */
+
+/* ---------------------------------------------------------------------------
+ * C wrappers for the PIO driver (swdp_block_c.h)
+ * --------------------------------------------------------------------------*/
+#include "swdp_block_c.h"
+
+extern "C" size_t swdp_block_build_read(uint16_t cmd_write, uint16_t cmd_read,
+					uint16_t cmd_turn, uint8_t t,
+					uint8_t request_byte, uint8_t rdbuff_byte,
+					int is_ap, uint16_t count, uint32_t *out,
+					size_t out_cap)
+{
+	probe::swdp_block::StreamCfg c{cmd_write, cmd_read, cmd_turn, t};
+	return probe::swdp_block::build_read_stream(c, request_byte, rdbuff_byte,
+						    is_ap != 0, count, out, out_cap);
+}
+
+extern "C" size_t swdp_block_read_rx_count(int is_ap, uint16_t count)
+{
+	return probe::swdp_block::read_rx_count(is_ap != 0, count);
+}
+
+extern "C" uint16_t swdp_block_parse_read(uint8_t t, int is_ap, uint16_t count,
+					  const uint32_t *rx, size_t rx_len,
+					  uint8_t *out_le, size_t out_cap,
+					  uint8_t *ack)
+{
+	probe::swdp_block::StreamCfg c{0, 0, 0, t};
+	probe::swdp_block::ReadParse r = probe::swdp_block::parse_read_response(
+		c, is_ap != 0, count, rx, rx_len, out_le, out_cap);
+	*ack = r.ack;
+	return r.completed;
+}

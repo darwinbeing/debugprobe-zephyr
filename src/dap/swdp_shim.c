@@ -10,8 +10,11 @@
  *
  * These wrappers map 1:1 onto swdp_api; see src/dap/swdp_driver.cpp.
  */
+#include <errno.h>
+
 #include <zephyr/device.h>
 #include <zephyr/drivers/swdp.h>
+#include <zephyr/sys/util.h>
 
 #include "dap/swdp_shim.h"
 
@@ -63,3 +66,35 @@ int probe_swdp_port_off(const struct device *dev)
 {
 	return swdp_port_off(dev);
 }
+
+/* The DMA block path lives in the PIO driver (not the swdp_api vtable, which is
+ * Zephyr's and unextendable). Call its exported entry point directly for the
+ * PIO backend; decline for the bitbang/null backends so the engine uses the
+ * per-word path. */
+#if defined(CONFIG_PROBE_SWD_PIO)
+int swdp_pio_transfer_block_read(const struct device *dev, uint8_t request,
+				 uint16_t count, uint8_t *out, size_t out_cap,
+				 uint16_t *completed, uint8_t *ack);
+
+int probe_swdp_transfer_block(const struct device *dev, uint8_t request,
+			      uint16_t count, uint8_t *out, size_t out_cap,
+			      uint16_t *completed, uint8_t *ack)
+{
+	return swdp_pio_transfer_block_read(dev, request, count, out, out_cap,
+					    completed, ack);
+}
+#else
+int probe_swdp_transfer_block(const struct device *dev, uint8_t request,
+			      uint16_t count, uint8_t *out, size_t out_cap,
+			      uint16_t *completed, uint8_t *ack)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(request);
+	ARG_UNUSED(count);
+	ARG_UNUSED(out);
+	ARG_UNUSED(out_cap);
+	ARG_UNUSED(completed);
+	ARG_UNUSED(ack);
+	return -ENOTSUP;
+}
+#endif

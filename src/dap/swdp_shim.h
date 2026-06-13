@@ -4,6 +4,7 @@
  * <zephyr/drivers/swdp.h>. Implemented in src/dap/swdp_shim.c.
  */
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include <zephyr/device.h>
@@ -25,6 +26,13 @@ int probe_swdp_configure(const struct device *dev, uint8_t turnaround,
 			 bool data_phase);
 int probe_swdp_port_on(const struct device *dev);
 int probe_swdp_port_off(const struct device *dev);
+
+/* DMA read-block fast path. Returns 0 if handled (out, completed and ack set),
+ * or a negative errno to decline (caller uses the per-word path). Implemented
+ * only for the PIO backend; returns -ENOTSUP otherwise. */
+int probe_swdp_transfer_block(const struct device *dev, uint8_t request,
+			      uint16_t count, uint8_t *out, size_t out_cap,
+			      uint16_t *completed, uint8_t *ack);
 
 #ifdef __cplusplus
 }

@@ -69,6 +69,20 @@ dap::Ack ZephyrSwdpDriver::transfer(uint8_t request, uint32_t *data)
 	return static_cast<dap::Ack>(response);
 }
 
+bool ZephyrSwdpDriver::transfer_block_read(uint8_t request, uint16_t count,
+					   uint8_t *out, size_t out_cap,
+					   uint16_t *completed, uint8_t *ack)
+{
+	/* The DMA builder emits no idle cycles, so only the idle==0 case (the
+	 * usual one) can take the fast path; otherwise defer to the per-word
+	 * loop, which honors idle_cycles_. */
+	if (idle_cycles_ != 0) {
+		return false;
+	}
+	return probe_swdp_transfer_block(dev_, request, count, out, out_cap,
+					 completed, ack) == 0;
+}
+
 void ZephyrSwdpDriver::set_pins(uint8_t select, uint8_t value, uint32_t wait_us)
 {
 	probe_swdp_set_pins(dev_, select, value);

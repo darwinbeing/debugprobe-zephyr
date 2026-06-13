@@ -6,7 +6,9 @@
 # (DT_INST_FOREACH_STATUS_OKAY).
 if(CONFIG_SWDP_PIO)
   zephyr_library()
-  zephyr_library_sources(swdp_pio.c)
+  # swdp_block.cpp: pure builder/parser for the DMA read-block path (also
+  # compiled into the host tests).
+  zephyr_library_sources(swdp_pio.c swdp_block.cpp)
   zephyr_library_include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
   # This out-of-tree library is included as a Zephyr module (zephyr/module.yml),
