@@ -64,17 +64,18 @@ Hold BOOTSEL again and copy `build/rpi_pico/zephyr/zephyr.uf2` back.
 **Firmware under test:** Zephyr rewrite (phase 5), endpoints OUT=0x01/IN=0x81.
 **Reference:** official debugprobe v2.3.1 — **live-captured on hardware** (endpoints OUT=0x04/IN=0x85), and independently cross-checked against the firmware source. The live capture matches the source-derived prediction byte-for-byte on all 31 commands (see [Empirical confirmation](#empirical-confirmation-done-2026-06-12) below).
 
-**Headline: 28 of 31 responses byte-identical to the official v2.3.1 firmware
-(`compare` → 0 unexpected mismatches); the other 3 are the deliberate,
-whitelisted DAP_Info string enhancements. Confirmed by a live on-hardware A/B
-capture (2026-06-12), which matched the source-derived prediction exactly.**
+**Headline: 27 of 31 responses byte-identical to the official v2.3.1 firmware
+(`compare` → 0 unexpected mismatches); the other 4 are deliberate, whitelisted
+enhancements — 3 DAP_Info strings plus the DAP packet size (64→1024). Confirmed
+by a live on-hardware A/B capture (2026-06-12); the packet-size bump was
+re-captured 2026-06-13 and remains the only added divergence.**
 
-Of those 28 identical responses, 27 are protocol-deterministic and 1
+Of those 27 identical responses, 26 are protocol-deterministic and 1
 (`swj_pins_read`) is environment-dependent — its byte reflects live pin levels
 and matched here because both firmwares read the same wiring (see
 [Environment-dependent: swj_pins_read](#environment-dependent-swj_pins_read)).
 The `compare` tool has no separate "environment-dependent" bucket, so it counts
-`swj_pins_read` among the byte-identical responses and reports `3 whitelisted,
+`swj_pins_read` among the byte-identical responses and reports `4 whitelisted,
 0 missing`.
 
 ### Full cross-check table
@@ -97,7 +98,7 @@ source (`DAP.c`, `DAP_config.h`, `DAP_vendor.c`) in `~/Developer/debugprobe`, th
 | info_timestamp_clk | `000440420f00` | `000440420f00` | MATCH |
 | info_swo_buf | `0000` | `0000` | MATCH |
 | info_packet_count | `000106` | `000106` | MATCH |
-| info_packet_size | `00024000` | `00024000` | MATCH |
+| info_packet_size | `00020004` | `00024000` | WHITELIST |
 | hoststatus_conn_on | `0100` | `0100` | MATCH |
 | hoststatus_run_off | `0100` | `0100` | MATCH |
 | hoststatus_bad | `01ff` | `01ff` | MATCH |
@@ -129,19 +130,19 @@ source-derived reference gives byte-identical output):
 [WHITELIST] info_vendor: old=0000 new=000d52617370626572727920506900  (original returns empty; ours = vendor string)
 [WHITELIST] info_product: old=0000 new=001f446562756770726f6265206f6e205069636f2028434d5349532d4441502900  (original returns empty; ours = product string)
 [WHITELIST] info_serial: old=0000 new=00114536363141344434313737374234323900  (original returns empty; ours = hwinfo serial)
+[WHITELIST] info_packet_size: old=00024000 new=00020004  (original = 64; ours = 1024 (perf: ~2.7x SWD read throughput))
 
-OK: byte-identical on all non-whitelisted commands (3 whitelisted, 0 missing)
+OK: byte-identical on all non-whitelisted commands (4 whitelisted, 0 missing)
 ```
 
 ### Whitelisted DAP_Info differences
 
-The three WHITELIST entries are a deliberate enhancement, not a regression.
+The four WHITELIST entries are deliberate enhancements, not regressions.
 
-The official debugprobe v2.3.1 leaves `GetVendorString`, `GetProductString`, and
-`GetSerNumString` returning `0` in `DAP_config.h`, so DAP_Info responses for
-IDs 0x01 / 0x02 / 0x03 are empty (`0000`).
-
-Our firmware populates them:
+**DAP_Info strings (IDs 0x01 / 0x02 / 0x03).** The official debugprobe v2.3.1
+leaves `GetVendorString`, `GetProductString`, and `GetSerNumString` returning `0`
+in `DAP_config.h`, so those responses are empty (`0000`). Our firmware populates
+them:
 
 | DAP_Info ID | ours | why |
 |---|---|---|
@@ -152,6 +153,14 @@ Our firmware populates them:
 The practical benefit: openocd's `Info : CMSIS-DAP: Serial# = E661A4D41777B429`
 log line makes it unambiguous which probe is selected when multiple probes are
 connected to the same host.
+
+**DAP packet size (ID 0xFF).** The original reports 64 bytes (`00024000`); ours
+reports 1024 (`00020004`). `kDapPacketSize` (`src/usb/dap_class.hpp`) was raised
+so openocd packs ~255 transfers per `DAP_TransferBlock` instead of ~15, cutting
+the fixed per-command overhead — a measured **~2.7× SWD read-throughput gain**
+(and +54% vs the original). The USB endpoint `wMaxPacketSize` is unchanged (64,
+the FS-bulk maximum); only the DAP-level buffer and announced size grew. openocd
+and other CMSIS-DAP hosts honor the larger announced size transparently.
 
 ### Environment-dependent: swj_pins_read
 
@@ -178,9 +187,13 @@ A/B `compare` reproduced exactly the source-derived result:
 [WHITELIST] info_vendor: old=0000 new=000d52617370626572727920506900  (original returns empty; ours = vendor string)
 [WHITELIST] info_product: old=0000 new=001f446562756770726f6265206f6e205069636f2028434d5349532d4441502900  (original returns empty; ours = product string)
 [WHITELIST] info_serial: old=0000 new=00114536363141344434313737374234323900  (original returns empty; ours = hwinfo serial)
+[WHITELIST] info_packet_size: old=00024000 new=00020004  (original = 64; ours = 1024 (perf: ~2.7x SWD read throughput))
 
-OK: byte-identical on all non-whitelisted commands (3 whitelisted, 0 missing)
+OK: byte-identical on all non-whitelisted commands (4 whitelisted, 0 missing)
 ```
+
+(The packet-size line reflects the 2026-06-13 re-capture after `kDapPacketSize`
+was raised to 1024; the original three DAP_Info-string lines are unchanged.)
 
 The source-derived reference is therefore confirmed accurate; the "original"
 column in the table above is now backed by a real official-firmware capture.

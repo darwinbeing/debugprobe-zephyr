@@ -89,7 +89,7 @@ mechanism, source-derived reference capture.
 |---|---|
 | Host tests | 76/76 pass |
 | 3-board build | All boards pass |
-| On-target hardware | **Verified (our firmware)** — live capture succeeded (`captured 31 responses`); macOS interface-claim fix validated end-to-end. Cross-checked vs the v2.3.1 source: **27 protocol-deterministic responses byte-identical + 1 environment-dependent (`swj_pins_read`, matched on the same wiring) + 3 whitelisted DAP_Info-string enhancements, 0 unexpected mismatches** (`compare` reports 28 identical / 3 whitelisted / 0 missing → PASS). **Confirmed by a live on-hardware A/B (2026-06-12): the official v2.3.1 firmware was flashed and captured live, matching the prediction byte-for-byte on all 31 commands.** See [CONFORMANCE_RESULTS.md](CONFORMANCE_RESULTS.md) for the full table. |
+| On-target hardware | **Verified (our firmware)** — live capture succeeded (`captured 31 responses`); macOS interface-claim fix validated end-to-end. Cross-checked vs the v2.3.1 source: **26 protocol-deterministic responses byte-identical + 1 environment-dependent (`swj_pins_read`, matched on the same wiring) + 4 whitelisted enhancements (3 DAP_Info strings + DAP packet size 64→1024), 0 unexpected mismatches** (`compare` reports 27 identical / 4 whitelisted / 0 missing → PASS). **Confirmed by a live on-hardware A/B (2026-06-12); packet-size bump re-captured 2026-06-13.** See [CONFORMANCE_RESULTS.md](CONFORMANCE_RESULTS.md) for the full table. |
 
 ### Phase 5 hardware acceptance table (fill in per board × backend)
 
@@ -157,7 +157,7 @@ check the available hardware allows (see the note below the table):
 - SWD backends (phase 3): DPIDR read via both PIO and bitbang; matches official firmware. (Note: the phase-3 `0x10212927` value was a misread from a not-yet-live target; the genuine RP2040 DPIDR `0x0bc12477` was confirmed in phase 5 with a live target. The protocol/engine work was unaffected.)
 - UART bridge + serial (phase 4-core): loopback echo both directions; serial from hwinfo propagated to DAP_Info and USB iSerialNumber.
 - Autobaud apply path (phase 4b): MAGIC_BAUD sentinel + 4 KB stack overflow + race fixes all hold.
-- Conformance A/B (phase 5): 27 protocol-deterministic byte-identical + 1 environment-dependent (`swj_pins_read`, matched) + 3 whitelisted DAP_Info strings, 0 unexpected mismatches vs official v2.3.1 (`compare` → 28 identical / 3 whitelisted → PASS).  **Live on-hardware A/B done 2026-06-12** — official firmware captured live, byte-for-byte identical to the source-derived prediction on all 31 commands.
+- Conformance A/B (phase 5): 26 protocol-deterministic byte-identical + 1 environment-dependent (`swj_pins_read`, matched) + 4 whitelisted enhancements (3 DAP_Info strings + DAP packet size 64→1024), 0 unexpected mismatches vs official v2.3.1 (`compare` → 27 identical / 4 whitelisted → PASS).  **Live on-hardware A/B done 2026-06-12** — official firmware captured live, byte-for-byte identical to the source-derived prediction on all 31 commands; packet-size bump re-captured 2026-06-13.
 - **Full openocd debug acceptance (phase 5, rpi_pico/PIO, 2026-06-12): ✓ PASS** against a live RP2040 target — multidrop connect (`DPIDR 0x0bc12477`, Cortex-M0+ detected), `reset halt`, single-step, memory read, RAM write+readback (3 locations), flash erase+program+verify (top sector), and `reset run` all pass. Also verified attaching to a **running** target (connect → halt → resume), confirming the probe is not BOOTSEL-limited. The earlier connect failure was the target not being live on the bus (the garbage `DPIDR 0x10212927` was a misread), not a probe-firmware issue.
 
 ### Pending (hardware-dependent)
@@ -178,11 +178,12 @@ check the available hardware allows (see the note below the table):
 
 The rewrite is **feature-complete**.  On the hardware tested, it behaves
 identically to the official debugprobe v2.3.1 at the CMSIS-DAP protocol level:
-28 of 31 command responses are byte-for-byte identical to the source-derived
-reference (27 protocol-deterministic plus `swj_pins_read`, which is
-environment-dependent and matched on the same wiring); the remaining 3 are
+27 of 31 command responses are byte-for-byte identical to the source-derived
+reference (26 protocol-deterministic plus `swj_pins_read`, which is
+environment-dependent and matched on the same wiring); the remaining 4 are
 deliberately enhanced (DAP_Info strings now populated, giving openocd a readable
-`Serial#`).  No unexpected mismatches were found.
+`Serial#`; and the DAP packet size raised 64→1024 for ~2.7× SWD read
+throughput).  No unexpected mismatches were found.
 
 A full openocd debug acceptance (connect → halt → step → memory read/write →
 flash erase/program/verify → reset run) also passes end-to-end on rpi_pico/PIO

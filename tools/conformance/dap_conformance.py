@@ -115,10 +115,18 @@ def capture(out_path):
 # original returns empty strings (DAP_config.h GetVendorString/Product/SerNum
 # all return 0); ours populates them (vendor "Raspberry Pi", product per board,
 # serial from hwinfo). This is an enhancement, not a protocol bug.
+#
+# info_packet_size: the original reports 64; ours reports 1024 (kDapPacketSize in
+# src/usb/dap_class.hpp). Larger DAP packets let openocd pack ~255 words per
+# DAP_TransferBlock instead of ~15, cutting per-command overhead -- a measured
+# 2.7x SWD read-throughput gain (and +54% vs the original). The USB endpoint
+# wMaxPacketSize is unchanged (64, FS-bulk); only the DAP-level buffer/announced
+# size grew. Deliberate performance enhancement, not a protocol bug.
 WHITELIST = {
     "info_vendor": "original returns empty; ours = vendor string",
     "info_product": "original returns empty; ours = product string",
     "info_serial": "original returns empty; ours = hwinfo serial",
+    "info_packet_size": "original = 64; ours = 1024 (perf: ~2.7x SWD read throughput)",
 }
 
 

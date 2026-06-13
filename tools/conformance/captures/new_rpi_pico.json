@@ -41,7 +41,7 @@
   },
   "info_packet_size": {
     "req": "00ff",
-    "resp": "00024000"
+    "resp": "00020004"
   },
   "hoststatus_conn_on": {
     "req": "010001",
