@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version / tag (e.g. v1.0.0)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as a pre-release"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  # Gate: pure C++20 host unit tests (no Zephyr deps). cmake + g++ ship with
+  # the runner image, so nothing extra to install. A failure here blocks the
+  # build/release jobs entirely.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run host unit tests
+        run: ./scripts/run_host_tests.sh
+
+  # Build firmware for every board target and stage a versioned .uf2 each.
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - board: rpi_debug_probe
+            slug: rpi_debug_probe
+          - board: rpi_pico
+            slug: rpi_pico
+          - board: rpi_pico2/rp2350a/m33
+            slug: rpi_pico2_rp2350a_m33
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Must match `self.path` in west.yml so `west init -l` is happy.
+          path: debugprobe-zephyr
+
+      - name: Set up Zephyr + SDK
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: debugprobe-zephyr
+          toolchains: arm-zephyr-eabi
+
+      - name: Build ${{ matrix.board }}
+        run: west build -p always -b ${{ matrix.board }} debugprobe-zephyr -d build
+
+      - name: Stage versioned artifact
+        run: |
+          mkdir -p out
+          cp build/zephyr/zephyr.uf2 \
+            "out/debugprobe-${{ matrix.slug }}-${{ inputs.version }}.uf2"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uf2-${{ matrix.slug }}
+          path: out/*.uf2
+          if-no-files-found: error
+
+  # Collect every board's .uf2 and publish a GitHub Release at the given tag.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: uf2-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release ${{ inputs.version }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: dist/*.uf2
