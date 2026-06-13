@@ -98,19 +98,32 @@ identical commands.
 - Returns `data[]`, the index of the **first non-OK transfer** (`count` if none),
   and that transfer's ACK byte.
 
-### ③ DMA glue in the PIO driver (`drivers/dp_pio/`)
+### ③ DMA glue in the PIO driver (`drivers/dp_pio/`) — via Zephyr's DMA API
 
-- **Init:** claim two DMA channels (TX, RX). TX: `mem → PIO TX FIFO`, paced by
-  the SM's TX-not-full DREQ. RX: `PIO RX FIFO → mem`, paced by RX-not-empty
-  DREQ. Use the RP2040 SDK DMA HAL already available through `hal_rpi_pico`.
-- **Per block:**
-  1. `build_block_stream` into a static TX buffer.
-  2. Configure RX DMA: `read_count = 3·count` (reads) or `count` (writes) into
-     a static RX buffer.
-  3. Start RX DMA, then TX DMA.
-  4. Block on RX DMA completion (the SM stalls naturally if RX FIFO fills; RX
-     DMA keeps it drained).
-  5. `parse_block_response`.
+Use Zephyr's DMA subsystem (`<zephyr/drivers/dma.h>` + the `dma_rpi_pico`
+driver), **NOT** the raw Pico SDK DMA — the Zephyr driver owns the DMA channels,
+so an SDK `dma_claim`/`dma_channel_configure` path conflicts and will not work.
+Requires `CONFIG_DMA=y` + `CONFIG_DMA_RPI_PICO=y` and the `dma` node
+(`raspberrypi,pico-dma` @ `0x50000000`, default `status = "disabled"`) enabled to
+`okay` in each board overlay.
+
+- **Init:** `dev = DEVICE_DT_GET(DT_NODELABEL(dma))`; `dma_request_channel(dev,
+  NULL)` ×2 (TX, RX); store the channel ids in `swdp_pio_data`.
+- **Per block:** fill two `struct dma_config` (one block each):
+  - **TX**: `channel_direction = MEMORY_TO_PERIPHERAL`, `head_block.source_address
+    = tx_buf` (`source_addr_adj = DMA_ADDR_ADJ_INCREMENT`), `head_block.dest_address
+    = (uintptr_t)&pio->txf[sm]` (`dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE`),
+    `source/dest_data_size = 4`, `dma_slot = ~pio_get_dreq(pio, sm, true) & 0x3F`.
+  - **RX**: `channel_direction = PERIPHERAL_TO_MEMORY`, `head_block.source_address
+    = (uintptr_t)&pio->rxf[sm]` (`NO_CHANGE`), `head_block.dest_address = rx_buf`
+    (`INCREMENT`), `data_size = 4`, `dma_slot = ~pio_get_dreq(pio, sm, false) &
+    0x3F`, `dma_callback` posts a completion `k_sem`.
+  - `dma_config()` both channels; `dma_start()` **RX then TX**; `k_sem_take` the
+    RX-done sem (with timeout); `parse_block_response`.
+- The PIO handle and FIFO addresses come from `pio_rpi_pico_get_pio(cfg->piodev)`
+  — the same hardware handle the CPU path already uses. Only the DREQ *number*
+  uses an SDK helper (`pio_get_dreq`, a pure constant); the DMA transfer itself
+  is entirely Zephyr DMA API.
 - **Buffers:** static, sized for the maximum block from a 512 B packet (~127
   transfers): TX ≈ 3.6 KB, RX ≈ 1.5 KB. (RAM budget: firmware currently ~11%.)
 
@@ -176,7 +189,10 @@ benchmark win.
   host-tested together.
 - **DMA channel contention** (USB/other peripherals) → claim dedicated channels
   at init; the SWD block path is the only user.
-- **`hal_rpi_pico` DMA API availability** → verify the SDK DMA headers are
-  reachable from the driver before phase 1 (same HAL that already exposes PIO).
+- **DMA via Zephyr, not the SDK** → confirmed `dma_rpi_pico` supports
+  peripheral-paced (DREQ) transfers through `dma_slot`; PIO SM FIFO DREQs are
+  expressible (`slot = ~pio_get_dreq(pio,sm,dir) & 0x3F`). The raw SDK DMA path
+  conflicts with the Zephyr driver and must not be used. The `dma` node is
+  `disabled` by default — enable per board overlay + `CONFIG_DMA`.
 - **Effort/complexity exceeds payoff** → phase 1 (read-block) is the gate; if the
   measured gain or risk isn't worth it, stop after phase 1 with the win banked.
