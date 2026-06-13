@@ -522,6 +522,29 @@ DapEngine::Sizes DapEngine::cmd_transfer_block(std::span<const uint8_t> req,
 
 	if ((request_value & kReqRnW) != 0U) {
 		/* Read register block */
+		/* Optional driver DMA fast path: streams the whole block and writes
+		 * LE data words straight into the response. On any WAIT/FAULT it
+		 * reports the verified prefix + that ACK; the host recovers (no
+		 * firmware resume). false => fall through to the per-word loop. */
+		{
+			uint16_t done = 0;
+			uint8_t blk_ack = 0;
+			if (request_count > 0 &&
+			    driver_.transfer_block_read(
+				    static_cast<uint8_t>(request_value),
+				    static_cast<uint16_t>(request_count),
+				    resp.data() + wi, resp.size() - wi, &done,
+				    &blk_ack)) {
+				size_t avail = (resp.size() - wi) / 4;
+				if (done > avail) {
+					done = static_cast<uint16_t>(avail);
+				}
+				wi += static_cast<size_t>(done) * 4;
+				response_count = static_cast<uint16_t>(done);
+				response_value = blk_ack;
+				goto end;
+			}
+		}
 		if ((request_value & kReqApNdp) != 0U) {
 			/* Post AP read. */
 			response_value = transfer_retry(request_value, nullptr);

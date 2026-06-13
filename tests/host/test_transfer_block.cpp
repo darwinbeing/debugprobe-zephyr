@@ -72,6 +72,39 @@ TEST(block_read_ap_uses_pipeline)
 	CHECK_EQ(f.drv.transfers[2].request, dap::kReqReadRdbuff);
 }
 
+/* When the driver offers a DMA read-block fast path (transfer_block_read
+ * returns true), the engine must use its data verbatim and frame the response
+ * {cmd, count(2 LE), ack, words...} -- not run the per-word loop. */
+TEST(block_read_uses_dma_path_when_available)
+{
+	Fixture f;
+	f.drv.block_enabled = true;
+	f.drv.block_words = {0xAABBCCDDu, 0x11223344u};
+	f.drv.block_completed = 2;
+	f.drv.block_ack = dap::kXferOk;
+	auto r = f.run({0x06, 0x00, 0x02, 0x00, 0x06}); /* DP read addr 4, count 2 */
+	const uint8_t want[] = {0x06, 0x02, 0x00, dap::kXferOk,
+				0xDD, 0xCC, 0xBB, 0xAA,
+				0x44, 0x33, 0x22, 0x11};
+	CHECK_BYTES(r, want);
+	/* The per-word transfer() loop must NOT have run. */
+	CHECK_EQ(f.drv.transfers.size(), 0u);
+}
+
+/* A DMA fast path that faults at word k reports the verified prefix only. */
+TEST(block_read_dma_partial_on_fault)
+{
+	Fixture f;
+	f.drv.block_enabled = true;
+	f.drv.block_words = {0x0000AAAAu};
+	f.drv.block_completed = 1;       /* only 1 of 3 completed */
+	f.drv.block_ack = dap::kXferFault;
+	auto r = f.run({0x06, 0x00, 0x03, 0x00, 0x06}); /* count 3 */
+	const uint8_t want[] = {0x06, 0x01, 0x00, dap::kXferFault,
+				0xAA, 0xAA, 0x00, 0x00};
+	CHECK_BYTES(r, want);
+}
+
 /* The big-packet throughput fix relies on the engine filling a response far
  * larger than one 64-byte USB packet.  A 100-word DP read => 404-byte response;
  * verify it is produced intact (no hidden 64-byte cap, correct framing). */

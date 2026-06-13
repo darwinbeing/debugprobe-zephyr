@@ -17,6 +17,12 @@ public:
 	/* Results are consumed FIFO; when empty, Ok/0xDEADBEEF is returned. */
 	std::deque<XferResult> script;
 
+	/* --- block-read DMA fast-path mock --- */
+	bool block_enabled = false;       /* when true, transfer_block_read handles it */
+	std::vector<uint32_t> block_words; /* data words the DMA path "returns" */
+	uint8_t block_ack = 0x01;          /* dap::kXferOk */
+	int block_completed = -1;          /* -1 => block_words.size() */
+
 	uint8_t pins_state = 0;     /* returned by read_pins() */
 	uint32_t timestamp_value = 0;
 
@@ -95,6 +101,34 @@ public:
 		}
 		transfers.push_back(call);
 		return r.ack;
+	}
+	bool transfer_block_read(uint8_t request, uint16_t count, uint8_t *out,
+				 size_t out_cap, uint16_t *completed,
+				 uint8_t *ack) override
+	{
+		(void)request;
+		(void)count;
+		if (!block_enabled) {
+			return false;
+		}
+		events.push_back("transfer_block_read");
+		size_t done = block_completed >= 0
+				      ? static_cast<size_t>(block_completed)
+				      : block_words.size();
+		const size_t cap = out_cap / 4;
+		if (done > cap) {
+			done = cap;
+		}
+		for (size_t i = 0; i < done; ++i) {
+			uint32_t w = i < block_words.size() ? block_words[i] : 0;
+			out[i * 4 + 0] = static_cast<uint8_t>(w);
+			out[i * 4 + 1] = static_cast<uint8_t>(w >> 8);
+			out[i * 4 + 2] = static_cast<uint8_t>(w >> 16);
+			out[i * 4 + 3] = static_cast<uint8_t>(w >> 24);
+		}
+		*completed = static_cast<uint16_t>(done);
+		*ack = block_ack;
+		return true;
 	}
 	void set_pins(uint8_t select, uint8_t value, uint32_t wait_us) override
 	{

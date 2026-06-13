@@ -3,6 +3,7 @@
  * Pure virtual so host tests can mock them; on target a thin adapter
  * wraps the Zephyr swdp device (phase 3).
  */
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
@@ -40,6 +41,26 @@ public:
 	 * without collecting data. Returns the ACK.
 	 */
 	virtual Ack transfer(uint8_t request, uint32_t *data) = 0;
+
+	/* Optional DMA fast path for a register READ block. Writes up to
+	 * out_cap/4 little-endian data words to `out`, sets *completed to the
+	 * number of OK transfers (stops at the first WAIT/FAULT) and *ack to the
+	 * final ACK. Returns true if it handled the block (out/completed/ack
+	 * valid); false => the caller must use the normal per-word path. The
+	 * default does not handle it, so non-DMA drivers and host mocks are
+	 * unaffected. */
+	virtual bool transfer_block_read(uint8_t request, uint16_t count,
+					 uint8_t *out, size_t out_cap,
+					 uint16_t *completed, uint8_t *ack)
+	{
+		(void)request;
+		(void)count;
+		(void)out;
+		(void)out_cap;
+		(void)completed;
+		(void)ack;
+		return false;
+	}
 
 	virtual void set_pins(uint8_t select, uint8_t value, uint32_t wait_us) = 0;
 	virtual uint8_t read_pins() = 0;
