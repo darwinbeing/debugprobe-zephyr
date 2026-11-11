@@ -7,6 +7,10 @@
 #include "usb/usb_device.hpp"
 #include "uart_bridge.hpp"
 
+#if defined(CONFIG_PROBE_MSP430_SBW)
+#include "msp430/msp430_backend.hpp"
+#endif
+
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 namespace {
@@ -28,6 +32,11 @@ static_assert(ByteBuffer<std::span<const uint8_t>>);
 int main()
 {
 	LOG_INF("debugprobe-zephyr starting");
+
+#if defined(CONFIG_PROBE_MSP430_SBW)
+	/* MSP430 Spy-Bi-Wire: vendor command 0x90 on the DAP interface. */
+	probe::msp430_backend::init();
+#endif
 
 	if (int err = probe::usb::init(); err != 0) {
 		LOG_ERR("USB init failed: %d", err);

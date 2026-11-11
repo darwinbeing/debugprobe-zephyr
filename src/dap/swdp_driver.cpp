@@ -7,6 +7,7 @@
  * <zephyr/drivers/swdp.h> is not C++-clean, so the adapter cannot include it
  * directly. The shim wraps each swdp_api call as a plain C function. */
 #include "dap/swdp_shim.h"
+#include "pin_owner.hpp"
 
 LOG_MODULE_REGISTER(swdp_drv, LOG_LEVEL_INF);
 
@@ -24,12 +25,14 @@ void ZephyrSwdpDriver::set_clock(uint32_t hz)
 
 void ZephyrSwdpDriver::connect()
 {
+	pin_owner::swd_connect(); /* closes an open MSP430 SBW session */
 	probe_swdp_port_on(dev_);
 }
 
 void ZephyrSwdpDriver::disconnect()
 {
 	probe_swdp_port_off(dev_);
+	pin_owner::swd_disconnect(); /* hands the pins back to their idle state */
 }
 
 void ZephyrSwdpDriver::configure(uint8_t turnaround_cycles, bool data_phase)

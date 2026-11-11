@@ -33,6 +33,12 @@ config PROBE_MSP430_SBW
 	  using the SWD pins. Adds a CMSIS-DAP vendor command; the USB
 	  descriptors do not change. See docs/MSP430_SBW.md.
 
+# The SBW vendor command runs on the USB device thread and nests deeper than
+# the SWD path (engine -> Session -> Cpuxv2 -> SbwTap -> port -> PIO driver).
+# Zephyr's default of 1024 bytes leaves no margin for it.
+config USBD_THREAD_STACK_SIZE
+	default 2048 if PROBE_MSP430_SBW
+
 # The out-of-tree PIO driver Kconfigs (drivers/Kconfig, which pulls in dp_pio
 # and sbw_pio) are sourced via the Zephyr module mechanism (zephyr/module.yml
 # -> build.kconfig), not rsource'd here, so they are registered alongside the

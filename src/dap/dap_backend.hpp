@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <span>
 
+#include "dap/interfaces.hpp"
+
 namespace probe::dap_backend {
 
 /* Process one CMSIS-DAP request packet; returns response length.
@@ -19,5 +21,11 @@ size_t process(std::span<const uint8_t> request, std::span<uint8_t> response);
 
 /* Transport hook for DAP_TransferAbort (0x07) packets. */
 void request_abort();
+
+/* Install the handler for CMSIS-DAP vendor commands (0x80..0x9F). */
+void set_vendor_handler(dap::VendorHandler *handler);
+
+/* The DAP USB interface was disabled (bus reset, deconfiguration). */
+void on_transport_disabled();
 
 } // namespace probe::dap_backend
