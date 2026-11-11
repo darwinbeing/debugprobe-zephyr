@@ -73,6 +73,21 @@ class OpenSessionRefusalTest(unittest.TestCase):
             flasher.open_session(SbwProbe(fw), 250)
         self.assertEqual(len(fw.connects), 1)
 
+    def test_locked_message(self):
+        fw = FakeFirmware()
+        fw.connect_status = LOCKED
+        with self.assertRaisesRegex(FlashError, "it cannot be read or programmed"):
+            flasher.open_session(SbwProbe(fw), 250)
+
+    def test_target_error_is_not_reported_as_locked(self):
+        fw = FakeFirmware()
+        fw.connect_status = 6
+        with self.assertRaises(FlashError) as cm:
+            flasher.open_session(SbwProbe(fw), 250)
+        self.assertIn("TARGET_ERROR", str(cm.exception))
+        self.assertNotIn("lock key", str(cm.exception))
+        self.assertEqual(len(fw.connects), 1)
+
     def test_busy_swd_port(self):
         fw = FakeFirmware()
         fw.connect_status = BUSY
@@ -210,6 +225,14 @@ class ProgramTest(unittest.TestCase):
         flasher.verify_segments(probe, [Segment(0x4401, b"\xAA\xBB\xCC")])
         with self.assertRaisesRegex(FlashError, "verify failed at 0x04402: read 0xBB, expected 0xBC"):
             flasher.verify_segments(probe, [Segment(0x4401, b"\xAA\xBC\xCC")])
+
+    def test_verify_segment_ending_on_an_odd_address(self):
+        fw, probe = session()
+        fw.mem = {0x4400: 1, 0x4401: 2, 0x4402: 3}
+        flasher.verify_segments(probe, [Segment(0x4400, bytes([1, 2, 3]))])
+        fw.mem[0x4402] = 4
+        with self.assertRaisesRegex(FlashError, "verify failed at 0x04402"):
+            flasher.verify_segments(probe, [Segment(0x4400, bytes([1, 2, 3]))])
 
     def test_empty_image(self):
         fw, probe = session()

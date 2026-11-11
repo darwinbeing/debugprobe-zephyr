@@ -94,6 +94,10 @@ def _load_image(path: str) -> list[Segment]:
     segments = image.load(path)
     if not any(seg.data for seg in segments):
         raise FlashError(f"{path}: the image contains no data")
+    beyond = [max(seg.addr, ADDR_LIMIT) for seg in segments if seg.data and seg.end > ADDR_LIMIT]
+    if beyond:
+        raise FlashError(f"{path}: the image has data at 0x{min(beyond):05X}, beyond the "
+                         f"20-bit address space (last address 0x{ADDR_LIMIT - 1:05X})")
     return segments
 
 
@@ -102,8 +106,8 @@ def _prepare(args):
     if args.cmd in ("flash", "verify"):
         return _load_image(args.image)
     if args.cmd == "read":
-        if args.addr & 1 or args.length <= 0:
-            raise FlashError("the address must be even and the length positive")
+        if args.addr < 0 or args.addr & 1 or args.length <= 0:
+            raise FlashError("the address must be even and not negative, and the length positive")
         if args.addr + args.length > ADDR_LIMIT:
             raise FlashError(f"0x{args.addr:05X} + {args.length} bytes runs past the end of "
                              f"the address space (0x{ADDR_LIMIT:05X})")
@@ -113,6 +117,7 @@ def _prepare(args):
 def _run(args, probe: SbwProbe, out, segments) -> None:
     try:
         identity, device = flasher.open_session(probe, args.speed)
+        args.session_open = True  # from here on an interrupt may leave flash half-written
         out.write(f"{device.name}: JTAG ID 0x{identity.jtag_id:02X}, core ID "
                   f"0x{identity.core_id:04X}, device ID bytes {identity.device_id & 0xFF:02X}h "
                   f"{identity.device_id >> 8:02X}h\n")
@@ -167,7 +172,7 @@ def main(argv=None, transport=None, out=sys.stdout, err=sys.stderr) -> int:
         err.write(f"error: {e}\n")
         return 1
     except KeyboardInterrupt:
-        if args.cmd in ("flash", "erase"):
+        if args.cmd in ("flash", "erase") and getattr(args, "session_open", False):
             err.write("interrupted; the target's flash may be partially erased or programmed\n")
         else:
             err.write("interrupted\n")

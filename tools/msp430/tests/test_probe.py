@@ -1,3 +1,4 @@
+import array
 import os
 import struct
 import sys
@@ -74,6 +75,14 @@ class SbwProbeTest(unittest.TestCase):
     def test_status_error_message_names_the_status(self):
         with self.assertRaisesRegex(StatusError, "DISCONNECT failed: BAD_STATE"):
             self.probe.disconnect()
+
+    def test_read_mem_never_asks_for_a_64_byte_reply(self):
+        self.fw.mem = {0x4400 + i: i for i in range(62)}
+        self.probe.connect(250, probe_mod.ENTRY_NORMAL)
+        self.probe.info()
+        self.probe.configure(250)
+        self.assertEqual(self.probe.read_mem(0x4400, 31), bytes(range(62)))
+        self.assertEqual(self.fw.read_chunks, [30, 1])
 
     def test_connect_sends_speed_and_mode(self):
         self.probe.connect(250, probe_mod.ENTRY_NORMAL)
@@ -196,6 +205,16 @@ class ReplyValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ProbeError, r"READ_MEM: expected 4 bytes at 0x04400, got 3"):
             probe.read_mem(0x4400, 2)
 
+    def test_out_of_step_advice_starts_with_running_again(self):
+        with self.assertRaisesRegex(ProbeError, "run the command again, and if it keeps "
+                                                "happening unplug the probe"):
+            SbwProbe(StubTransport(b"\x03\x00")).info()
+
+    def test_short_connect_reply_is_out_of_step(self):
+        probe = SbwProbe(StubTransport(b"\x90\x00\x91\x06\x01"))
+        with self.assertRaisesRegex(ProbeError, "out of step"):
+            probe.connect(250, 0)
+
     def test_write_mem_is_gone(self):
         self.assertFalse(hasattr(SbwProbe, "write_mem"))
 
@@ -221,6 +240,8 @@ class _StubDevice:
     def __init__(self, serial="A1", serial_error=None, stale=()):
         self._serial, self._serial_error = serial, serial_error
         self.queue = list(stale)
+        self.read_error = None
+        self.write_error = None
         self.written = []
         self.read_timeouts = []
 
@@ -237,10 +258,14 @@ class _StubDevice:
         return False
 
     def write(self, ep, data, timeout=None):
+        if self.write_error:
+            raise self.write_error
         self.written.append((ep, bytes(data)))
 
     def read(self, ep, size, timeout=None):
         self.read_timeouts.append(timeout)
+        if self.read_error:
+            raise self.read_error
         if self.queue:
             return self.queue.pop(0)
         raise _USBTimeoutError("timed out")
@@ -319,6 +344,52 @@ class UsbTransportTest(unittest.TestCase):
                         _StubDevice(serial_error=NotImplementedError())]
         with self.assertRaisesRegex(ProbeError, "not found"):
             probe_mod.UsbTransport("A1")
+
+    def test_claim_failure_mentions_another_tool(self):
+        def refuse(dev, n):
+            raise _USBError("busy")
+        sys.modules["usb.util"].claim_interface = refuse
+        self.devices = [_StubDevice()]
+        with self.assertRaisesRegex(ProbeError, "another tool"):
+            probe_mod.UsbTransport()
+
+    def test_usb_error_during_transfer(self):
+        dev = _StubDevice()
+        self.devices = [dev]
+        t = probe_mod.UsbTransport()
+        dev.write_error = _USBError("pipe error")
+        with self.assertRaisesRegex(ProbeError, "USB error"):
+            t.transfer(b"\x90\x00")
+        dev.write_error = None
+        dev.read_error = _USBError("overflow")
+        with self.assertRaisesRegex(ProbeError, "USB error"):
+            t.transfer(b"\x90\x00")
+
+    def test_usb_error_during_drain(self):
+        dev = _StubDevice()
+        dev.read_error = _USBError("io error")
+        self.devices = [dev]
+        with self.assertRaisesRegex(ProbeError, "USB error"):
+            probe_mod.UsbTransport()
+
+    def test_close_swallows_usb_errors(self):
+        self.devices = [_StubDevice()]
+        t = probe_mod.UsbTransport()
+
+        def fail(*args):
+            raise _USBError("gone")
+        sys.modules["usb.util"].release_interface = fail
+        sys.modules["usb.util"].dispose_resources = fail
+        t.close()
+
+    def test_array_reply_becomes_bytes(self):
+        dev = _StubDevice()
+        self.devices = [dev]
+        t = probe_mod.UsbTransport()
+        dev.queue.append(array.array("B", [0x90, 0, 7]))
+        reply = t.transfer(b"\x90\x00")
+        self.assertIsInstance(reply, bytes)
+        self.assertEqual(reply, b"\x90\x00\x07")
 
     def test_no_device(self):
         with self.assertRaisesRegex(ProbeError, "not found"):

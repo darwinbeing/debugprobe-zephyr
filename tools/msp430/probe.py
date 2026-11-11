@@ -48,7 +48,8 @@ STATUS_NAMES = {
 
 
 OUT_OF_STEP = ("the probe's replies are out of step with the requests (an earlier run was "
-               "interrupted); unplug the probe and plug it in again")
+               "interrupted); run the command again, and if it keeps happening unplug the "
+               "probe and plug it in again")
 
 
 class ProbeError(Exception):
@@ -219,6 +220,8 @@ class SbwProbe:
 
     def connect(self, speed_khz: int, entry_mode: int) -> Identity:
         data = self._cmd(OP_CONNECT, struct.pack("<HB", speed_khz, entry_mode))
+        if len(data) < 9:
+            raise ProbeError(OUT_OF_STEP)
         return Identity(*struct.unpack("<BHIH", data[:9]))
 
     def disconnect(self) -> None:

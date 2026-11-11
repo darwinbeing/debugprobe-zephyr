@@ -34,6 +34,7 @@ class FakeFirmware:
         self.connects = []           # entry modes of every accepted CONNECT
         self.speeds = []             # speed_khz of every accepted CONNECT
         self.data_chunks = []        # word count of every accepted FLASH_DATA
+        self.read_chunks = []        # word count of every accepted READ_MEM
         self.ops = []                # ("erase", mode, addr, ram), ("begin", addr, nwords, ram), ...
         self.fail_flash_after = None # words accepted before FLASH_DATA answers TIMEOUT
         self.stuck = {}              # address -> byte that reads back regardless
@@ -122,6 +123,7 @@ class FakeFirmware:
                 return BAD_ARG, b""
             if op in self.fail_op:
                 return self._fail(op)
+            self.read_chunks.append(n)
             return OK, bytes(self.stuck.get(x, self.mem.get(x, 0xFF))
                              for x in range(addr, addr + 2 * n))
         if op == 5:

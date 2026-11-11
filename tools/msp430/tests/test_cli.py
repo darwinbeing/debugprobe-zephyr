@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -151,6 +152,93 @@ class CliTest(unittest.TestCase):
             code, _, err = run(["read", "0x4400", "16", "-o", os.path.join(d, "x.hex")], fw)
         self.assertEqual(code, 130)
         self.assertEqual(err.strip(), "interrupted")
+        self.assertEqual(fw.state, 0)
+
+    def _image(self, d, segs=None, name="fw.hex"):
+        path = os.path.join(d, name)
+        image.save(path, segs or [Segment(0x4400, bytes(range(16)))])
+        return path
+
+    def test_flash_reports_a_verify_failure(self):
+        fw = FakeFirmware()
+        fw.stuck = {0x4405: 0x00}
+        with tempfile.TemporaryDirectory() as d:
+            code, _, err = run(["flash", self._image(d)], fw)
+        self.assertEqual(code, 1)
+        self.assertIn("verify failed at 0x04405", err)
+
+    def test_no_verify_skips_the_read_back(self):
+        fw = FakeFirmware()
+        fw.stuck = {0x4405: 0x00}
+        with tempfile.TemporaryDirectory() as d:
+            code, out, _ = run(["flash", self._image(d), "--no-verify"], fw)
+        self.assertEqual(code, 0)
+        self.assertNotIn("verified", out)
+        self.assertEqual(fw.read_chunks, [])
+
+    def test_verify_command_reports_a_mismatch(self):
+        fw = FakeFirmware()
+        with tempfile.TemporaryDirectory() as d:
+            src = self._image(d)
+            self.assertEqual(run(["flash", src], fw)[0], 0)
+            fw.stuck = {0x4405: 0x00}
+            code, _, err = run(["verify", src], fw)
+        self.assertEqual(code, 1)
+        self.assertIn("verify failed", err)
+
+    def test_speed_limits(self):
+        for speed in (100, 500, 1000):
+            fw = FakeFirmware()
+            self.assertEqual(run(["--speed", str(speed), "info"], fw)[0], 0)
+            self.assertEqual(fw.speeds, [speed])
+        for speed in ("99", "1001"):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    run(["--speed", speed, "info"], FakeFirmware())
+            self.assertEqual(cm.exception.code, 2)
+
+    def test_negative_read_address(self):
+        fw = FakeFirmware()
+        with tempfile.TemporaryDirectory() as d:
+            code, _, err = run(["read", "-2", "4", "-o", os.path.join(d, "x.hex")], fw)
+        self.assertEqual(code, 1)
+        self.assertIn("error:", err)
+        self.assertEqual(fw.connects, [])
+
+    def test_image_above_the_address_space(self):
+        with tempfile.TemporaryDirectory() as d:
+            for segs in ([Segment(0x100000, b"\0\0")],
+                         [Segment(0x4400, b"\1\2"), Segment(0xFFFFE, b"\0\0\0\0")]):
+                src = self._image(d, segs)
+                for cmd in ("flash", "verify"):
+                    fw = FakeFirmware()
+                    code, _, err = run([cmd, src], fw)
+                    self.assertEqual(code, 1, cmd)
+                    self.assertIn("0x100000", err)
+                    self.assertEqual(fw.connects, [])
+                    self.assertEqual(fw.ops, [])
+
+    def test_ctrl_c_before_the_session_is_just_interrupted(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._image(d)
+            fw = FakeFirmware()
+            fw.interrupt_on_op = 0  # INFO, while opening the session
+            code, _, err = run(["flash", src], fw)
+            self.assertEqual((code, err.strip()), (130, "interrupted"))
+            fw = FakeFirmware()
+            fw.interrupt_on_op = 1  # CONNECT
+            code, _, err = run(["erase"], fw)
+            self.assertEqual((code, err.strip()), (130, "interrupted"))
+            with mock.patch.object(image, "load", side_effect=KeyboardInterrupt):
+                code, _, err = run(["flash", src], FakeFirmware())
+            self.assertEqual((code, err.strip()), (130, "interrupted"))
+
+    def test_ctrl_c_during_erase_and_flash_data_warns(self):
+        fw = FakeFirmware()
+        fw.interrupt_on_op = 5
+        code, _, err = run(["erase"], fw)
+        self.assertEqual(code, 130)
+        self.assertIn("partially erased or programmed", err)
         self.assertEqual(fw.state, 0)
 
     def test_verify_ignores_padding(self):
