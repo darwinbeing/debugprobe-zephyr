@@ -27,7 +27,10 @@ public:
 	 */
 	void request_abort() { abort_.store(true, std::memory_order_relaxed); }
 
-	/* Install (or clear with nullptr) the handler for vendor commands. */
+	/* Install (or clear with nullptr) the handler for vendor commands.
+	 * The pointer is non-owning: the handler must outlive the engine or be
+	 * cleared with nullptr. The call is not synchronised: install it before
+	 * the transport starts, or from the thread that calls process(). */
 	void set_vendor_handler(VendorHandler *handler) { vendor_ = handler; }
 
 private:

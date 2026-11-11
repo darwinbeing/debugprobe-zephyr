@@ -24,6 +24,14 @@ struct RecordingVendor : dap::VendorHandler {
 	}
 };
 
+struct OverclaimingVendor : dap::VendorHandler {
+	size_t handle(std::span<const uint8_t> request, std::span<uint8_t> response) override
+	{
+		response[0] = request[0];
+		return 1000;
+	}
+};
+
 struct Fixture {
 	MockSwdDriver drv;
 	MockHostStatus host;
@@ -80,7 +88,29 @@ TEST(vendor_hook_handled_command_consumes_rest_of_batch)
 	 * look like DAP_Delay. A handled vendor command swallows the rest of the
 	 * packet, so the delay is never dispatched. */
 	auto r = f.run({0x7F, 0x02, 0x90, 0x09, 0x64, 0x00});
+	const uint8_t want_req[] = {0x90, 0x09, 0x64, 0x00};
 	const uint8_t want[] = {0x7F, 0x02, 0x90, 0x00};
+	CHECK_BYTES(f.vendor.last_request, want_req);
 	CHECK_BYTES(r, want);
 	CHECK_EQ(f.drv.delays_us, 0u);
+}
+
+TEST(vendor_hook_clamps_oversized_return)
+{
+	Fixture f;
+	OverclaimingVendor over;
+	f.engine.set_vendor_handler(&over);
+	const uint8_t req[] = {0x90, 0x01};
+	uint8_t resp[8] = {};
+	CHECK_EQ(f.engine.process(req, resp), 8u);
+}
+
+TEST(vendor_hook_clamps_oversized_return_in_batch)
+{
+	Fixture f;
+	OverclaimingVendor over;
+	f.engine.set_vendor_handler(&over);
+	const uint8_t req[] = {0x7F, 0x01, 0x90, 0x01};
+	uint8_t resp[8] = {};
+	CHECK_EQ(f.engine.process(req, resp), 8u);
 }

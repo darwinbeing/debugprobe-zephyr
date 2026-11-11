@@ -1,5 +1,6 @@
 #pragma once
-/* Hardware and host-status abstractions injected into DapEngine.
+/* Hardware, host-status and optional vendor-command abstractions injected
+ * into DapEngine.
  * Pure virtual so host tests can mock them; on target a thin adapter
  * wraps the Zephyr swdp device (phase 3).
  */
@@ -65,7 +66,13 @@ public:
 	 * bytes). Return the number of response bytes written (response[0]
 	 * must be the command ID), or 0 to decline; the engine then answers
 	 * with the default one-byte echo. A handled command consumes the rest
-	 * of the request packet. */
+	 * of the request packet. The return value must not exceed
+	 * response.size() (the engine clamps it). A handler that declines may
+	 * already have written into `response`; that is harmless. Inside
+	 * DAP_ExecuteCommands a handled command ends the batch: later
+	 * sub-commands are not dispatched and the batch's count byte is not
+	 * corrected, so hosts must send a handled vendor command alone or
+	 * last. */
 	virtual size_t handle(std::span<const uint8_t> request,
 			      std::span<uint8_t> response) = 0;
 };
