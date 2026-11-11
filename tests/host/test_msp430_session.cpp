@@ -37,6 +37,7 @@ const Bytes kBadState = {0x90, 0x02};
 const Bytes kOk = {0x90, 0x00};
 const Bytes kTargetError = {0x90, 0x06};
 const Bytes kTimeout = {0x90, 0x07};
+const Bytes kIdentity = {0x90, 0x00, 0x91, 0x06, 0x01, 0x00, 0x1A, 0x00, 0x00, 0x55, 0x29};
 
 } // namespace
 
@@ -67,8 +68,7 @@ TEST(session_connect_returns_identity)
 {
 	Fx f;
 	f.tap.quick_words = {0x2955};
-	const Bytes want = {0x90, 0x00, 0x91, 0x06, 0x01, 0x00, 0x1A, 0x00, 0x00, 0x55, 0x29};
-	CHECK_BYTES(f.run({0x90, 0x01, 0xFA, 0x00, 0x00}), want);
+	CHECK_BYTES(f.run({0x90, 0x01, 0xFA, 0x00, 0x00}), kIdentity);
 	CHECK(f.s.state() == State::Connected);
 	REQUIRE(!f.tap.log.empty());
 	CHECK(f.tap.log.front() == "speed:250000");
@@ -493,7 +493,7 @@ TEST(session_data_size_limits)
 	CHECK_BYTES(f.run(write_req(0x2400, 1018)), kBadArg);
 
 	f.tap.push_jmb_out(0xABADBABE);
-	CHECK_BYTES(f.run(begin_req(0x4400, 600, 0x2400)), kOk);
+	CHECK_BYTES(f.run(begin_req(0x4400, 2000, 0x2400)), kOk);
 	CHECK_BYTES(f.run(data_req(1016)), kOk);
 	CHECK(f.s.state() == State::Flashing);
 	CHECK_BYTES(f.run(data_req(1018)), kBadArg);
@@ -545,10 +545,10 @@ TEST(session_closing_while_flashing_abandons_the_write)
 			CHECK(f.s.state() == State::Idle);
 		} else {
 			f.tap.quick_words = {0x2955};
-			CHECK_BYTES(f.run(kConnectReq).size() > 2 ? kOk : kBadArg, kOk);
+			CHECK_BYTES(f.run(kConnectReq), kIdentity);
 			CHECK(f.s.state() == State::Connected);
 		}
-		CHECK(count_wipes(f.tap) >= 120u);
+		CHECK_EQ(count_wipes(f.tap), 120u);
 		CHECK(log_has(f.tap, "close"));
 	}
 }
@@ -591,15 +591,28 @@ TEST(session_connect_speed_bounds)
 	{
 		Fx f;
 		f.tap.quick_words = {0x2955};
-		CHECK_BYTES(f.run({0x90, 0x01, 0x64, 0x00, 0x00}).size() > 2 ? kOk : kBadArg, kOk);
+		CHECK_BYTES(f.run({0x90, 0x01, 0x64, 0x00, 0x00}), kIdentity);
+		CHECK(f.s.state() == State::Connected);
 		REQUIRE(!f.tap.log.empty());
 		CHECK(f.tap.log.front() == "speed:100000");
 	}
 	{
 		Fx f;
 		f.tap.quick_words = {0x2955};
-		CHECK_BYTES(f.run({0x90, 0x01, 0xE8, 0x03, 0x00}).size() > 2 ? kOk : kBadArg, kOk);
+		CHECK_BYTES(f.run({0x90, 0x01, 0xE8, 0x03, 0x00}), kIdentity);
+		CHECK(f.s.state() == State::Connected);
 		REQUIRE(!f.tap.log.empty());
 		CHECK(f.tap.log.front() == "speed:1000000");
 	}
+}
+
+TEST(session_state_error_wins_over_size_error)
+{
+	Fx f;
+	CHECK_BYTES(f.run({0x90, 0x02, 0x00}), kBadState);
+	Bytes r = read_req(0x4400, 1);
+	r.push_back(0);
+	CHECK_BYTES(f.run(r), kBadState);
+	f.connect();
+	CHECK_BYTES(f.run({0x90, 0x08, 0x00}), kBadState);
 }
