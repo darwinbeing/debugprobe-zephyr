@@ -98,6 +98,29 @@ class SbwProbeTest(unittest.TestCase):
                 self.probe.connect(speed, mode)
         self.assertEqual(self.fw.connects, [])
 
+    def test_write_mem_round_trip_obeys_the_64_byte_rule(self):
+        self.probe.info()
+        self.probe.configure(250)
+        self.probe.connect(250, probe_mod.ENTRY_NORMAL)
+        data = bytes((i * 7 + 3) & 0xFF for i in range(600))
+        self.probe.write_mem(0x2400, data)
+        self.assertEqual(self.probe.read_mem(0x2400, 300), data)
+        self.assertEqual(sum(self.fw.write_chunks), 300)
+
+    def test_write_mem_splits_a_chunk_that_would_fill_whole_packets(self):
+        self.probe.info()
+        self.probe.configure(250)
+        self.probe.connect(250, probe_mod.ENTRY_NORMAL)
+        self.probe.write_mem(0x2400, b"\x11\x22" * 29)  # 6 + 58 = 64 bytes
+        self.assertEqual(self.fw.write_chunks, [28, 1])
+
+    def test_write_mem_rejects_odd_or_empty_data(self):
+        self.probe.connect(250, probe_mod.ENTRY_NORMAL)
+        for data in (b"", b"\x01", b"\x01\x02\x03"):
+            with self.assertRaises(ProbeError):
+                self.probe.write_mem(0x2400, data)
+        self.assertEqual(self.fw.write_chunks, [])
+
 
 class FakeFirmwareTest(unittest.TestCase):
     def test_fixed_size_requests_must_be_exact(self):
@@ -159,6 +182,30 @@ class FakeFirmwareRulesTest(unittest.TestCase):
             self.cmd(fw, 3, struct.pack("<IH", 0x4400, 1))
         self.assertEqual(self.cmd(fw, 3, struct.pack("<IH", 0x4400, 1))[:2], bytes([0x90, 0]))
 
+    def test_write_mem_rules(self):
+        fw = FakeFirmware()
+        pk = struct.pack
+        ok = pk("<I", 0x2400) + b"\x01\x02"
+        self.assertEqual(self.cmd(fw, 4, ok), bytes([0x90, 2]))  # not connected
+        SbwProbe(fw).connect(250, 0)
+        for args in (b"\x00\x24", pk("<I", 0x2400), pk("<I", 0x2400) + b"\x01",
+                     pk("<I", 0x2401) + b"\x01\x02", pk("<I", 0xFFFFE) + b"\0" * 4,
+                     pk("<I", 0x2400) + b"\0" * 1020):
+            self.assertEqual(self.cmd(fw, 4, args), bytes([0x90, 1]), args)
+        self.assertEqual(fw.write_chunks, [])
+        self.assertEqual(self.cmd(fw, 4, ok), bytes([0x90, 0]))
+        self.assertEqual(fw.write_chunks, [1])
+        fw.fail_op = {4: 7}
+        self.assertEqual(self.cmd(fw, 4, ok), bytes([0x90, 7]))
+
+    def test_write_mem_to_flash_is_accepted_but_ignored(self):
+        fw = self.connected()
+        args = struct.pack("<I", 0x4400) + b"\x12\x34"
+        self.assertEqual(self.cmd(fw, 4, args), bytes([0x90, 0]))
+        self.assertEqual(self.cmd(fw, 3, struct.pack("<IH", 0x4400, 1)), bytes([0x90, 0, 0xFF, 0xFF]))
+        self.cmd(fw, 4, struct.pack("<I", 0x2400) + b"\x12\x34")
+        self.assertEqual(self.cmd(fw, 3, struct.pack("<IH", 0x2400, 1)), bytes([0x90, 0, 0x12, 0x34]))
+
 
 class StubTransport:
     def __init__(self, reply):
@@ -214,9 +261,6 @@ class ReplyValidationTest(unittest.TestCase):
         probe = SbwProbe(StubTransport(b"\x90\x00\x91\x06\x01"))
         with self.assertRaisesRegex(ProbeError, "out of step"):
             probe.connect(250, 0)
-
-    def test_write_mem_is_gone(self):
-        self.assertFalse(hasattr(SbwProbe, "write_mem"))
 
 
 class _USBError(IOError):

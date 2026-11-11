@@ -249,5 +249,35 @@ class ProgramTest(unittest.TestCase):
         self.assertTrue(all(total == 400 for _, total in seen))
 
 
+class SelftestTest(unittest.TestCase):
+    def test_passes_on_a_healthy_target(self):
+        fw = FakeFirmware()
+        probe = SbwProbe(fw)
+        identity, device = flasher.open_session(probe, 250)
+        lines = []
+        class Out:
+            def write(self, s):
+                lines.append(s)
+        flasher.selftest(probe, identity, device, out=Out())
+        self.assertTrue(lines)
+        flasher.selftest(probe, identity, device)  # out is optional
+
+    def test_stuck_ram_byte(self):
+        fw = FakeFirmware()
+        probe = SbwProbe(fw)
+        identity, device = flasher.open_session(probe, 250)
+        fw.stuck = {0x2410: 0x00}
+        with self.assertRaisesRegex(FlashError, "RAM read-back differs at 0x02410"):
+            flasher.selftest(probe, identity, device)
+
+    def test_descriptor_mismatch(self):
+        fw = FakeFirmware()
+        probe = SbwProbe(fw)
+        identity, device = flasher.open_session(probe, 250)
+        fw.mem[0x1A04] = 0x56
+        with self.assertRaisesRegex(FlashError, "device ID read inside a block differs"):
+            flasher.selftest(probe, identity, device)
+
+
 if __name__ == "__main__":
     unittest.main()

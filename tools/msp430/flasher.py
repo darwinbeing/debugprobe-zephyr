@@ -148,3 +148,32 @@ def program(probe, device, segments, erase: str = "main", verify: bool = True,
     if verify:
         verify_segments(probe, segments)
     return sum(len(seg.data) for seg in padded)
+
+
+SELFTEST_WORDS = 128
+
+
+def selftest(probe, identity, device, out=None) -> None:
+    """Check the write and read paths against RAM and the device descriptor.
+    Flash is not touched."""
+    def say(line):
+        if out is not None:
+            out.write(line + "\n")
+
+    base = device.ram_start
+    words = [(i * 0x1F35 + 0x2A17) & 0xFFFF for i in range(SELFTEST_WORDS)]
+    for name, pattern in (("pattern", words), ("inverted pattern", [w ^ 0xFFFF for w in words])):
+        wrote = b"".join(w.to_bytes(2, "little") for w in pattern)
+        probe.write_mem(base, wrote)
+        got = probe.read_mem(base, SELFTEST_WORDS)
+        for i, (w, r) in enumerate(zip(wrote, got)):
+            if w != r:
+                raise FlashError(f"selftest: RAM read-back differs at 0x{base + i:05X}: "
+                                 f"wrote 0x{w:02X}, read 0x{r:02X}")
+        say(f"RAM round trip, {name}: {len(wrote)} bytes at 0x{base:05X} read back correctly")
+
+    block = probe.read_mem(identity.device_id_ptr, 8)
+    if block[4] != identity.device_id & 0xFF or block[5] != identity.device_id >> 8:
+        raise FlashError("selftest: the device ID read inside a block differs from the one "
+                         "read alone; the read path is not reliable")
+    say(f"device descriptor at 0x{identity.device_id_ptr:05X}: ID bytes match")

@@ -237,6 +237,16 @@ class SbwProbe:
             out += part
         return bytes(out)
 
+    def write_mem(self, addr: int, data: bytes) -> None:
+        """Write RAM or peripherals (the firmware cannot program flash this way)."""
+        if not data or len(data) % 2:
+            raise ProbeError("WRITE_MEM: the data must be a non-empty whole number of words")
+        done = 0
+        for n in chunks(len(data) // 2, 6, self.write_words):
+            part = data[done:done + 2 * n]
+            self._cmd(OP_WRITE_MEM, struct.pack("<I", addr + done) + part)
+            done += 2 * n
+
     def erase(self, mode: int, addr: int, ram_addr: int) -> None:
         self._cmd(OP_ERASE, struct.pack("<BII", mode, addr, ram_addr))
 

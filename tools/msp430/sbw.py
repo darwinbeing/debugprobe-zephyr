@@ -4,8 +4,9 @@
     sbw.py info
     sbw.py flash firmware.hex [--erase main|segments|none] [--no-verify]
     sbw.py erase [--segment ADDR]
-    sbw.py read ADDR LENGTH -o dump.hex
+    sbw.py read ADDR LENGTH -o dump.hex [--force]
     sbw.py verify firmware.hex
+    sbw.py selftest
     sbw.py reset
 
 Every command resets the target. See docs/MSP430_SBW.md for wiring.
@@ -13,6 +14,8 @@ Every command resets the target. See docs/MSP430_SBW.md for wiring.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 import sys
 
 import flasher
@@ -64,9 +67,13 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("addr", type=_int)
     r.add_argument("length", type=_int, help="number of bytes")
     r.add_argument("-o", "--out", required=True, help=".bin for raw bytes, otherwise Intel HEX")
+    r.add_argument("--force", action="store_true", help="replace the output file if it exists")
 
     v = sub.add_parser("verify", help="compare flash contents with an image")
     v.add_argument("image")
+
+    sub.add_parser("selftest", help="check the probe's read and write paths using the "
+                                    "target's RAM; flash is not touched")
 
     sub.add_parser("reset", help="reset the target and let it run")
     return p
@@ -111,6 +118,8 @@ def _prepare(args):
         if args.addr + args.length > ADDR_LIMIT:
             raise FlashError(f"0x{args.addr:05X} + {args.length} bytes runs past the end of "
                              f"the address space (0x{ADDR_LIMIT:05X})")
+        if os.path.exists(args.out) and not args.force:
+            raise FlashError(f"{args.out} already exists; choose another name or pass --force")
     return None
 
 
@@ -142,8 +151,21 @@ def _run(args, probe: SbwProbe, out, segments) -> None:
                 out.write(f"erased the segment at 0x{base:05X}\n")
         elif args.cmd == "read":
             data = probe.read_mem(args.addr, (args.length + 1) // 2)[:args.length]
-            image.save(args.out, [Segment(args.addr, data)])
+            part = args.out + ".part"
+            try:
+                image.save(part, [Segment(args.addr, data)], format_of=args.out)
+                os.replace(part, args.out)
+            except BaseException:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                raise
             out.write(f"read {len(data)} bytes from 0x{args.addr:05X} into {args.out}\n")
+            out.write(f"sha256: {hashlib.sha256(data).hexdigest()}\n")
+        elif args.cmd == "selftest":
+            flasher.selftest(probe, identity, device, out)
+            out.write("selftest passed\n")
         elif args.cmd == "verify":
             flasher.verify_segments(probe, segments)
             out.write("verified\n")

@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import os
 import sys
@@ -258,6 +259,83 @@ class CliTest(unittest.TestCase):
         fw = FakeFirmware()
         self.assertEqual(run(["reset"], fw)[0], 0)
         self.assertIn(("disconnect",), fw.ops)
+
+    def test_read_refuses_to_overwrite_without_force(self):
+        fw = FakeFirmware()
+        with tempfile.TemporaryDirectory() as d:
+            dump = os.path.join(d, "backup.bin")
+            with open(dump, "wb") as f:
+                f.write(b"precious")
+            code, _, err = run(["read", "0x4400", "16", "-o", dump], fw)
+            self.assertEqual(code, 1)
+            self.assertIn(dump, err)
+            self.assertIn("--force", err)
+            with open(dump, "rb") as f:
+                self.assertEqual(f.read(), b"precious")
+            self.assertEqual(fw.connects, [])
+            code, _, _ = run(["read", "--force", "0x4400", "16", "-o", dump], fw)
+            self.assertEqual(code, 0)
+            with open(dump, "rb") as f:
+                self.assertEqual(f.read(), b"\xFF" * 16)
+            self.assertEqual(os.listdir(d), ["backup.bin"])
+
+    def test_read_prints_the_sha256_of_the_data(self):
+        fw = FakeFirmware()
+        data = bytes(range(100))
+        for i, b in enumerate(data):
+            fw.mem[0x4400 + i] = b
+        with tempfile.TemporaryDirectory() as d:
+            code, out, _ = run(["read", "0x4400", "100", "-o", os.path.join(d, "x.bin")], fw)
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertTrue(lines[-2].startswith("read 100 bytes"))
+        self.assertEqual(lines[-1], "sha256: " + hashlib.sha256(data).hexdigest())
+
+    def test_read_to_bin_is_raw_bytes(self):
+        fw = FakeFirmware()
+        fw.mem[0x4400] = 0x42
+        with tempfile.TemporaryDirectory() as d:
+            dump = os.path.join(d, "x.bin")
+            self.assertEqual(run(["read", "0x4400", "4", "-o", dump], fw)[0], 0)
+            with open(dump, "rb") as f:
+                self.assertEqual(f.read(), b"\x42\xFF\xFF\xFF")
+            self.assertEqual(os.listdir(d), ["x.bin"])
+
+    def test_failed_read_leaves_no_file_behind(self):
+        fw = FakeFirmware()
+        fw.fail_op = {3: 7}
+        with tempfile.TemporaryDirectory() as d:
+            dump = os.path.join(d, "dump.bin")
+            code, _, _ = run(["read", "0x4400", "16", "-o", dump], fw)
+            self.assertEqual(code, 1)
+            self.assertEqual(os.listdir(d), [])
+            with open(dump, "wb") as f:
+                f.write(b"old")
+            code, _, _ = run(["read", "--force", "0x4400", "16", "-o", dump], fw)
+            self.assertEqual(code, 1)
+            self.assertEqual(os.listdir(d), ["dump.bin"])
+            with open(dump, "rb") as f:
+                self.assertEqual(f.read(), b"old")
+
+    def test_selftest(self):
+        fw = FakeFirmware()
+        fw.mem.update({0x4400: 0x12, 0x1800: 0x34})
+        code, out, _ = run(["selftest"], fw)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines()[-1], "selftest passed")
+        self.assertEqual(fw.mem[0x4400], 0x12)
+        self.assertEqual(fw.mem[0x1800], 0x34)
+        self.assertNotIn(0x4401, fw.mem)
+        self.assertEqual(fw.state, 0)
+
+    def test_failing_selftest_exits_1(self):
+        fw = FakeFirmware()
+        fw.stuck = {0x2410: 0x00}
+        code, out, err = run(["selftest"], fw)
+        self.assertEqual(code, 1)
+        self.assertIn("RAM read-back differs", err)
+        self.assertNotIn("selftest passed", out)
+        self.assertEqual(fw.state, 0)
 
 
 if __name__ == "__main__":

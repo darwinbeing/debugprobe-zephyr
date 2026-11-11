@@ -1,7 +1,8 @@
 """Stands in for the probe in tests: answers DAP_Disconnect and the SBW vendor
 command the way the firmware's msp430::Session does, on top of a flash model.
 
-Op 4 (WRITE_MEM) is not modelled because the host tool does not use it.
+Op 4 (WRITE_MEM) takes effect only in RAM (0x2400-0x43FF); like the real
+device it accepts, but ignores, writes addressed to flash or anywhere else.
 
 Fault injection knobs: version, features, connect_status, fail_op,
 interrupt_on_op, fail_flash_after, stuck, no_target, has_handler."""
@@ -9,6 +10,7 @@ import struct
 
 OK, BAD_ARG, BAD_STATE, BUSY, NO_TARGET, LOCKED, TARGET_ERROR, TIMEOUT, UNKNOWN_OP = range(9)
 MAIN = (0x4400, 0x24400)
+RAM = (0x2400, 0x4400)
 
 # Argument bytes of the fixed-size requests; the firmware rejects any other length.
 FIXED_ARGS = {0: 0, 1: 3, 2: 0, 3: 6, 5: 9, 6: 12, 8: 0}
@@ -25,6 +27,8 @@ class FakeFirmware:
         self.version = version       # reported by INFO
         self.features = features     # reported by INFO
         self.mem = {}                # address -> byte; missing = erased (0xFF)
+        self.mem[0x1A04] = device_id & 0xFF   # the device descriptor
+        self.mem[0x1A05] = device_id >> 8
         self.state = 0               # 0 idle, 1 connected, 2 flashing
         self.no_target = {}          # entry mode -> NO_TARGET answers still to give
         self.no_target_id = 0xFF
@@ -35,6 +39,7 @@ class FakeFirmware:
         self.speeds = []             # speed_khz of every accepted CONNECT
         self.data_chunks = []        # word count of every accepted FLASH_DATA
         self.read_chunks = []        # word count of every accepted READ_MEM
+        self.write_chunks = []       # word count of every accepted WRITE_MEM
         self.ops = []                # ("erase", mode, addr, ram), ("begin", addr, nwords, ram), ...
         self.fail_flash_after = None # words accepted before FLASH_DATA answers TIMEOUT
         self.stuck = {}              # address -> byte that reads back regardless
@@ -126,6 +131,23 @@ class FakeFirmware:
             self.read_chunks.append(n)
             return OK, bytes(self.stuck.get(x, self.mem.get(x, 0xFF))
                              for x in range(addr, addr + 2 * n))
+        if op == 4:
+            if self.state != 1:
+                return BAD_STATE, b""
+            if len(a) < 4:
+                return BAD_ARG, b""
+            addr = struct.unpack("<I", a[:4])[0]
+            data = a[4:]
+            if (not data or len(data) % 2 or len(data) > MAX_DATA_BYTES or addr & 1
+                    or addr + len(data) > ADDR_LIMIT):
+                return BAD_ARG, b""
+            if op in self.fail_op:
+                return self._fail(op)
+            self.write_chunks.append(len(data) // 2)
+            for i, b in enumerate(data):
+                if RAM[0] <= addr + i < RAM[1]:
+                    self.mem[addr + i] = b
+            return OK, b""
         if op == 5:
             if self.state != 1:
                 return BAD_STATE, b""

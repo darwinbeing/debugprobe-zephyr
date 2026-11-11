@@ -167,9 +167,11 @@ def write_ihex(segments: list[Segment]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def save(path: str, segments: list[Segment]) -> None:
-    """Write `.bin` as raw bytes (one segment only), anything else as Intel HEX."""
-    if path.lower().endswith(".bin"):
+def save(path: str, segments: list[Segment], format_of: str | None = None) -> None:
+    """Write `.bin` as raw bytes (one segment only), anything else as Intel HEX.
+    The format follows format_of if given (a temporary file named differently
+    from its final name), else path."""
+    if (format_of or path).lower().endswith(".bin"):
         if len(segments) != 1:
             raise ImageError("a .bin file can hold only one contiguous block")
         with open(path, "wb") as f:
