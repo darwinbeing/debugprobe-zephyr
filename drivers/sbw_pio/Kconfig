@@ -1,0 +1,8 @@
+config SBW_PIO
+	bool "PIO Spy-Bi-Wire transport (MSP430)"
+	depends on PIO_RPI_PICO
+	depends on DT_HAS_DEBUGPROBE_SBW_PIO_ENABLED
+	help
+	  Clocks MSP430 Spy-Bi-Wire cycles with the RP2 PIO. Selected by
+	  PROBE_MSP430_SBW; a device is registered for each enabled
+	  debugprobe,sbw-pio devicetree node.
