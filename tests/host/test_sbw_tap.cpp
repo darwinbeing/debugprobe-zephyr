@@ -154,3 +154,65 @@ TEST(sbw_tap_shift_keeps_tclk_low_at_both_ends)
 	CHECK_EQ(c.tdi & 1u, 0u);          /* leaving Run-Test/Idle */
 	CHECK_EQ((c.tdi >> 20) & 1u, 0u);  /* re-entering Run-Test/Idle */
 }
+
+namespace {
+
+std::vector<std::string> strs(std::initializer_list<const char *> l)
+{
+	return {l.begin(), l.end()};
+}
+
+} // namespace
+
+TEST(sbw_tap_open_releases_then_acquires)
+{
+	MockSbwPort p;
+	SbwTap t{p};
+	CHECK(t.open());
+	/* StopJtag (release, 15 ms) + ConnectJTAG (drive, 15 ms) */
+	CHECK(p.log == strs({"release", "delay:15000", "acquire", "delay:15000"}));
+}
+
+TEST(sbw_tap_open_fails_when_pins_are_taken)
+{
+	MockSbwPort p;
+	p.acquire_ok = false;
+	SbwTap t{p};
+	CHECK(!t.open());
+	CHECK(p.log == strs({"release", "delay:15000", "acquire"}));
+}
+
+TEST(sbw_tap_enter_rst_high_sequence)
+{
+	MockSbwPort p;
+	SbwTap t{p};
+	t.enter(msp430::Entry::RstHigh);
+	/* EntrySequences_RstHigh_SBW, then ResetTAP */
+	CHECK(p.log == strs({"tck:0", "delay:4000", "tdio:1", "tck:1", "delay:20000",
+			     "tdio:1", "delay:60", "pulse", "delay:60", "delay:5000",
+			     "cycles:3f:7f:7"}));
+	CHECK_EQ(p.state, MockSbwPort::RTI);
+}
+
+TEST(sbw_tap_enter_rst_low_sequence)
+{
+	MockSbwPort p;
+	SbwTap t{p};
+	t.enter(msp430::Entry::RstLow);
+	/* EntrySequences_RstLow_SBW, then ResetTAP */
+	CHECK(p.log == strs({"tck:0", "delay:1000", "tdio:0", "delay:50000", "tck:1",
+			     "delay:100000", "tdio:1", "delay:40", "pulse", "delay:40",
+			     "delay:5000", "cycles:3f:7f:7"}));
+}
+
+TEST(sbw_tap_enter_restores_tclk_high)
+{
+	MockSbwPort p;
+	SbwTap t{p};
+	t.reset();
+	t.clr_tclk();
+	t.enter(msp430::Entry::RstHigh);
+	p.log.clear();
+	t.clr_tclk();
+	CHECK(p.log == strs({"tclk:1>0"})); /* TCLK was high again after entry */
+}

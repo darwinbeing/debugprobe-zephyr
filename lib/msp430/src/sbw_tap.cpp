@@ -2,8 +2,51 @@
 
 namespace msp430 {
 
-bool SbwTap::open() { return false; }
-void SbwTap::enter(Entry) {}
+/* StopJtag + ConnectJTAG (JTAGfunc430Xv2.c): release the pins so the
+ * target's test logic resets, then drive SBWTCK low and SBWTDIO high. */
+bool SbwTap::open()
+{
+	port_.release();
+	delay_ms(15);
+	if (!port_.acquire()) {
+		return false;
+	}
+	delay_ms(15);
+	return true;
+}
+
+/* EntrySequences_RstHigh_SBW / EntrySequences_RstLow_SBW followed by
+ * ResetTAP. SBWTCK is the target's TEST pin, SBWTDIO its RST pin. The one
+ * timing-critical step is the short low pulse on TEST ("phase 2..4"), which
+ * the port generates. */
+void SbwTap::enter(Entry entry)
+{
+	if (entry == Entry::RstHigh) {
+		port_.set_tck(false);
+		delay_ms(4); /* reset TEST logic */
+		port_.set_tdio(true);
+		port_.set_tck(true);
+		delay_ms(20); /* activate TEST logic */
+		port_.set_tdio(true);
+		port_.delay_us(60);
+		port_.tck_pulse();
+		port_.delay_us(60);
+		delay_ms(5);
+	} else {
+		port_.set_tck(false);
+		delay_ms(1);
+		port_.set_tdio(false); /* hold the device in reset */
+		delay_ms(50);
+		port_.set_tck(true);
+		delay_ms(100);
+		port_.set_tdio(true);
+		port_.delay_us(40);
+		port_.tck_pulse();
+		port_.delay_us(40);
+		delay_ms(5);
+	}
+	reset();
+}
 /* ResetTAP (JTAGfunc430Xv2.c): six cycles with TMS high reach
  * Test-Logic-Reset from any state, one cycle with TMS low enters
  * Run-Test/Idle. TDI stays high throughout, so TCLK ends high. */
