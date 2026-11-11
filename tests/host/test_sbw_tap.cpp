@@ -220,6 +220,7 @@ TEST(sbw_tap_enter_restores_tclk_high)
 	p.log.clear();
 	t.clr_tclk();
 	CHECK(p.log == strs({"tclk:1>0"})); /* TCLK was high again after entry */
+	CHECK(!p.tclk_glitch);
 }
 
 TEST(sbw_tap_shifts_never_glitch_tclk)

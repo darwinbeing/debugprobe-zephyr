@@ -57,7 +57,15 @@ public:
 		clock_hz = hz;
 		log.push_back("clock:" + std::to_string(hz));
 	}
-	void set_tck(bool level) override { log.push_back(level ? "tck:1" : "tck:0"); }
+	void set_tck(bool level) override
+	{
+		log.push_back(level ? "tck:1" : "tck:0");
+		if (!level) {
+			/* TEST low resets the target's test logic, so the TAP is
+			 * in Test-Logic-Reset. */
+			state = TLR;
+		}
+	}
 	void set_tdio(bool level) override { log.push_back(level ? "tdio:1" : "tdio:0"); }
 	void tck_pulse() override { log.push_back("pulse"); }
 

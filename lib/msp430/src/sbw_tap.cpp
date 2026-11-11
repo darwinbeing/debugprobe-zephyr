@@ -76,8 +76,9 @@ void SbwTap::reset()
  * TDI follows the saved TCLK level on the first and last cycle so that TCLK
  * does not change while the TAP leaves and re-enters Run-Test/Idle.
  *
- * `nbits` must be 1..27 (head + nbits + 2 cycles must fit the 32 cycles of
- * one port call); callers pass 8, 16 and 20.
+ * `nbits` must be 1..26 for an IR scan (4 lead-in cycles) and 1..27 for a DR
+ * scan (3 lead-in cycles), because head + nbits + 2 cycles must fit the 32
+ * cycles of one port call; callers pass 8, 16 and 20.
  */
 uint32_t SbwTap::scan(bool ir, unsigned nbits, uint32_t data)
 {
