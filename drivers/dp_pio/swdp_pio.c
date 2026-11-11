@@ -528,7 +528,7 @@ static int sw_port_on(const struct device *dev)
 	uint get_next_cmd_off;
 	int ret;
 
-	/* One-time: claim the SM + funcsel pins + add the program. Held for the
+	/* One-time: claim the SM + add the program. Held for the
 	 * device's lifetime (like the original's fixed PROBE_SM, probe.c:151-167);
 	 * port_off only disables, never unclaims/removes, so this guard keeps
 	 * connect/disconnect leak-free and idempotent.
@@ -542,19 +542,6 @@ static int sw_port_on(const struct device *dev)
 			return ret;
 		}
 
-		/* Route SWCLK/SWDIO (and the separate SWDI / OEN pins when present)
-		 * to the PIO via Zephyr pinctrl -- the Zephyr way (as in
-		 * uart_rpi_pico_pio), instead of the pico-sdk pio_gpio_init. The
-		 * board overlay's pinctrl-0 state sets each pad's PIO funcsel plus
-		 * input-enable/pull (input-enable on the read pin is required for
-		 * `in pins` to sample SWDIO). Equivalent of probe_gpio_init
-		 * (probe.pio:74-87).
-		 */
-		ret = pinctrl_apply_state(cfg->pcfg, PINCTRL_STATE_DEFAULT);
-		if (ret < 0) {
-			return ret;
-		}
-
 		/* Add the matching program once -- probe.c:154. */
 		if (cfg->use_oen) {
 			d->offset = pio_add_program(pio, &probe_oen_program);
@@ -563,6 +550,21 @@ static int sw_port_on(const struct device *dev)
 		}
 
 		d->loaded = true;
+	}
+
+	/* Route SWCLK/SWDIO (and the separate SWDI / OEN pins when present) to
+	 * this PIO via Zephyr pinctrl. The overlay's pinctrl-0 state sets each
+	 * pad's PIO funcsel plus input-enable/pull (input-enable on the read pin
+	 * is required for `in pins` to sample SWDIO). Equivalent of
+	 * probe_gpio_init (probe.pio:74-87).
+	 *
+	 * Done on EVERY port_on, not only the first: the SBW driver
+	 * (drivers/sbw_pio) routes the same pins to PIO1 at boot and for each
+	 * MSP430 session, so the mux may have changed since the last connect.
+	 */
+	ret = pinctrl_apply_state(cfg->pcfg, PINCTRL_STATE_DEFAULT);
+	if (ret < 0) {
+		return ret;
 	}
 
 	/* probe_gpio_init nRESET (probe.pio:74-87): nRESET pull/dir is handled by
@@ -615,6 +617,14 @@ static int sw_port_off(const struct device *dev)
 	const struct swdp_pio_config *cfg = dev->config;
 	struct swdp_pio_data *d = dev->data;
 	PIO pio = pio_rpi_pico_get_pio(cfg->piodev);
+
+	if (!d->loaded) {
+		/* Never connected: d->sm is still 0 and is not ours -- it may be
+		 * the state machine another user of this PIO allocated (autobaud).
+		 * A DAP_Disconnect without a prior DAP_Connect must not touch it.
+		 */
+		return 0;
+	}
 
 	pio_sm_set_enabled(pio, d->sm, false);
 
