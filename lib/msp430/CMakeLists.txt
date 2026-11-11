@@ -4,6 +4,7 @@ set(MSP430_SOURCES
   src/sbw_tap.cpp
   src/cpuxv2.cpp
   src/funclets.cpp
+  src/session.cpp
 )
 
 if(DEFINED ZEPHYR_BASE)

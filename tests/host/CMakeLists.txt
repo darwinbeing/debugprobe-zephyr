@@ -20,6 +20,7 @@ add_executable(dap_tests
   test_autobaud.cpp
   test_sbw_tap.cpp
   test_cpuxv2.cpp
+  test_msp430_session.cpp
   # The autobaud estimator is pure C++ (zero Zephyr deps), so it compiles
   # straight into the host test binary -- identical source as the firmware.
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src/autobaud/estimator.cpp
