@@ -12,7 +12,9 @@
  *  - the funclet is patched while it is written to RAM;
  *  - the core ID is checked after the IR_DEVICE_ID read;
  *  - execute_por returns early when the watchdog write fails;
- *  - funclet cleanup skips the RAM overwrite when the sync fails.
+ *  - funclet cleanup skips the RAM overwrite when the sync fails;
+ *  - read_mem and write_mem end with a full-emulation-state check, so a link
+ *    that dies mid-transfer is reported instead of returning zeroed data.
  *
  * Copyright (C) 2016 Texas Instruments Incorporated - http://www.ti.com/
  *
@@ -140,6 +142,12 @@ Status Cpuxv2::write_mem(uint32_t addr, size_t nwords, const uint8_t *src)
 			return Status::TargetError;
 		}
 	}
+	/* Not in TI's WriteMemQuick: confirm the CPU is still under JTAG
+	 * control. If the link died during the transfer, the last words did
+	 * not reach the target. */
+	if (!in_full_emulation()) {
+		return Status::TargetError;
+	}
 	return Status::Ok;
 }
 
@@ -165,6 +173,12 @@ Status Cpuxv2::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
 		dst[2 * i + 1] = static_cast<uint8_t>(word >> 8);
 	}
 	tap_.set_tclk();
+	/* Not in TI's ReadMemQuick: confirm the CPU is still under JTAG control.
+	 * If the link died during the transfer, the words above are not memory
+	 * contents and must not be reported as such. */
+	if (!in_full_emulation()) {
+		return Status::TargetError;
+	}
 	return Status::Ok;
 }
 

@@ -30,9 +30,13 @@ public:
 	/* Reset the target through JTAG and release the pins. */
 	void disconnect();
 
-	/* Data buffers are little-endian byte pairs, one pair per word. */
+	/* Data buffers are little-endian byte pairs, one pair per word.
+	 * TargetError is also returned when the CPU is no longer under JTAG
+	 * control at the end of the transfer; the buffer contents are then
+	 * undefined. */
 	Status read_mem(uint32_t addr, size_t nwords, uint8_t *dst);
-	/* RAM and peripheral registers only; it cannot program flash. */
+	/* Same TargetError rule as read_mem. RAM and peripheral registers only;
+	 * it cannot program flash. */
 	Status write_mem(uint32_t addr, size_t nwords, const uint8_t *src);
 
 	/* Flash operations. The caller validates addresses and lengths (even,

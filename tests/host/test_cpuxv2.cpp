@@ -63,7 +63,8 @@ TEST(cpuxv2_write_mem_follows_ti_writemem)
 	Cpuxv2 cpu{t};
 	const uint8_t data[] = {0x80, 0x5A, 0x34, 0x12};
 	CHECK(cpu.write_mem(0x015C, 2, data) == Status::Ok);
-	CHECK_LOG(t.log, write_word_log("0015c", "5a80") + write_word_log("0015e", "1234"));
+	CHECK_LOG(t.log, (write_word_log("0015c", "5a80") + write_word_log("0015e", "1234") +
+			 Log{"ir:28", "dr16:0000"}));
 }
 
 TEST(cpuxv2_read_mem_follows_ti_readmemquick)
@@ -79,7 +80,7 @@ TEST(cpuxv2_read_mem_follows_ti_readmemquick)
 			 Log{"tclk:1", "ir:c8", "dr16:0501", "ir:21", "ir:c2",
 			     "tclk:1", "tclk:0", "dr16:0000",
 			     "tclk:1", "tclk:0", "dr16:0000",
-			     "tclk:1"};
+			     "tclk:1", "ir:28", "dr16:0000"};
 	CHECK_LOG(t.log, want);
 	const uint8_t want_bytes[] = {0x55, 0x29, 0xEF, 0xBE};
 	CHECK_BYTES(out, want_bytes);
@@ -162,7 +163,7 @@ TEST(cpuxv2_connect_follows_ti_getdevice)
 		/* ReadMemQuick(DeviceIdPointer + 4, 1) */
 		set_pc_log("0080", "1a04") +
 		Log{"tclk:1", "ir:c8", "dr16:0501", "ir:21", "ir:c2",
-		    "tclk:1", "tclk:0", "dr16:0000", "tclk:1"};
+		    "tclk:1", "tclk:0", "dr16:0000", "tclk:1", "ir:28", "dr16:0000"};
 	CHECK_LOG(t.log, want);
 }
 
@@ -648,4 +649,25 @@ TEST(cpuxv2_failed_cleanup_outranks_the_timeout)
 		CHECK(cpu.flash_data(1, data) == Status::Ok);
 		CHECK(cpu.flash_end(true) == Status::TargetError);
 	}
+}
+
+TEST(cpuxv2_read_mem_detects_a_link_that_died_mid_read)
+{
+	FakeTap t;
+	t.cntrl_sig = 0x0000;
+	t.cntrl_sig_script = {0x0301}; /* only the check in set_pc sees the CPU */
+	Cpuxv2 cpu{t};
+	uint8_t out[4] = {};
+	CHECK(cpu.read_mem(0x4400, 2, out) == Status::TargetError);
+}
+
+TEST(cpuxv2_write_mem_detects_a_link_that_died_mid_write)
+{
+	FakeTap t;
+	t.cntrl_sig = 0x0000;
+	t.cntrl_sig_script = {0x0301};
+	Cpuxv2 cpu{t};
+	const uint8_t data[] = {0x34, 0x12};
+	CHECK(cpu.write_mem(0x2400, 1, data) == Status::TargetError);
+	CHECK_EQ(t.mem_writes.size(), 1u); /* the word itself was sent */
 }

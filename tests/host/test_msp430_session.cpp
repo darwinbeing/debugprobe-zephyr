@@ -616,3 +616,13 @@ TEST(session_state_error_wins_over_size_error)
 	f.connect();
 	CHECK_BYTES(f.run({0x90, 0x08, 0x00}), kBadState);
 }
+
+TEST(session_read_mem_reports_a_dead_link)
+{
+	Fx f;
+	f.connect();
+	f.tap.cntrl_sig = 0x0000;
+	f.tap.cntrl_sig_script = {0x0301};
+	CHECK_BYTES(f.run({0x90, 0x03, 0x00, 0x44, 0x00, 0x00, 0x02, 0x00}), kTargetError);
+	CHECK(f.s.state() == State::Idle);
+}
