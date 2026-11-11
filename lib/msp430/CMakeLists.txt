@@ -2,6 +2,7 @@
 # static library for host unit tests (same pattern as lib/dap).
 set(MSP430_SOURCES
   src/sbw_tap.cpp
+  src/cpuxv2.cpp
 )
 
 if(DEFINED ZEPHYR_BASE)
