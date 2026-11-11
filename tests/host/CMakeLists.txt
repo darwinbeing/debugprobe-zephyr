@@ -15,6 +15,7 @@ add_executable(dap_tests
   test_sequences.cpp
   test_transfer.cpp
   test_transfer_block.cpp
+  test_vendor_hook.cpp
   test_autobaud.cpp
   # The autobaud estimator is pure C++ (zero Zephyr deps), so it compiles
   # straight into the host test binary -- identical source as the firmware.

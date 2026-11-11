@@ -27,6 +27,9 @@ public:
 	 */
 	void request_abort() { abort_.store(true, std::memory_order_relaxed); }
 
+	/* Install (or clear with nullptr) the handler for vendor commands. */
+	void set_vendor_handler(VendorHandler *handler) { vendor_ = handler; }
+
 private:
 	struct Sizes {
 		size_t consumed; /* request bytes */
@@ -57,6 +60,7 @@ private:
 
 	SwdDriver &driver_;
 	HostStatus &host_;
+	VendorHandler *vendor_ = nullptr;
 	Config config_;
 
 	bool connected_ = false;

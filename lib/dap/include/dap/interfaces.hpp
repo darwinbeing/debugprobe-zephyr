@@ -3,6 +3,7 @@
  * Pure virtual so host tests can mock them; on target a thin adapter
  * wraps the Zephyr swdp device (phase 3).
  */
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
@@ -53,6 +54,20 @@ public:
 	virtual ~HostStatus() = default;
 	virtual void connected(bool on) = 0;
 	virtual void running(bool on) = 0;
+};
+
+/* Optional handler for the vendor command IDs 0x80..0x9F. */
+class VendorHandler {
+public:
+	virtual ~VendorHandler() = default;
+	/* `request` starts at the command ID byte and runs to the end of the
+	 * packet. `response` is the remaining response buffer (at least 2
+	 * bytes). Return the number of response bytes written (response[0]
+	 * must be the command ID), or 0 to decline; the engine then answers
+	 * with the default one-byte echo. A handled command consumes the rest
+	 * of the request packet. */
+	virtual size_t handle(std::span<const uint8_t> request,
+			      std::span<uint8_t> response) = 0;
 };
 
 struct Config {
