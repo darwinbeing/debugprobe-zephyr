@@ -618,15 +618,14 @@ static int sw_port_off(const struct device *dev)
 	struct swdp_pio_data *d = dev->data;
 	PIO pio = pio_rpi_pico_get_pio(cfg->piodev);
 
-	if (!d->loaded) {
-		/* Never connected: d->sm is still 0 and is not ours -- it may be
-		 * the state machine another user of this PIO allocated (autobaud).
-		 * A DAP_Disconnect without a prior DAP_Connect must not touch it.
-		 */
-		return 0;
+	if (d->loaded) {
+		pio_sm_set_enabled(pio, d->sm, false);
 	}
-
-	pio_sm_set_enabled(pio, d->sm, false);
+	/* else: never connected: d->sm is still 0 and is not ours -- it may be
+	 * the state machine another user of this PIO allocated (autobaud).
+	 * A DAP_Disconnect without a prior DAP_Connect must not touch it. nRESET
+	 * is released below in every case.
+	 */
 
 	/* de-assert nRESET -- probe.c:178 probe_assert_reset(1) -> float/Hi-Z. */
 	if (cfg->reset_gpio.port) {

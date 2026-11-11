@@ -1,9 +1,10 @@
 /*
  * PIO Spy-Bi-Wire transport for RP2040/RP2350.
  *
- * The state machine (sbw.pio) runs only while cycles are being clocked. The
- * entry sequence needs static pin levels; those are produced by executing
- * single instructions on the stopped machine, the same mechanism the pico-sdk
+ * The state machine (sbw.pio) is started by the first sbw_pio_cycles() call and
+ * then stays enabled, idle with the clock high, until a static-level call or a
+ * release stops it. The entry sequence needs static pin levels; those are
+ * produced by executing single instructions on the stopped machine, the same mechanism the pico-sdk
  * uses in pio_sm_set_consecutive_pindirs().
  *
  * SPDX-License-Identifier: MIT
@@ -35,6 +36,11 @@ LOG_MODULE_REGISTER(sbw_pio, LOG_LEVEL_INF);
 #define SBW_MIN_SLOT_HZ 100000U
 #define SBW_MAX_SLOT_HZ 1000000U
 
+/* A full 32-cycle call takes at most about 1.2 ms. */
+#define SBW_RX_TIMEOUT_MS 10U
+
+#define SBW_PULSE_LOOPS 8U /* about 0.5..1 us of low time at 125..150 MHz */
+
 struct sbw_pio_config {
 	const struct device *piodev;
 	const struct pinctrl_dev_config *pcfg;
@@ -61,24 +67,38 @@ static void sbw_stop(const struct device *dev)
 	struct sbw_pio_data *d = dev->data;
 
 	if (d->running) {
-		/* The machine is parked at `pull block side 1`: clock high. */
+		/* The machine is idle with the clock high. */
 		pio_sm_set_enabled(sbw_pio(dev), d->sm, false);
 		d->running = false;
 	}
 }
 
-static void sbw_start(const struct device *dev)
+static int sbw_start(const struct device *dev)
 {
+	const struct sbw_pio_config *cfg = dev->config;
 	struct sbw_pio_data *d = dev->data;
 	PIO pio = sbw_pio(dev);
 
 	if (!d->running) {
+		const uint32_t oe_need = BIT(cfg->tck_pin) | BIT(cfg->tdio_pin);
+
+		/* Check the PIO's actual outputs. Do not repair: raising SBWTCK
+		 * now would be a rising edge that puts the target out of phase. */
+		if ((pio->dbg_padoe & oe_need) != oe_need ||
+		    (pio->dbg_padout & BIT(cfg->tck_pin)) == 0U) {
+			LOG_ERR("pins not ready (oe 0x%08x out 0x%08x)",
+				(unsigned int)pio->dbg_padoe,
+				(unsigned int)pio->dbg_padout);
+			return -EIO;
+		}
 		pio_sm_clear_fifos(pio, d->sm);
 		pio_sm_restart(pio, d->sm);
 		pio_sm_exec(pio, d->sm, pio_encode_jmp(d->offset + sbw_offset_entry));
 		pio_sm_set_enabled(pio, d->sm, true);
 		d->running = true;
 	}
+
+	return 0;
 }
 
 static void sbw_exec_tck(const struct device *dev, bool level)
@@ -121,9 +141,17 @@ void sbw_pio_release(const struct device *dev)
 	struct sbw_pio_data *d = dev->data;
 	PIO pio = sbw_pio(dev);
 
+	int ret;
+
 	sbw_stop(dev);
 	pio_sm_set_consecutive_pindirs(pio, d->sm, cfg->tdio_pin, 1, false);
 	pio_sm_set_consecutive_pindirs(pio, d->sm, cfg->tck_pin, 1, false);
+
+	/* Released = routed to this PIO, high-impedance, idle pulls active. */
+	ret = pinctrl_apply_state(cfg->pcfg, PINCTRL_STATE_DEFAULT);
+	if (ret < 0) {
+		LOG_ERR("pinctrl apply failed: %d", ret);
+	}
 }
 
 void sbw_pio_set_clock(const struct device *dev, uint32_t slot_hz)
@@ -163,35 +191,46 @@ void sbw_pio_set_tdio(const struct device *dev, bool level)
 	pio_sm_exec(sbw_pio(dev), d->sm, pio_encode_set(pio_pins, level ? 1U : 0U));
 }
 
-void sbw_pio_tck_pulse(const struct device *dev)
+void __ramfunc sbw_pio_tck_pulse(const struct device *dev)
 {
+	struct sbw_pio_data *d = dev->data;
+	PIO pio = sbw_pio(dev);
+	const uint32_t low = pio_encode_nop() | pio_encode_sideset_opt(1, 0);
+	const uint32_t high = pio_encode_nop() | pio_encode_sideset_opt(1, 1);
 	unsigned int key;
 
 	sbw_stop(dev);
-	/* TI: _DINT(); ClrTST(); usDelay(1); SetTST(); _EINT(); -- the low time
-	 * must stay well under 7 us. */
+	/* TI: _DINT(); ClrTST(); usDelay(1); SetTST(); _EINT(). The low time
+	 * must stay far below 7 us, so the pulse runs from RAM with interrupts
+	 * locked and no calls between the two register writes. */
 	key = irq_lock();
-	sbw_exec_tck(dev, false);
-	k_busy_wait(1);
-	sbw_exec_tck(dev, true);
+	pio->sm[d->sm].instr = low;
+	for (volatile uint32_t i = 0; i < SBW_PULSE_LOOPS; i++) {
+	}
+	pio->sm[d->sm].instr = high;
 	irq_unlock(key);
 }
 
-uint32_t sbw_pio_cycles(const struct device *dev, uint32_t tms, uint32_t mid,
-			uint32_t tdi, unsigned int count)
+int sbw_pio_cycles(const struct device *dev, uint32_t tms, uint32_t mid,
+		   uint32_t tdi, unsigned int count, uint32_t *tdo)
 {
 	struct sbw_pio_data *d = dev->data;
 	PIO pio = sbw_pio(dev);
 	unsigned int len[SBW_MAX_CYCLES / SBW_CYCLES_PER_WORD + 1U];
 	unsigned int words = 0;
 	unsigned int first = 0;
-	uint32_t tdo = 0;
+	uint32_t acc = 0;
+	int ret;
 
+	*tdo = 0;
 	if (count == 0U || count > SBW_MAX_CYCLES) {
-		return 0;
+		return -EINVAL;
 	}
 
-	sbw_start(dev);
+	ret = sbw_start(dev);
+	if (ret < 0) {
+		return ret;
+	}
 
 	/* At most 4 words: they fit the TX FIFO, their results the RX FIFO. */
 	while (first < count) {
@@ -204,14 +243,25 @@ uint32_t sbw_pio_cycles(const struct device *dev, uint32_t tms, uint32_t mid,
 
 	first = 0;
 	for (unsigned int i = 0; i < words; i++) {
-		/* The machine shifts samples in from the MSB side. */
-		const uint32_t v = pio_sm_get_blocking(pio, d->sm) >> (32U - len[i]);
+		const uint32_t t0 = k_uptime_get_32();
+		uint32_t v;
 
-		tdo |= v << first;
+		while (pio_sm_is_rx_fifo_empty(pio, d->sm)) {
+			if ((k_uptime_get_32() - t0) > SBW_RX_TIMEOUT_MS) {
+				LOG_ERR("RX timeout, releasing pins");
+				sbw_pio_release(dev);
+				return -ETIMEDOUT;
+			}
+		}
+		/* The machine shifts samples in from the MSB side. */
+		v = pio_sm_get(pio, d->sm) >> (32U - len[i]);
+
+		acc |= v << first;
 		first += len[i];
 	}
 
-	return tdo;
+	*tdo = acc;
+	return 0;
 }
 
 static int sbw_pio_init(const struct device *dev)
@@ -230,6 +280,9 @@ static int sbw_pio_init(const struct device *dev)
 	ret = pio_rpi_pico_allocate_sm(cfg->piodev, &d->sm);
 	if (ret < 0) {
 		return ret;
+	}
+	if (!pio_can_add_program(pio, RPI_PICO_PIO_GET_PROGRAM(sbw))) {
+		return -ENOMEM;
 	}
 	d->offset = pio_add_program(pio, RPI_PICO_PIO_GET_PROGRAM(sbw));
 

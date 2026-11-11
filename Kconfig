@@ -26,16 +26,17 @@ endchoice
 config PROBE_MSP430_SBW
 	bool "MSP430 Spy-Bi-Wire programming (vendor command 0x90)"
 	default y
-	depends on PROBE_SWD_PIO
+	depends on PROBE_SWD_PIO && PIO_RPI_PICO && DT_HAS_DEBUGPROBE_SBW_PIO_ENABLED
 	select SBW_PIO
 	help
 	  Program MSP430 CPUXv2 flash devices (MSP430F5529) over Spy-Bi-Wire,
 	  using the SWD pins. Adds a CMSIS-DAP vendor command; the USB
 	  descriptors do not change. See docs/MSP430_SBW.md.
 
-# The out-of-tree PIO SWD port driver Kconfig (drivers/dp_pio/Kconfig) is
-# sourced via the Zephyr module mechanism (zephyr/module.yml -> build.kconfig),
-# not rsource'd here, so it is registered alongside the driver's CMakeLists in
-# the module loop. Sourcing it both ways would redefine SWDP_PIO.
+# The out-of-tree PIO driver Kconfigs (drivers/Kconfig, which pulls in dp_pio
+# and sbw_pio) are sourced via the Zephyr module mechanism (zephyr/module.yml
+# -> build.kconfig), not rsource'd here, so they are registered alongside the
+# drivers' CMakeLists in the module loop. Sourcing them both ways would
+# redefine SWDP_PIO.
 
 source "Kconfig.zephyr"
