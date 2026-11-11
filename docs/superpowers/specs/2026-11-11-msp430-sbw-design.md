@@ -1,7 +1,8 @@
 # MSP430F5529 Spy-Bi-Wire Support — Design (Phase A: Flash Programming)
 
 Date: 2026-11-11
-Status: Approved design, not yet implemented.
+Status: Implemented and host-verified; on-target acceptance pending (see
+`docs/PROJECT_STATUS.md`, Phase 6). This document describes the code as built.
 Extends: `2026-06-11-debugprobe-zephyr-design.md` (the overall firmware design).
 
 ## Background and Goal
@@ -137,9 +138,26 @@ on. `sbw.pio` is assembled by `scripts/gen_pio.sh` into a generated header,
 exactly like `probe.pio`; opcodes are never hand-edited.
 
 The driver also provides what the entry sequence needs: static levels on both
-pins, and a single SBWTCK low pulse of about 1 µs. Both are produced by
+pins, and a single SBWTCK low pulse of about 0.9 µs. Both are produced by
 executing single instructions on the stopped state machine; the pulse runs
-with interrupts locked.
+from RAM with interrupts locked, so its width does not depend on the flash
+cache.
+
+The driver protects the target against caller errors and its own faults:
+
+- The slot rate is clamped to 100 kHz–1 MHz in the driver itself.
+- Before it starts a stopped state machine it reads back what the PIO block is
+  actually driving. Both pins must be outputs and SBWTCK must be high;
+  otherwise nothing is clocked and the call fails. (Starting with the clock
+  low would add a rising edge and leave the target one slot out of phase.)
+- Waiting for the state machine's answer has a 10 ms limit. On a timeout the
+  pins are released.
+- "Released" means: directions dropped, then, after the lines have settled,
+  the pins are routed to this PIO with the idle pulls.
+
+`PioSbwPort` (the glue) turns a driver error into all-zero TDO and stops
+calling the driver until the next `acquire`. All-zero TDO fails every check in
+the layers above, so the command in progress ends with an error.
 
 `lib/msp430` sees the driver through this interface (a mock implements it in
 the host tests):
@@ -187,7 +205,11 @@ SBW reuses the SWD pins:
   `BUSY`. `DAP_Connect` while an SBW session is open force-closes the SBW
   session first, so a crashed SBW tool cannot lock out openocd. All requests
   are serialized on the USB thread, so no locking is needed.
-- **Idle state.** Outside a session both pins are high-impedance. At boot the
+- **Idle state.** Outside a session both pins are high-impedance, routed to
+  PIO1 with the idle pulls. That holds after boot, after an SBW session, and
+  after an SWD session: when `DAP_Disconnect` ends an SWD session, the pin
+  arbiter runs a hook that releases the pins the SWD driver would otherwise
+  leave driven. At boot the
   SBW driver applies its pinctrl state, which puts a **pull-up on the
   SWDIO/SBWTDIO pin**. Today that pin has the RP2040 reset-default pull-down
   until the first SWD connect. Without the change, the pull-down (50–80 kΩ)
@@ -196,9 +218,10 @@ SBW reuses the SWD pins:
   harmless for SWD targets.
 - **Robustness fix found on the way.** `sw_port_off` disables state machine
   `d->sm` even when the SWD driver was never connected (`d->sm` is then 0,
-  which can be the autobaud state machine). It gets an early return when
-  nothing was loaded. The host tool sends `DAP_Disconnect` before every SBW
-  session, which makes this path reachable.
+  which can be the autobaud state machine). That call is now skipped when
+  nothing was loaded; nRESET is still released, as CMSIS-DAP requires. The
+  host tool sends `DAP_Disconnect` before every SBW session, which makes this
+  path reachable.
 
 ### 3. TAP layer (`msp430::SbwTap`)
 
@@ -275,7 +298,19 @@ Details that matter:
   overwrites the funclet RAM with `0x3FFF` (`JMP $`), as TI does.
 - **Timeouts are time-based** (`Tap::millis()`), not poll-count-based, so they
   do not depend on the SBW clock: funclet ready 50 ms, erase done 200 ms,
-  write done 100 ms, mailbox input ready 20 ms.
+  write done 100 ms, mailbox input ready 20 ms. The clock is read before each
+  poll, so one poll always happens after the deadline.
+- **Write state is explicit.** `flash_data` and `flash_end` are refused
+  (`BadState`) unless `flash_begin` succeeded; every other operation is refused
+  while a write is active; `connect` and `disconnect` clear the state.
+- **Memory transfers end with a check.** `read_mem` and `write_mem` finish by
+  confirming the CPU is still under JTAG control. A link that dies mid-transfer
+  is reported as `TargetError` instead of returning zeroed data.
+- **A failed cleanup outranks the operation's result.** If the re-sync after a
+  funclet fails, the operation returns `TargetError` whatever it would have
+  returned, and the RAM overwrite is skipped (the CPU may be running).
+- **Deviations from TI** are few and deliberate; they are listed in the header
+  comment of `lib/msp430/src/cpuxv2.cpp`.
 - **Every session resets the target.** `connect` performs a POR and
   `disconnect` a JTAG reset, so the target restarts from its reset vector
   after any command, including `info` and `read`.
@@ -341,9 +376,18 @@ Argument rules, all answered with `BAD_ARG` when violated:
 
 - `speed_khz` outside 100–1000, or an unknown `entry_mode` or erase `mode`.
 - Addresses must be even, and `addr + 2 × nwords` must not exceed `0x100000`.
-- Data payloads must be a whole number of words and at most
-  `max_data_bytes`; `READ_MEM` may request at most `max_data_bytes / 2` words.
+- Data payloads must be a whole number of words, not empty, and at most
+  `max_data_bytes`; `READ_MEM` must request between 1 and
+  `max_data_bytes / 2` words.
 - `FLASH_BEGIN` needs `nwords > 0`.
+- `ram_addr` must be even and the whole funclet must fit below `0x100000`
+  (178 bytes for `ERASE`, 240 for `FLASH_BEGIN`).
+- Requests without a data payload must have exactly their size; missing or
+  extra bytes are both rejected.
+
+The state check comes first: an operation that is not allowed in the current
+state answers `BAD_STATE` even if its arguments are malformed. `INFO` is
+allowed in every state.
 
 A `NO_TARGET` response carries only `jtag_id`.
 
@@ -359,12 +403,20 @@ Session states: `Idle` → (`CONNECT`) → `Connected` → (`FLASH_BEGIN`) →
 
 - A failed `CONNECT` releases the pins and stays in `Idle`.
 - `CONNECT` in any state other than `Idle` first closes the open session.
-- Any error during `FLASH_DATA` makes the firmware clean up by itself (POR and
-  RAM wipe) and return to `Connected`.
+- Any error during `FLASH_DATA` ends the write: the firmware cleans up by
+  itself (POR and RAM wipe) and returns to `Connected`.
 - `FLASH_END` before all announced words were sent skips the completion wait,
   cleans up, and returns `BAD_STATE`.
+- **`TARGET_ERROR` closes the session.** The target is then in an unknown
+  state, so the firmware releases the pins and goes to `Idle`; the host must
+  connect again.
+- `DISCONNECT` in `Idle` returns `BAD_STATE`. Clients that disconnect as
+  cleanup ignore it.
 - When the DAP USB interface is disabled (bus reset, deconfiguration) an open
-  session is closed with the normal disconnect sequence.
+  session is closed with the normal disconnect sequence. A host tool that
+  crashes does not disable the interface: its session stays open until the
+  next `CONNECT`, the next `DAP_Connect`, or a bus reset. Every run of the host
+  tool starts with `CONNECT`, which closes whatever was left open.
 
 While a session is open the DAP-connected LED is lit (boards that have one).
 
@@ -393,6 +445,11 @@ The probe is found the same way `tools/conformance` does it (VID `2E8A`, PID
 
 Global options: `--speed KHZ` (default 250), `--serial`.
 
+Everything that can fail without the probe happens before the USB device is
+opened: argument checks, reading the image, rejecting an empty image or one
+with data above the 20-bit address space. Exit status: 0 success, 1 failure,
+2 usage error, 130 interrupted.
+
 Device table, one entry in this phase:
 
 | Field | MSP430F5529 |
@@ -417,7 +474,8 @@ Device table, one entry in this phase:
    segments are erased individually and only if the image has data in them.
 5. Write each contiguous section with `FLASH_BEGIN` / `FLASH_DATA`… /
    `FLASH_END`.
-6. Verify by reading back with `READ_MEM`.
+6. Verify by reading back with `READ_MEM`, comparing exactly the bytes that
+   are in the image (not the `0xFF` padding).
 7. `DISCONNECT` (also on failure, as cleanup). Exit code 0 only if every step
    succeeded.
 
@@ -429,7 +487,7 @@ bridge:
 | Command | At 250 kHz |
 |---|---|
 | READ_MEM, WRITE_MEM, FLASH_DATA | chunked by the host tool to about 100 ms per command |
-| ERASE, FLASH_BEGIN, FLASH_END | 0.2–0.4 s, dominated by loading the funclet and wiping its RAM |
+| ERASE, FLASH_BEGIN, FLASH_END | 0.3–0.5 s (up to about 1.2 s at 100 kHz), dominated by loading the funclet and wiping its RAM |
 | CONNECT | about 60 ms (mode 0), about 250 ms (mode 1) |
 
 The UART bridge can stall for the duration of one SBW command. The target is
@@ -453,12 +511,23 @@ implementation and roughly halves these times.
   address it was working on.
 - Verify mismatch: the tool prints the first differing address and exits
   non-zero.
-- Host crash or USB loss mid-session: the firmware closes the session when the
-  interface is disabled; the next `CONNECT` always starts from a clean entry
-  sequence.
+- USB bus reset or deconfiguration mid-session: the firmware closes the
+  session. A crashed host tool leaves it open; the next `CONNECT` closes it
+  and starts from a clean entry sequence.
+- Driver fault (pins not in the required state, state machine not answering):
+  logged by the driver, reported to the host as `TARGET_ERROR`, session closed.
+- Host tool: nothing is erased before the image is fully validated; the
+  session is closed on every exit path, including Ctrl-C; stale replies left
+  in the probe by an interrupted run are drained when the device is opened.
 - No exceptions, no heap, no RTTI in `lib/msp430`.
 
 ## Testing and Acceptance
+
+As built: 186 C++ host tests and 117 Python tests. Beyond the tests listed
+below, the reviews compared `SbwTap` and `Cpuxv2` mechanically with TI's
+reference source, simulated the PIO program tick by tick from its generated
+opcodes, fuzzed `Session` under ASan/UBSan, and ran mutation passes over
+`cpuxv2.cpp`, `session.cpp` and the host tool to find behaviour no test pinned.
 
 1. **Host unit tests (C++, `scripts/run_host_tests.sh`, also under ASan).**
    - `SbwTap`: recorded cycle sequences for IR/DR shifts, TAP reset and TCLK
@@ -514,9 +583,12 @@ Wiring and electrical notes that the document must contain:
   pioasm; the first on-target steps are read-only.
 - **Unknown electrical properties of the target board.** Conservative default
   speed, adjustable speed, explicit checks in the documentation.
-- **Blocking the USB thread for up to 0.4 s.** Accepted for this phase. If it
-  becomes a problem, funclet loading can be chunked or moved to a worker
-  thread.
+- **Blocking the USB thread for up to about half a second** (more at
+  100 kHz). Accepted for this phase. If it becomes a problem, funclet loading
+  can be chunked or moved to a worker thread.
+- **Stack depth on the USB thread.** The SBW call chain is deeper than SWD's:
+  about 1.2 KB in the worst case. `USBD_THREAD_STACK_SIZE` is raised from 1024
+  to 2048 when the feature is enabled.
 - **Regression in the SWD path** from the pinctrl change and the vendor hook.
   Covered by the existing host tests, the conformance comparison and the
   openocd acceptance flow.
