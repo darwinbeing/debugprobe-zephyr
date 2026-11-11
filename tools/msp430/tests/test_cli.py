@@ -337,6 +337,26 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("selftest passed", out)
         self.assertEqual(fw.state, 0)
 
+    def test_trial(self):
+        fw = FakeFirmware()
+        for a in range(0x4400, 0x20000):
+            fw.mem[a] = (a * 7) & 0xFF
+        before = dict(fw.mem)
+        with tempfile.TemporaryDirectory() as d:
+            backup = os.path.join(d, "backup.hex")
+            self.assertEqual(run(["read", "0x4400", "0x20000", "-o", backup], fw)[0], 0)
+            code, out, _ = run(["trial", "--backup", backup], fw)
+        self.assertEqual(code, 0)
+        self.assertIn("trial passed: segment 0x24200", out)
+        self.assertEqual(fw.mem, before)
+        self.assertEqual(fw.state, 0)
+
+    def test_trial_missing_backup_does_not_connect(self):
+        fw = FakeFirmware()
+        code, _, err = run(["trial", "--backup", "/nonexistent/backup.hex"], fw)
+        self.assertEqual(code, 1)
+        self.assertEqual(fw.connects, [])
+
 
 if __name__ == "__main__":
     unittest.main()

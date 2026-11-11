@@ -4,6 +4,7 @@ from __future__ import annotations
 import devices
 import image
 import probe as probe_mod
+from image import Segment
 from probe import StatusError
 
 NORMAL_ENTRY_TRIES = 4  # TI GetCoreID: MAX_ENTRY_TRY
@@ -177,3 +178,65 @@ def selftest(probe, identity, device, out=None) -> None:
         raise FlashError("selftest: the device ID read inside a block differs from the one "
                          "read alone; the read path is not reliable")
     say(f"device descriptor at 0x{identity.device_id_ptr:05X}: ID bytes match")
+
+
+def trial(probe, device, backup_segments, out=None) -> int:
+    """Erase, program, verify and erase again one blank main-flash segment, then
+    check that the rest of main flash still matches the backup. Returns the
+    segment's address."""
+    def say(line):
+        if out is not None:
+            out.write(line + "\n")
+            if hasattr(out, "flush"):
+                out.flush()
+
+    start, end = device.main_start, device.main_end
+    backup = bytearray(b"\xFF" * (end - start))
+    covered = bytearray(end - start)
+    for seg in backup_segments:
+        lo, hi = max(seg.addr, start), min(seg.end, end)
+        if lo < hi:
+            backup[lo - start:hi - start] = seg.data[lo - seg.addr:hi - seg.addr]
+            covered[lo - start:hi - start] = b"\x01" * (hi - lo)
+    if not all(covered):
+        raise FlashError("the backup does not cover all of main flash; make it with: "
+                         f"read 0x{start:X} 0x{end - start:X} -o FILE")
+
+    size = device.segment_size
+    base = None
+    for cand in range(device.erase_base(end - 1), start - 1, -size):
+        if backup[cand - start:cand - start + size].count(0xFF) == size:
+            base = cand
+            break
+    if base is None:
+        raise FlashError("the backup has no blank segment in main flash; the trial needs one")
+
+    def read_main():
+        return probe.read_mem(start, (end - start) // 2)
+
+    def first_difference(actual):
+        return start + next(i for i, (a, b) in enumerate(zip(actual, backup)) if a != b)
+
+    say(f"reading main flash to compare it with the backup (segment 0x{base:05X} will be used)")
+    actual = read_main()
+    if actual != backup:
+        raise FlashError("the target's flash does not match the backup (first difference at "
+                         f"0x{first_difference(actual):05X}); nothing was changed")
+
+    say(f"programming and verifying a test pattern in the segment at 0x{base:05X}")
+    pattern = bytes((i * 37 + 11) & 0xFF for i in range(size))
+    program(probe, device, [Segment(base, pattern)], erase="segments", verify=True)
+
+    say(f"erasing the segment at 0x{base:05X} again")
+    try:
+        probe.erase(probe_mod.ERASE_SEGMENT, base, device.ram_start)
+    except StatusError as e:
+        raise FlashError(f"erase at 0x{base:05X} failed: {e}") from None
+
+    say("reading main flash again to compare it with the backup")
+    actual = read_main()
+    if actual != backup:
+        raise FlashError("after the trial the target's flash differs from the backup (first "
+                         f"difference at 0x{first_difference(actual):05X}); restore the backup "
+                         "with the flash command")
+    return base

@@ -5,7 +5,7 @@ Op 4 (WRITE_MEM) takes effect only in RAM (0x2400-0x43FF); like the real
 device it accepts, but ignores, writes addressed to flash or anywhere else.
 
 Fault injection knobs: version, features, connect_status, fail_op,
-interrupt_on_op, fail_flash_after, stuck, no_target, has_handler."""
+interrupt_on_op, fail_flash_after, stuck, no_target, has_handler, also_erase."""
 import struct
 
 OK, BAD_ARG, BAD_STATE, BUSY, NO_TARGET, LOCKED, TARGET_ERROR, TIMEOUT, UNKNOWN_OP = range(9)
@@ -44,6 +44,7 @@ class FakeFirmware:
         self.fail_flash_after = None # words accepted before FLASH_DATA answers TIMEOUT
         self.stuck = {}              # address -> byte that reads back regardless
         self.has_handler = True
+        self.also_erase = None       # address: a SEGMENT erase also erases the segment holding it
         self.closed = False
         self._flash_addr = 0
         self._remaining = 0
@@ -166,8 +167,14 @@ class FakeFirmware:
                 size = 512 if addr >= MAIN[0] else 128
                 lo = addr - addr % size
                 hi = lo + size
-            for x in [x for x in self.mem if lo <= x < hi]:
-                del self.mem[x]
+            spans = [(lo, hi)]
+            if mode == 0 and self.also_erase is not None:
+                a = self.also_erase
+                size = 512 if a >= MAIN[0] else 128
+                spans.append((a - a % size, a - a % size + size))
+            for lo, hi in spans:
+                for x in [x for x in self.mem if lo <= x < hi]:
+                    del self.mem[x]
             return OK, b""
         if op == 6:
             if self.state != 1:

@@ -279,5 +279,56 @@ class SelftestTest(unittest.TestCase):
             flasher.selftest(probe, identity, device)
 
 
+class TrialTest(unittest.TestCase):
+    def setUp(self):
+        self.fw, self.probe = session()
+        for a in range(0x4400, 0x20000):
+            self.fw.mem[a] = (a * 7) & 0xFF
+        self.backup = [Segment(0x4400, self.probe.read_mem(0x4400, 0x10000))]
+
+    def erased(self):
+        return [op for op in self.fw.ops if op[0] in ("erase", "begin")]
+
+    def test_healthy(self):
+        before = dict(self.fw.mem)
+        lines = []
+        class Out:
+            def write(self, s):
+                lines.append(s)
+        base = flasher.trial(self.probe, F5529, self.backup, out=Out())
+        self.assertEqual(base, 0x24200)
+        self.assertEqual([op for op in self.fw.ops if op[0] == "erase"],
+                         [("erase", 0, 0x24200, 0x2400)] * 2)
+        self.assertEqual(self.fw.mem, before)
+        self.assertTrue(lines)
+
+    def test_backup_must_cover_main_flash(self):
+        backup = [Segment(0x4400, self.backup[0].data[:0x1000])]
+        with self.assertRaisesRegex(FlashError, "does not cover all of main flash.*"
+                                    "read 0x4400 0x20000 -o FILE"):
+            flasher.trial(self.probe, F5529, backup)
+        self.assertEqual(self.erased(), [])
+
+    def test_needs_a_blank_segment(self):
+        for a in range(0x4400, 0x24400):
+            self.fw.mem[a] = 0x55
+        backup = [Segment(0x4400, self.probe.read_mem(0x4400, 0x10000))]
+        with self.assertRaisesRegex(FlashError, "no blank segment in main flash"):
+            flasher.trial(self.probe, F5529, backup)
+        self.assertEqual(self.erased(), [])
+
+    def test_target_must_match_the_backup(self):
+        self.fw.mem[0x5000] ^= 0xFF
+        with self.assertRaisesRegex(FlashError, "does not match the backup .*0x05000.*"
+                                    "nothing was changed"):
+            flasher.trial(self.probe, F5529, self.backup)
+        self.assertEqual(self.erased(), [])
+
+    def test_damage_during_the_trial(self):
+        self.fw.also_erase = 0x4400
+        with self.assertRaisesRegex(FlashError, "after the trial.*0x04400"):
+            flasher.trial(self.probe, F5529, self.backup)
+
+
 if __name__ == "__main__":
     unittest.main()

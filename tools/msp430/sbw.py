@@ -7,6 +7,7 @@
     sbw.py read ADDR LENGTH -o dump.hex [--force]
     sbw.py verify firmware.hex
     sbw.py selftest
+    sbw.py trial --backup FILE
     sbw.py reset
 
 Every command resets the target. See docs/MSP430_SBW.md for wiring.
@@ -75,6 +76,11 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("selftest", help="check the probe's read and write paths using the "
                                     "target's RAM; flash is not touched")
 
+    t = sub.add_parser("trial", help="erase, program and verify one blank flash segment, then "
+                                     "check that the rest of main flash still matches the backup")
+    t.add_argument("--backup", required=True, metavar="FILE",
+                   help="a dump of all of main flash (read 0x4400 0x20000 -o FILE)")
+
     sub.add_parser("reset", help="reset the target and let it run")
     return p
 
@@ -112,6 +118,11 @@ def _prepare(args):
     """Everything that can fail without the probe; returns the image, if the command has one."""
     if args.cmd in ("flash", "verify"):
         return _load_image(args.image)
+    if args.cmd == "trial":
+        segments = image.load(args.backup)
+        if not any(seg.data for seg in segments):
+            raise FlashError(f"{args.backup}: the backup contains no data")
+        return segments
     if args.cmd == "read":
         if args.addr < 0 or args.addr & 1 or args.length <= 0:
             raise FlashError("the address must be even and not negative, and the length positive")
@@ -163,6 +174,10 @@ def _run(args, probe: SbwProbe, out, segments) -> None:
                 raise
             out.write(f"read {len(data)} bytes from 0x{args.addr:05X} into {args.out}\n")
             out.write(f"sha256: {hashlib.sha256(data).hexdigest()}\n")
+        elif args.cmd == "trial":
+            base = flasher.trial(probe, device, segments, out)
+            out.write(f"trial passed: segment 0x{base:05X} was erased, programmed, verified "
+                      "and erased again; main flash matches the backup\n")
         elif args.cmd == "selftest":
             flasher.selftest(probe, identity, device, out)
             out.write("selftest passed\n")
