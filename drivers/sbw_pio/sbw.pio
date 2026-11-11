@@ -1,0 +1,45 @@
+;
+; Spy-Bi-Wire transport for MSP430 targets. Driver: drivers/sbw_pio/sbw_pio.c.
+;
+; One TX word is one command of 1..9 JTAG cycles, shifted out LSB first:
+;   bits 3:0   number of cycles - 1
+;   then 3 bits per cycle: TMS, MID, TDI   (see sbw_pack.h)
+; MID is the level on SBWTDIO during the low phase of the TMS slot. It equals
+; TMS, except for TI's "TMSLDH" (TMS = 0, MID = 1), which keeps TCLK high.
+;
+; One RX word per command: the TDO samples, shifted in from the MSB side.
+;
+; Waveform, after the TMSH/TMSL/TMSLDH/TDIH/TDIL/TDO_RD macros in TI slau320
+; LowLevelFunc430Xv2.h. One slot is 8 state-machine ticks, 4 high and 4 low.
+; The machine only ever waits (pull, push) with SBWTCK high: a low phase
+; longer than about 7 us resets the target's SBW logic.
+;
+; Pins: side-set = SBWTCK; out and set = SBWTDIO; in = SBWTDIO, or the
+; separate input pin on boards that have one.
+
+.program sbw
+.side_set 1 opt
+
+.wrap_target
+public entry:
+    pull block          side 1      ; wait for a command with the clock high
+    out x, 4                        ; cycles - 1
+cycle:
+    ; TMS slot
+    out pins, 1         side 1 [3]  ; TMS on the line, clock high
+    nop                 side 0 [2]  ; clock low
+    out pins, 1         side 0      ; MID: line level before the rising edge
+    ; TDI slot
+    nop                 side 1      ; rising edge, line still holds MID
+    out pins, 1                [2]  ; TDI on the line, clock high
+    nop                 side 0 [3]  ; clock low
+    ; TDO slot
+    nop                 side 1      ; rising edge, line still holds TDI
+    set pindirs, 0             [2]  ; release the line, clock high
+    nop                 side 0 [2]  ; clock low, the target drives TDO
+    in pins, 1          side 0      ; sample at the end of the low phase
+    nop                 side 1 [1]  ; rising edge, the target releases the line
+    set pindirs, 1                  ; drive the line again (last TDI level)
+    jmp x-- cycle
+    push block                      ; one RX word per command, clock high
+.wrap
