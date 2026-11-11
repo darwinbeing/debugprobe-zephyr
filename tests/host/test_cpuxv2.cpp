@@ -671,3 +671,52 @@ TEST(cpuxv2_write_mem_detects_a_link_that_died_mid_write)
 	CHECK(cpu.write_mem(0x2400, 1, data) == Status::TargetError);
 	CHECK_EQ(t.mem_writes.size(), 1u); /* the word itself was sent */
 }
+
+TEST(cpuxv2_read_mem_detects_a_floating_data_line)
+{
+	FakeTap t;
+	t.ones_after_shifts = 40;
+	Cpuxv2 cpu{t};
+	uint8_t out[128] = {};
+	CHECK(cpu.read_mem(0x4400, 64, out) == Status::TargetError);
+}
+
+TEST(cpuxv2_write_mem_detects_a_floating_data_line)
+{
+	FakeTap t;
+	t.ones_after_shifts = 20;
+	Cpuxv2 cpu{t};
+	const uint8_t data[16] = {};
+	CHECK(cpu.write_mem(0x2400, 8, data) == Status::TargetError);
+}
+
+TEST(cpuxv2_connect_detects_a_floating_data_line_after_the_id)
+{
+	FakeTap t;
+	t.ones_after_shifts = 1; /* the first IR shift still returns 0x91 */
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) != Status::Ok);
+	REQUIRE(!t.log.empty());
+	CHECK(t.log.back() == "close");
+}
+
+TEST(cpuxv2_flash_data_detects_a_floating_data_line)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	t.push_jmb_out(0xABADBABE);
+	CHECK(cpu.flash_begin(0x4400, 4, 0x2400) == Status::Ok);
+	t.ones_after_shifts = t.shifts(); /* the line floats from now on */
+	const uint8_t data[] = {0x34, 0x12, 0x78, 0x56};
+	CHECK(cpu.flash_data(2, data) == Status::TargetError);
+	CHECK(t.jmb_in.empty());
+}
+
+TEST(cpuxv2_erase_detects_a_floating_data_line)
+{
+	FakeTap t;
+	t.ones_after_shifts = 400; /* inside the funclet load */
+	Cpuxv2 cpu{t};
+	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::TargetError);
+}

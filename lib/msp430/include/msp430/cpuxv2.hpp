@@ -32,7 +32,8 @@ public:
 
 	/* Data buffers are little-endian byte pairs, one pair per word.
 	 * TargetError is also returned when the CPU is no longer under JTAG
-	 * control at the end of the transfer; the buffer contents are then
+	 * control at the end of the transfer (this includes a data line that
+	 * reads constantly high or low); the buffer contents are then
 	 * undefined. */
 	Status read_mem(uint32_t addr, size_t nwords, uint8_t *dst);
 	/* Same TargetError rule as read_mem. RAM and peripheral registers only;

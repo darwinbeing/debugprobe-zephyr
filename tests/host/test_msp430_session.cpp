@@ -626,3 +626,12 @@ TEST(session_read_mem_reports_a_dead_link)
 	CHECK_BYTES(f.run({0x90, 0x03, 0x00, 0x44, 0x00, 0x00, 0x02, 0x00}), kTargetError);
 	CHECK(f.s.state() == State::Idle);
 }
+
+TEST(session_read_mem_reports_a_floating_data_line)
+{
+	Fx f;
+	f.connect();
+	f.tap.ones_after_shifts = f.tap.shifts() + 30;
+	CHECK_BYTES(f.run({0x90, 0x03, 0x00, 0x44, 0x00, 0x00, 0x40, 0x00}), kTargetError);
+	CHECK(f.s.state() == State::Idle);
+}

@@ -13,6 +13,8 @@
  *  - the core ID is checked after the IR_DEVICE_ID read;
  *  - execute_por returns early when the watchdog write fails;
  *  - funclet cleanup skips the RAM overwrite when the sync fails;
+ *  - the JTAG ID captured by the IR scan is checked in the full-emulation-state
+ *    check and before every mailbox access;
  *  - read_mem and write_mem end with a full-emulation-state check, so a link
  *    that dies mid-transfer is reported instead of returning zeroed data.
  *
@@ -68,10 +70,16 @@ constexpr uint32_t kWriteDoneTimeoutMs = 100;
 
 } // namespace
 
-/* "Check Init State": the CPU is under JTAG control and synchronized. */
+/* "Check Init State": the CPU is under JTAG control and synchronized.
+ * The IR scan captures the JTAG ID; requiring it here detects a dead link
+ * whatever the data line reads (all zeros after a probe fault, all ones
+ * when the wire has come off and the pull-up wins). TI checks only the
+ * control-signal bits. */
 bool Cpuxv2::in_full_emulation()
 {
-	tap_.ir_shift(kIrCntrlSigCapture);
+	if (tap_.ir_shift(kIrCntrlSigCapture) != kJtagId91) {
+		return false;
+	}
 	return (tap_.dr_shift16(0) & 0x0301) != 0;
 }
 
@@ -242,7 +250,10 @@ bool Cpuxv2::sync_por()
 /* i_WriteJmbIn16, with a time limit instead of a poll count */
 bool Cpuxv2::jmb_write16(uint16_t value)
 {
-	tap_.ir_shift(kIrJmbExchange);
+	/* A mailbox that answers with all ones would look permanently ready. */
+	if (tap_.ir_shift(kIrJmbExchange) != kJtagId91) {
+		return false;
+	}
 	const uint32_t start = tap_.millis();
 	for (;;) {
 		/* Read the clock before polling: the poll that follows an
@@ -343,7 +354,10 @@ bool Cpuxv2::release_to(uint32_t addr)
 /* i_ReadJmbOut */
 bool Cpuxv2::jmb_read32(uint32_t &value)
 {
-	tap_.ir_shift(kIrJmbExchange);
+	/* A mailbox that answers with all ones would look permanently ready. */
+	if (tap_.ir_shift(kIrJmbExchange) != kJtagId91) {
+		return false;
+	}
 	if ((tap_.dr_shift16(0) & kJmbOut1Rdy) == 0) {
 		return false; /* nothing new */
 	}

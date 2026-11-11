@@ -55,7 +55,36 @@ public:
 	}
 	void close() override { log.push_back("close"); }
 
+	/* When >= 0: after this many shifts (IR and DR together) the data line
+	 * floats high, so every later shift reads all ones. */
+	int ones_after_shifts = -1;
+	int shifts() const { return shifts_; }
+
 	uint8_t ir_shift(uint8_t ir) override
+	{
+		const uint8_t v = ir_shift_(ir);
+		return floating() ? 0xFF : v;
+	}
+	uint16_t dr_shift16(uint16_t value) override
+	{
+		const uint16_t v = dr_shift16_(value);
+		return floating() ? 0xFFFF : v;
+	}
+	uint32_t dr_shift20(uint32_t value) override
+	{
+		const uint32_t v = dr_shift20_(value);
+		return floating() ? 0xFFFFF : v;
+	}
+
+private:
+	/* Counts one shift; true if this one reads all ones. */
+	bool floating()
+	{
+		const int before = shifts_++;
+		return ones_after_shifts >= 0 && before >= ones_after_shifts;
+	}
+
+	uint8_t ir_shift_(uint8_t ir)
 	{
 		ir_ = ir;
 		jmb_phase_ = JmbPhase::Control;
@@ -66,7 +95,7 @@ public:
 		return pop(jtag_id_script, jtag_id);
 	}
 
-	uint16_t dr_shift16(uint16_t value) override
+	uint16_t dr_shift16_(uint16_t value)
 	{
 		millis_now += millis_per_shift;
 		log.push_back(fmt("dr16:%04x", value));
@@ -87,7 +116,7 @@ public:
 		}
 	}
 
-	uint32_t dr_shift20(uint32_t value) override
+	uint32_t dr_shift20_(uint32_t value)
 	{
 		log.push_back(fmt("dr20:%05x", value));
 		if (ir_ == msp430::kIrAddr16Bit) {
@@ -96,6 +125,7 @@ public:
 		return ir_ == msp430::kIrDeviceId ? device_id_ptr : 0;
 	}
 
+public:
 	void set_tclk() override { log.push_back("tclk:1"); }
 	void clr_tclk() override { log.push_back("tclk:0"); }
 	void delay_ms(uint32_t ms) override { log.push_back("delay:" + std::to_string(ms)); }
@@ -106,6 +136,7 @@ public:
 	}
 
 private:
+	int shifts_ = 0;
 	static std::string fmt(const char *f, unsigned v)
 	{
 		char buf[32];
