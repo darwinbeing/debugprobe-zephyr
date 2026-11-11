@@ -42,6 +42,9 @@ public:
 	TapState state = TLR;
 	bool tclk_outside_rti = false; /* set if tclk_cycle ran outside Run-Test/Idle */
 	uint32_t clock_hz = 0;
+	bool bad_count = false;   /* cycles() called with count outside 1..32 */
+	bool tclk = true;         /* TCLK level as the target sees it */
+	bool tclk_glitch = false; /* TCLK changed while leaving or re-entering Run-Test/Idle */
 
 	bool acquire() override
 	{
@@ -65,6 +68,9 @@ public:
 			      (unsigned)tdi, count);
 		log.push_back(buf);
 		cycle_calls.push_back({tms, tdi, count});
+		if (count == 0 || count > 32) {
+			bad_count = true;
+		}
 		for (unsigned i = 0; i < count; ++i) {
 			step((tms >> i) & 1u, (tdi >> i) & 1u);
 		}
@@ -119,11 +125,21 @@ private:
 
 	void step(bool tms, bool tdi)
 	{
+		const TapState before = state;
 		if (state == ShDR || state == ShIR) {
 			shift_value_ = (shift_value_ << 1) | (tdi ? 1u : 0u);
 			++shift_bits_;
 		}
 		state = next(state, tms);
+		if (before == RTI && state != RTI && tdi != tclk) {
+			tclk_glitch = true; /* left Run-Test/Idle with TDI != TCLK */
+		}
+		if (state == RTI) {
+			if ((before == UpdDR || before == UpdIR) && tdi != tclk) {
+				tclk_glitch = true; /* came back from a scan with TDI != TCLK */
+			}
+			tclk = tdi; /* in Run-Test/Idle the TDI slot is TCLK */
+		}
 		if (state == UpdDR || state == UpdIR) {
 			scans.push_back({state == UpdIR, shift_bits_, shift_value_});
 			shift_value_ = 0;

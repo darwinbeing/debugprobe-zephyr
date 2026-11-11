@@ -1,7 +1,9 @@
 #pragma once
 /* Tap over Spy-Bi-Wire: builds the per-cycle TMS/TDI vectors that TI's
  * IR_Shift / DR_Shift16 / DR_Shift20 / AllShifts / ResetTAP / SetTCLK_sbw /
- * ClrTCLK_sbw produce (slau320, LowLevelFunc430Xv2.c, JTAGfunc430Xv2.c).
+ * ClrTCLK_sbw produce, and the StopJtag / ConnectJTAG /
+ * EntrySequences_RstHigh_SBW / EntrySequences_RstLow_SBW pin sequences
+ * (slau320, LowLevelFunc430Xv2.c, JTAGfunc430Xv2.c).
  */
 #include "msp430/sbw_port.hpp"
 #include "msp430/tap.hpp"

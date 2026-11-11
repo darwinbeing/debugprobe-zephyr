@@ -47,9 +47,14 @@ void SbwTap::enter(Entry entry)
 	}
 	reset();
 }
+
 /* ResetTAP (JTAGfunc430Xv2.c): six cycles with TMS high reach
  * Test-Logic-Reset from any state, one cycle with TMS low enters
- * Run-Test/Idle. TDI stays high throughout, so TCLK ends high. */
+ * Run-Test/Idle. TDI stays high throughout, so TCLK ends high.
+ *
+ * TI's ResetTAP leaves TCLK_saved untouched; here the tracked level is set
+ * high on purpose, because the last reset cycle enters Run-Test/Idle with
+ * TDI = 1, so TCLK really is high afterwards. */
 void SbwTap::reset()
 {
 	port_.cycles(0x3F, 0x7F, 7);
@@ -70,6 +75,9 @@ void SbwTap::reset()
  *
  * TDI follows the saved TCLK level on the first and last cycle so that TCLK
  * does not change while the TAP leaves and re-enters Run-Test/Idle.
+ *
+ * `nbits` must be 1..27 (head + nbits + 2 cycles must fit the 32 cycles of
+ * one port call); callers pass 8, 16 and 20.
  */
 uint32_t SbwTap::scan(bool ir, unsigned nbits, uint32_t data)
 {
