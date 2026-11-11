@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_options(-Wall -Wextra -fno-exceptions -fno-rtti)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/dap dap)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib/msp430 msp430)
 
 add_executable(dap_tests
   test_smoke.cpp
@@ -17,9 +18,10 @@ add_executable(dap_tests
   test_transfer_block.cpp
   test_vendor_hook.cpp
   test_autobaud.cpp
+  test_sbw_tap.cpp
   # The autobaud estimator is pure C++ (zero Zephyr deps), so it compiles
   # straight into the host test binary -- identical source as the firmware.
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src/autobaud/estimator.cpp
 )
 target_include_directories(dap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
-target_link_libraries(dap_tests PRIVATE dap)
+target_link_libraries(dap_tests PRIVATE dap msp430)
