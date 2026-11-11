@@ -357,6 +357,28 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(fw.connects, [])
 
+    def _trial_interrupted(self, op):
+        fw = FakeFirmware()
+        for a in range(0x4400, 0x20000):
+            fw.mem[a] = (a * 7) & 0xFF
+        with tempfile.TemporaryDirectory() as d:
+            backup = os.path.join(d, "backup.hex")
+            self.assertEqual(run(["read", "0x4400", "0x20000", "-o", backup], fw)[0], 0)
+            fw.interrupt_on_op = op
+            code, _, err = run(["trial", "--backup", backup], fw)
+        self.assertEqual(code, 130)
+        self.assertEqual(fw.state, 0)
+        self.assertTrue(fw.closed)
+        return err
+
+    def test_ctrl_c_during_trial_pattern_write(self):
+        err = self._trial_interrupted(7)
+        self.assertIn("partially erased or programmed", err)
+        self.assertIn("compare the flash with your backup", err)
+
+    def test_ctrl_c_during_trial_first_read(self):
+        self._trial_interrupted(3)
+
 
 if __name__ == "__main__":
     unittest.main()

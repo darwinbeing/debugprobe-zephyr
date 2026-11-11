@@ -209,8 +209,11 @@ def main(argv=None, transport=None, out=sys.stdout, err=sys.stderr) -> int:
         err.write(f"error: {e}\n")
         return 1
     except KeyboardInterrupt:
-        if args.cmd in ("flash", "erase") and getattr(args, "session_open", False):
-            err.write("interrupted; the target's flash may be partially erased or programmed\n")
+        if args.cmd in ("flash", "erase", "trial") and getattr(args, "session_open", False):
+            hint = ('; run "trial" again or compare the flash with your backup'
+                    if args.cmd == "trial" else "")
+            err.write("interrupted; the target's flash may be partially erased or "
+                      f"programmed{hint}\n")
         else:
             err.write("interrupted\n")
         return 130
