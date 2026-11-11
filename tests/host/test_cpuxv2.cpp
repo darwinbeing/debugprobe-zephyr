@@ -256,3 +256,113 @@ TEST(cpuxv2_disconnect_resets_and_releases)
 	/* ReleaseDevice_430Xv2(V_RESET), then the pins */
 	CHECK_LOG(t.log, (Log{"ir:c8", "dr16:0c01", "dr16:0401", "ir:a8", "close"}));
 }
+
+TEST(cpuxv2_erase_loads_patches_runs_and_cleans_up)
+{
+	FakeTap t;
+	t.push_jmb_out(0xCAFEBABE);
+	Cpuxv2 cpu{t};
+	CHECK(cpu.erase(msp430::EraseMode::Main, 0x14400, 0x2400) == Status::Ok);
+
+	/* 89 funclet words, the watchdog write of the POR, 89 words of JMP $ */
+	REQUIRE(t.mem_writes.size() == 89u + 1u + 89u);
+	CHECK_EQ(t.mem_writes[0].first, 0x2400u);
+	CHECK_EQ(t.mem_writes[0].second, 0x0016); /* entry offset, unpatched */
+	CHECK_EQ(t.mem_writes[2].second, 0x4400); /* address low */
+	CHECK_EQ(t.mem_writes[3].second, 0x0001); /* address high */
+	CHECK_EQ(t.mem_writes[4].second, 0xA506); /* erase all main memory */
+	CHECK_EQ(t.mem_writes[5].second, 0xA548); /* Info A stays locked */
+	CHECK_EQ(t.mem_writes[6].second, 0xA508); /* first unpatched word */
+	CHECK_EQ(t.mem_writes[88].first, 0x2400u + 2u * 88u);
+	CHECK_EQ(t.mem_writes[89].first, 0x015Cu);
+	CHECK_EQ(t.mem_writes[90].first, 0x2400u);
+	CHECK_EQ(t.mem_writes[90].second, 0x3FFF);
+	CHECK_EQ(t.mem_writes[178].first, 0x2400u + 2u * 88u);
+	CHECK_EQ(t.mem_writes[178].second, 0x3FFF);
+
+	/* ReleaseDevice_430Xv2(ram + entry offset): PC = 0x2416 */
+	CHECK(contains(t.log, set_pc_log("0080", "2416") +
+				      Log{"tclk:1", "ir:c8", "dr16:0401", "ir:21", "ir:a8"}));
+}
+
+TEST(cpuxv2_erase_segment_and_bank_modes)
+{
+	for (auto [mode, fctl1] : {std::pair{msp430::EraseMode::Segment, 0xA502},
+				   std::pair{msp430::EraseMode::Bank, 0xA504}}) {
+		FakeTap t;
+		t.push_jmb_out(0xCAFEBABE);
+		Cpuxv2 cpu{t};
+		CHECK(cpu.erase(mode, 0x1800, 0x2400) == Status::Ok);
+		REQUIRE(t.mem_writes.size() > 4u);
+		CHECK_EQ(t.mem_writes[4].second, fctl1);
+	}
+}
+
+TEST(cpuxv2_erase_times_out_but_still_cleans_up)
+{
+	FakeTap t; /* mailbox never reports completion */
+	Cpuxv2 cpu{t};
+	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::Timeout);
+	CHECK_EQ(t.mem_writes.size(), 89u + 1u + 89u);
+}
+
+TEST(cpuxv2_flash_write_handshake)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+
+	t.push_jmb_out(0xABADBABE);
+	CHECK(cpu.flash_begin(0x4400, 2, 0x2400) == Status::Ok);
+	REQUIRE(t.mem_writes.size() == 120u);
+	CHECK_EQ(t.mem_writes[0].second, 0x001C);
+	CHECK_EQ(t.mem_writes[2].second, 0x4400); /* address low */
+	CHECK_EQ(t.mem_writes[3].second, 0x0000); /* address high */
+	CHECK_EQ(t.mem_writes[4].second, 0x0002); /* length low, in words */
+	CHECK_EQ(t.mem_writes[5].second, 0x0000); /* length high */
+	CHECK_EQ(t.mem_writes[6].second, 0xA548); /* Info A stays locked */
+	CHECK_EQ(t.mem_writes[7].second, 0xA508);
+
+	t.log.clear();
+	const uint8_t data[] = {0x34, 0x12, 0x78, 0x56};
+	CHECK(cpu.flash_data(2, data) == Status::Ok);
+	/* i_WriteJmbIn16 per word: wait for IN0RDY, INREQ, data */
+	CHECK_LOG(t.log, (Log{"ir:86", "dr16:0000", "dr16:0001", "dr16:1234",
+			      "ir:86", "dr16:0000", "dr16:0001", "dr16:5678"}));
+
+	t.push_jmb_out(0xCAFEBABE);
+	CHECK(cpu.flash_end(true) == Status::Ok);
+	REQUIRE(t.mem_writes.size() == 120u + 1u + 120u);
+	CHECK_EQ(t.mem_writes.back().second, 0x3FFF);
+}
+
+TEST(cpuxv2_flash_begin_times_out_when_funclet_does_not_start)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	CHECK(cpu.flash_begin(0x4400, 2, 0x2400) == Status::Timeout);
+	CHECK_EQ(t.mem_writes.size(), 120u + 1u + 120u); /* cleaned up */
+}
+
+TEST(cpuxv2_flash_data_times_out_and_cleans_up)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	t.push_jmb_out(0xABADBABE);
+	CHECK(cpu.flash_begin(0x4400, 2, 0x2400) == Status::Ok);
+	t.jmb_default = 0; /* mailbox input never ready */
+	const uint8_t data[] = {0x34, 0x12};
+	CHECK(cpu.flash_data(1, data) == Status::Timeout);
+	CHECK_EQ(t.mem_writes.size(), 120u + 1u + 120u);
+}
+
+TEST(cpuxv2_flash_end_incomplete_skips_the_completion_wait)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	t.push_jmb_out(0xABADBABE);
+	CHECK(cpu.flash_begin(0x4400, 2, 0x2400) == Status::Ok);
+	t.log.clear();
+	CHECK(cpu.flash_end(false) == Status::Ok);
+	CHECK(!contains(t.log, Log{"ir:86"}));
+	CHECK_EQ(t.mem_writes.size(), 120u + 1u + 120u);
+}

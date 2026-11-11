@@ -34,6 +34,7 @@
  *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #include "msp430/cpuxv2.hpp"
+#include "msp430/funclets.hpp"
 
 namespace msp430 {
 
@@ -44,6 +45,13 @@ constexpr uint16_t kWdtCtl = 0x015C;
 constexpr uint16_t kWdtHold = 0x5A80;
 constexpr uint32_t kJmbInTimeoutMs = 20;
 constexpr int kSyncPolls = 50;
+constexpr uint16_t kInfoALocked = 0xA548; /* FCTL3 key: Info segment A stays locked */
+constexpr uint16_t kJmpSelf = 0x3FFF;     /* JMP $ */
+constexpr uint32_t kFuncletReady = 0xABADBABE;
+constexpr uint32_t kFuncletDone = 0xCAFEBABE;
+constexpr uint32_t kReadyTimeoutMs = 50;
+constexpr uint32_t kEraseTimeoutMs = 200;
+constexpr uint32_t kWriteDoneTimeoutMs = 100;
 
 } // namespace
 
@@ -275,6 +283,147 @@ void Cpuxv2::disconnect()
 	tap_.dr_shift16(0x0401);
 	tap_.ir_shift(kIrCntrlSigRelease);
 	tap_.close();
+}
+
+/* ReleaseDevice_430Xv2(addr), default branch: run from addr. */
+bool Cpuxv2::release_to(uint32_t addr)
+{
+	if (!set_pc(addr)) {
+		return false;
+	}
+	tap_.set_tclk();
+	tap_.ir_shift(kIrCntrlSig16Bit);
+	tap_.dr_shift16(0x0401);
+	tap_.ir_shift(kIrAddrCapture);
+	tap_.ir_shift(kIrCntrlSigRelease);
+	return true;
+}
+
+/* i_ReadJmbOut */
+bool Cpuxv2::jmb_read32(uint32_t &value)
+{
+	tap_.ir_shift(kIrJmbExchange);
+	if ((tap_.dr_shift16(0) & kJmbOut1Rdy) == 0) {
+		return false; /* nothing new */
+	}
+	tap_.dr_shift16(kJmb32Bit | kJmbOutReq);
+	const uint16_t low = tap_.dr_shift16(0);
+	const uint16_t high = tap_.dr_shift16(0);
+	value = (static_cast<uint32_t>(high) << 16) | low;
+	return true;
+}
+
+bool Cpuxv2::jmb_wait(uint32_t expected, uint32_t timeout_ms)
+{
+	const uint32_t start = tap_.millis();
+	for (;;) {
+		uint32_t value = 0;
+		if (jmb_read32(value) && value == expected) {
+			return true;
+		}
+		if (tap_.millis() - start >= timeout_ms) {
+			return false;
+		}
+	}
+}
+
+/* Load a funclet into RAM, replacing words 2..(2 + nparams - 1) with the
+ * parameters, and start it at its entry offset (word 0). */
+bool Cpuxv2::start_funclet(const uint16_t *code, size_t nwords, uint32_t ram_addr,
+			   const uint16_t *params, size_t nparams)
+{
+	funclet_ram_ = ram_addr;
+	funclet_words_ = nwords;
+	for (size_t i = 0; i < nwords; ++i) {
+		const uint16_t word = (i >= 2 && i < 2 + nparams) ? params[i - 2] : code[i];
+		if (!write_word(ram_addr + 2u * static_cast<uint32_t>(i), word)) {
+			return false;
+		}
+	}
+	return release_to(ram_addr + code[0]);
+}
+
+/* Take control back (SyncJtag_AssertPor) and overwrite the funclet with
+ * JMP $, as TI does after every funclet run. */
+bool Cpuxv2::funclet_cleanup()
+{
+	const bool ok = sync_por();
+	for (size_t i = 0; i < funclet_words_; ++i) {
+		write_word(funclet_ram_ + 2u * static_cast<uint32_t>(i), kJmpSelf);
+	}
+	funclet_words_ = 0;
+	return ok;
+}
+
+/* EraseFLASH_430Xv2 */
+Status Cpuxv2::erase(EraseMode mode, uint32_t addr, uint32_t ram_addr)
+{
+	uint16_t fctl1 = 0;
+	switch (mode) {
+	case EraseMode::Segment: fctl1 = 0xA502; break;
+	case EraseMode::Bank:    fctl1 = 0xA504; break;
+	case EraseMode::Main:    fctl1 = 0xA506; break;
+	default:
+		return Status::BadArg;
+	}
+	const uint16_t params[] = {static_cast<uint16_t>(addr),
+				   static_cast<uint16_t>(addr >> 16), fctl1, kInfoALocked};
+
+	if (!start_funclet(kFlashEraseFunclet, kFlashEraseWords, ram_addr, params, 4)) {
+		funclet_cleanup();
+		return Status::TargetError;
+	}
+	const bool done = jmb_wait(kFuncletDone, kEraseTimeoutMs);
+	const bool clean = funclet_cleanup();
+	if (!done) {
+		return Status::Timeout;
+	}
+	return clean ? Status::Ok : Status::TargetError;
+}
+
+/* WriteFLASH_430Xv2, part 1: load and start the funclet, wait until it asks
+ * for data. */
+Status Cpuxv2::flash_begin(uint32_t addr, uint32_t nwords, uint32_t ram_addr)
+{
+	const uint16_t params[] = {static_cast<uint16_t>(addr),
+				   static_cast<uint16_t>(addr >> 16),
+				   static_cast<uint16_t>(nwords),
+				   static_cast<uint16_t>(nwords >> 16), kInfoALocked};
+
+	if (!start_funclet(kFlashWriteFunclet, kFlashWriteWords, ram_addr, params, 5)) {
+		funclet_cleanup();
+		return Status::TargetError;
+	}
+	if (!jmb_wait(kFuncletReady, kReadyTimeoutMs)) {
+		funclet_cleanup();
+		return Status::Timeout;
+	}
+	return Status::Ok;
+}
+
+/* WriteFLASH_430Xv2, part 2: feed words through the mailbox. */
+Status Cpuxv2::flash_data(size_t nwords, const uint8_t *src)
+{
+	for (size_t i = 0; i < nwords; ++i) {
+		const uint16_t word = static_cast<uint16_t>(src[2 * i] | (src[2 * i + 1] << 8));
+		if (!jmb_write16(word)) {
+			funclet_cleanup();
+			return Status::Timeout;
+		}
+	}
+	return Status::Ok;
+}
+
+/* WriteFLASH_430Xv2, part 3: wait for completion (only if every announced
+ * word was sent), then clean up. */
+Status Cpuxv2::flash_end(bool complete)
+{
+	const bool done = !complete || jmb_wait(kFuncletDone, kWriteDoneTimeoutMs);
+	const bool clean = funclet_cleanup();
+	if (!done) {
+		return Status::Timeout;
+	}
+	return clean ? Status::Ok : Status::TargetError;
 }
 
 } // namespace msp430
