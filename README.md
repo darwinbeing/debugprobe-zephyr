@@ -26,7 +26,9 @@ pins and a small Python tool:
 
     python3 tools/msp430/sbw.py flash firmware.hex
 
-See `docs/MSP430_SBW.md` for wiring, electrical checks and usage.
+`flash` erases the target's main flash first. Before the first write to a
+board, read `docs/MSP430_SBW.md`: it covers wiring, electrical checks, and how
+to make and check a backup (`selftest`, `read`, `trial`).
 
 ## Fresh machine setup (T2 topology)
 

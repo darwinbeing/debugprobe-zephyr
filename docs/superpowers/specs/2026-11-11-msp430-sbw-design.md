@@ -75,7 +75,8 @@ files that contain them.
 lib/msp430/                 pure C++20, zero Zephyr deps, host-tested (same rules as lib/dap)
   include/msp430/
     sbw_port.hpp            SbwPort: hardware abstraction (PIO driver on target, mock on host)
-    tap.hpp                 Tap interface + SbwTap (IR/DR shifts, TCLK, entry sequences)
+    tap.hpp                 Tap interface (JTAG primitives)
+    sbw_tap.hpp             SbwTap: Tap over SbwPort (IR/DR shifts, TCLK, entry sequences)
     cpuxv2.hpp              Cpuxv2: connect/identify, POR, memory, erase, flash write
     session.hpp             Session: vendor-command parser and session state machine
     protocol.hpp            op codes, status codes, limits
@@ -84,7 +85,8 @@ lib/msp430/                 pure C++20, zero Zephyr deps, host-tested (same rule
     funclets.cpp            TI FlashWrite_o / FlashErase_o arrays
 drivers/sbw_pio/            sbw.pio + C driver: clocks JTAG cycles, samples TDO
 dts/bindings/               debugprobe,sbw-pio binding
-src/msp430/                 glue: PioSbwPort, pin-ownership arbiter, registration with the DAP engine
+src/pin_owner.*             pin-ownership arbiter between SWD and SBW
+src/msp430/                 glue: PioSbwPort, backend (owns the objects, registers the hooks)
 tools/msp430/               Python CLI and its unit tests
 tests/host/                 new C++ tests for lib/msp430 and the vendor hook
 ```
@@ -138,7 +140,7 @@ on. `sbw.pio` is assembled by `scripts/gen_pio.sh` into a generated header,
 exactly like `probe.pio`; opcodes are never hand-edited.
 
 The driver also provides what the entry sequence needs: static levels on both
-pins, and a single SBWTCK low pulse of about 0.9 µs. Both are produced by
+pins, and a single SBWTCK low pulse of about 0.7–0.9 µs. Both are produced by
 executing single instructions on the stopped state machine; the pulse runs
 from RAM with interrupts locked, so its width does not depend on the flash
 cache.
@@ -197,10 +199,10 @@ SBW reuses the SWD pins:
 | SBWTDIO ↔ target RST | GP3 (SWDIO) | GP14 out, GP13 in |
 
 - **Mux switching.** An SBW session applies the SBW pinctrl state (PIO1); an
-  SWD connect applies the SWD state (PIO0). `swdp_pio.c` currently applies its
-  pinctrl state only on the first `port_on`; it changes to re-apply on every
-  `port_on`.
-- **Mutual exclusion.** A small pin-ownership arbiter in `src/msp430/` tracks
+  SWD connect applies the SWD state (PIO0). `swdp_pio.c` re-applies its
+  pinctrl state on every `port_on` (before this feature it did so only on the
+  first).
+- **Mutual exclusion.** A small pin-ownership arbiter (`src/pin_owner.*`) tracks
   the owner (none, SWD, SBW). SBW `CONNECT` while SWD is connected returns
   `BUSY`. `DAP_Connect` while an SBW session is open force-closes the SBW
   session first, so a crashed SBW tool cannot lock out openocd. All requests
@@ -211,8 +213,8 @@ SBW reuses the SWD pins:
   arbiter runs a hook that releases the pins the SWD driver would otherwise
   leave driven. At boot the
   SBW driver applies its pinctrl state, which puts a **pull-up on the
-  SWDIO/SBWTDIO pin**. Today that pin has the RP2040 reset-default pull-down
-  until the first SWD connect. Without the change, the pull-down (50–80 kΩ)
+  SWDIO/SBWTDIO pin**. Before this feature that pin had the RP2040 reset-default pull-down
+  until the first SWD connect. That pull-down (50–80 kΩ)
   and the target's 47 kΩ RST pull-up form a divider that holds RST at
   1.7–2.1 V, which can keep an attached MSP430 in reset. A pull-up on SWDIO is
   harmless for SWD targets.
@@ -269,8 +271,8 @@ A port of `JTAGfunc430Xv2.c`, written against `Tap`:
 |---|---|
 | `connect(mode)` | `GetCoreID` (one attempt), `IsLockKeyProgrammed`, `GetCoreipIdXv2`, `SyncJtag_AssertPor` → `ExecutePOR_430Xv2` (includes watchdog hold), then read the device ID at `DeviceIdPointer + 4` |
 | `disconnect()` | `ReleaseDevice_430Xv2(V_RESET)`, then release the pins |
-| `read_words` | `ReadMemQuick_430Xv2` |
-| `write_words` | `WriteMemQuick_430Xv2` (RAM and peripherals only) |
+| `read_mem` | `ReadMemQuick_430Xv2`, plus a final JTAG-control check |
+| `write_mem` | `WriteMemQuick_430Xv2` (RAM and peripherals only), plus a final JTAG-control check |
 | `erase(mode, addr)` | `EraseFLASH_430Xv2` with the `FlashErase_o` funclet |
 | `flash_begin/data/end` | `WriteFLASH_430Xv2` with the `FlashWrite_o` funclet, split into three steps |
 
@@ -305,7 +307,13 @@ Details that matter:
   while a write is active; `connect` and `disconnect` clear the state.
 - **Memory transfers end with a check.** `read_mem` and `write_mem` finish by
   confirming the CPU is still under JTAG control. A link that dies mid-transfer
-  is reported as `TargetError` instead of returning zeroed data.
+  is reported as `TargetError` instead of returning made-up data.
+- **The link check uses the JTAG ID.** Every IR scan captures the JTAG ID. The
+  full-emulation-state check and every mailbox access require it to be `0x91`,
+  so a data line that reads constantly low (probe fault) or constantly high
+  (wire off, pull-up wins) is detected. Checking only the control-signal bits,
+  as TI does, would accept an all-ones line, and all-ones data looks like
+  erased flash.
 - **A failed cleanup outranks the operation's result.** If the re-sync after a
   funclet fails, the operation returns `TargetError` whatever it would have
   returned, and the RAM overwrite is skipped (the CPU may be running).
@@ -439,7 +447,9 @@ The probe is found the same way `tools/conformance` does it (VID `2E8A`, PID
 | `info` | connect, print JTAG ID, core ID, device ID and the matched device |
 | `flash IMAGE [--erase main\|segments\|none] [--no-verify]` | erase, program, verify, reset |
 | `erase [--segment ADDR]` | erase all main memory, or one segment |
-| `read ADDR LEN -o FILE` | dump memory to `.hex` or `.bin` |
+| `read ADDR LEN -o FILE [--force]` | dump memory to `.hex` or `.bin`; never replaces an existing file without `--force`; writes the file only after the whole read succeeded; prints the SHA-256 of the data |
+| `selftest` | write known data to the target's RAM and read it back; re-read the device ID inside a block. Flash is not touched |
+| `trial --backup FILE` | check the target against the backup, program and verify a test pattern in one segment that is blank in the backup, erase it again, check the target against the backup again |
 | `verify IMAGE` | compare flash contents with an image |
 | `reset` | connect and disconnect |
 
@@ -523,7 +533,7 @@ implementation and roughly halves these times.
 
 ## Testing and Acceptance
 
-As built: 186 C++ host tests and 117 Python tests. Beyond the tests listed
+As built: 192 C++ host tests and 139 Python tests. Beyond the tests listed
 below, the reviews compared `SbwTap` and `Cpuxv2` mechanically with TI's
 reference source, simulated the PIO program tick by tick from its generated
 opcodes, fuzzed `Session` under ASan/UBSan, and ran mutation passes over
@@ -544,21 +554,25 @@ opcodes, fuzzed `Session` under ASan/UBSan, and ran mutation passes over
    and write planning, the flash flow against a fake probe including failures.
 3. **Build.** All three boards build with the feature enabled; rpi_pico also
    builds with it disabled, and that image contains no SBW code.
-4. **On-target acceptance (Pico + the F5529 board), non-destructive steps
-   first.**
-   1. No target attached: `info` fails cleanly with "no target".
-   2. Target attached: `info` reports JTAG ID `0x91` and the F5529 device ID.
-   3. **Back up before erasing anything:**
-      `read 0x4400 0x20000 -o main.hex` and `read 0x1800 0x200 -o info.hex`.
-      The board's existing firmware cannot be recovered any other way.
-   4. `flash` the user's firmware (or the backup): verify passes and the board
+4. **On-target acceptance (Pico + the F5529 board).** Nothing before the
+   last two steps changes the firmware on the board.
+   1. No target attached: `info` fails cleanly with "no MSP430 found".
+   2. Target attached: `info` reports JTAG ID `0x91` and device ID bytes
+      `55h 29h`. Any other ID is a hard stop: the read path is suspect, and
+      the device table must not be edited to make it pass.
+   3. `selftest`: RAM round trip and device-ID re-read.
+   4. Two backups of main flash at different speeds into different files,
+      identical; a copy of the information memory.
+   5. `trial --backup`: erase, program, verify and erase one blank segment,
+      with the rest of main flash compared against the backup before and after.
+   6. `flash` the user's firmware (or the backup): verify passes and the board
       runs.
-   5. 50 connect/disconnect cycles; repeat step 4 at 250, 500 and 1000 kHz.
-   6. Regression: `tools/conformance` compare still passes; the openocd
-      acceptance flow against an RP2040 target still passes after SBW
-      sessions (pin mux hand-over in both directions).
+   7. 50 connect/disconnect cycles; repeat step 6 at 250, 500 and 1000 kHz.
+   8. Regression: `tools/conformance` compare still passes; the openocd
+      acceptance flow against an RP2040 target still passes before and after
+      SBW sessions (pin mux hand-over in both directions).
 
-   Steps 2–5 need the F5529 board on the probe. `docs/PROJECT_STATUS.md`
+   Steps 2–7 need the F5529 board on the probe. `docs/PROJECT_STATUS.md`
    records which steps were actually run.
 
 Documentation delivered with the implementation: `docs/MSP430_SBW.md` (wiring,

@@ -160,26 +160,33 @@ host tool (`tools/msp430/sbw.py`). Design:
 
 | Axis | Status |
 |---|---|
-| Host tests | 186/186 C++ (`scripts/run_host_tests.sh`, also under ASan); 117/117 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
+| Host tests | 192/192 C++ (`scripts/run_host_tests.sh`, also under ASan); 139/139 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
 | 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe build with the feature on; rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n` (no SBW code in that image) |
 | On-target hardware | **Not run yet** — see the acceptance table below |
 
-What the host-side verification covers: the JTAG cycle sequences and the
-CPUXv2 device sequences were compared mechanically with TI's reference code;
-the PIO program was simulated tick by tick from its generated opcodes (event
-order as TI's macros, low phase at most 5 µs, no wait with the clock low); the
-command parser was fuzzed under ASan/UBSan. None of it has run on a target.
+What the host-side verification covers. During the code reviews (with
+throwaway harnesses that are not in the repository) the JTAG cycle sequences
+and the CPUXv2 device sequences were compared mechanically with TI's reference
+code; the PIO program was simulated tick by tick from its generated opcodes
+(event order as TI's macros, low phase at most 5 µs, no wait with the clock
+low); the command parser was fuzzed under ASan/UBSan. None of it has run on a
+target.
 
 ### Phase 6 hardware acceptance (rpi_pico + MSP430F5529 board)
+
+The procedure is "First use on a board" in `docs/MSP430_SBW.md`. Nothing
+before step 6 changes the firmware on the board.
 
 | # | Step | Result |
 |---|---|---|
 | 1 | `info` without a target reports "no MSP430 found" | — |
-| 2 | `info` reports JTAG ID 0x91 and the F5529 device ID | — |
-| 3 | Back up main flash and info memory with `read`; two reads identical | — |
-| 4 | `flash` an image: verify passes, target runs | — |
-| 5 | 50 connect/disconnect cycles; flash at 250 / 500 / 1000 kHz | — |
-| 6 | SWD regression: conformance compare and openocd acceptance, before and after SBW sessions | — |
+| 2 | `info` reports JTAG ID 0x91 and device ID bytes 55h 29h (anything else: stop) | — |
+| 3 | `selftest` passes | — |
+| 4 | Two backups of main flash at 250 and 100 kHz are identical; info memory saved | — |
+| 5 | `trial --backup` passes | — |
+| 6 | `flash` an image: verify passes, target runs | — |
+| 7 | 50 connect/disconnect cycles; flash at 250 / 500 / 1000 kHz | — |
+| 8 | SWD regression: conformance compare and openocd acceptance, before and after SBW sessions | — |
 
 Things to look at during bring-up, from the code reviews:
 
