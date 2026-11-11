@@ -2,6 +2,7 @@
 #include "fake_tap.hpp"
 #include "msp430/cpuxv2.hpp"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -102,4 +103,156 @@ TEST(cpuxv2_read_mem_needs_full_emulation_state)
 	uint8_t out[2] = {};
 	CHECK(cpu.read_mem(0x2400, 1, out) == Status::TargetError);
 	CHECK_LOG(t.log, (Log{"ir:28", "dr16:0000"}));
+}
+
+namespace {
+
+/* ExecutePOR_430Xv2, including the watchdog hold and the final state check. */
+Log por_log()
+{
+	Log l = {"ir:28", "tclk:0", "tclk:1", "ir:c8", "dr16:0c01", "dr16:0401"};
+	for (int i = 0; i < 5; ++i) {
+		l.push_back("tclk:0");
+		l.push_back("tclk:1");
+	}
+	l = l + Log{"ir:c8", "dr16:0501", "tclk:0", "tclk:1"};
+	return l + write_word_log("0015c", "5a80") + Log{"ir:28", "dr16:0000"};
+}
+
+/* SyncJtag_AssertPor with the sync bit already set on the first poll. */
+Log sync_por_log()
+{
+	return Log{"ir:c8", "dr16:1501", "ir:28", "dr16:0000"} + por_log();
+}
+
+bool contains(const Log &log, const Log &sub)
+{
+	if (sub.empty() || sub.size() > log.size()) {
+		return false;
+	}
+	for (size_t i = 0; i + sub.size() <= log.size(); ++i) {
+		if (std::equal(sub.begin(), sub.end(), log.begin() + static_cast<long>(i))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+} // namespace
+
+TEST(cpuxv2_connect_follows_ti_getdevice)
+{
+	FakeTap t;
+	t.quick_words = {0x2955};
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) == Status::Ok);
+	CHECK_EQ(id.jtag_id, 0x91);
+	CHECK_EQ(id.core_id, 0x0106);
+	CHECK_EQ(id.device_id_ptr, 0x1A00u);
+	CHECK_EQ(id.device_id, 0x2955);
+
+	const Log want =
+		Log{"speed:250000", "open", "enter:high", "ir:28",
+		    /* IsLockKeyProgrammed: three tries */
+		    "ir:28", "dr16:aaaa", "ir:28", "dr16:aaaa", "ir:28", "dr16:aaaa",
+		    /* GetCoreipIdXv2 */
+		    "ir:e8", "dr16:0000", "ir:e1", "dr20:00000"} +
+		sync_por_log() +
+		/* ReadMemQuick(DeviceIdPointer + 4, 1) */
+		set_pc_log("0080", "1a04") +
+		Log{"tclk:1", "ir:c8", "dr16:0501", "ir:21", "ir:c2",
+		    "tclk:1", "tclk:0", "dr16:0000", "tclk:1"};
+	CHECK_LOG(t.log, want);
+}
+
+TEST(cpuxv2_connect_reports_no_target_with_the_id_read)
+{
+	FakeTap t;
+	t.jtag_id = 0xFF; /* data line stuck high: nothing connected */
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) == Status::NoTarget);
+	CHECK_EQ(id.jtag_id, 0xFF);
+	CHECK_LOG(t.log, (Log{"speed:250000", "open", "enter:high", "ir:28", "close"}));
+}
+
+TEST(cpuxv2_connect_busy_when_pins_unavailable)
+{
+	FakeTap t;
+	t.open_ok = false;
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) == Status::Busy);
+	CHECK_LOG(t.log, (Log{"speed:250000", "open"}));
+}
+
+TEST(cpuxv2_connect_refuses_locked_device)
+{
+	FakeTap t;
+	t.cntrl_sig_script = {0x5555};
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) == Status::Locked);
+	REQUIRE(!t.log.empty());
+	CHECK(t.log.back() == "close");
+}
+
+TEST(cpuxv2_connect_fails_when_sync_never_arrives)
+{
+	FakeTap t;
+	t.cntrl_sig = 0x0101; /* sync bit 0x0200 never set */
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) == Status::TargetError);
+	REQUIRE(!t.log.empty());
+	CHECK(t.log.back() == "close");
+	/* 50 sync polls after the 0x1501 write */
+	size_t polls = 0;
+	bool after_sync_cmd = false;
+	for (const auto &s : t.log) {
+		if (s == "dr16:1501") {
+			after_sync_cmd = true;
+		} else if (after_sync_cmd && s == "dr16:0000") {
+			++polls;
+		}
+	}
+	CHECK_EQ(polls, 50u);
+}
+
+TEST(cpuxv2_connect_magic_pattern_entry)
+{
+	FakeTap t;
+	t.quick_words = {0x2955};
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::MagicPattern, 250000, id) == Status::Ok);
+	/* magicPattern(): RST-low entry, feed 0xA55A to the mailbox, RST-high
+	 * entry, read the ID, reset the LPMx.5 I/O lock. */
+	const Log head = {"speed:250000", "open", "enter:low",
+			  "ir:86", "dr16:0000", "dr16:0001", "dr16:a55a",
+			  "enter:high", "ir:28", "ir:f4", "dr16:4020"};
+	REQUIRE(t.log.size() > head.size());
+	CHECK_LOG(Log(t.log.begin(), t.log.begin() + static_cast<long>(head.size())), head);
+}
+
+TEST(cpuxv2_connect_magic_pattern_without_mailbox_is_no_target)
+{
+	FakeTap t;
+	t.jmb_default = 0; /* mailbox input never ready */
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::MagicPattern, 250000, id) == Status::NoTarget);
+	CHECK_EQ(id.jtag_id, 0);
+	REQUIRE(!t.log.empty());
+	CHECK(t.log.back() == "close");
+}
+
+TEST(cpuxv2_disconnect_resets_and_releases)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	cpu.disconnect();
+	/* ReleaseDevice_430Xv2(V_RESET), then the pins */
+	CHECK_LOG(t.log, (Log{"ir:c8", "dr16:0c01", "dr16:0401", "ir:a8", "close"}));
 }
