@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Regenerate drivers/dp_pio/probe_pio.h from the .pio sources using pioasm.
+# Regenerate the PIO opcode headers from the .pio sources using pioasm:
+#   drivers/dp_pio/probe_pio.h, drivers/dp_pio/autobaud_pio.h and
+#   drivers/sbw_pio/sbw_pio_program.h
 #
 # The PIO opcodes MUST come out of pioasm (the proven assembler), never by hand.
 # This is the parity guarantee for timing-critical code we cannot test on

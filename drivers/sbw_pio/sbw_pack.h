@@ -13,7 +13,9 @@
 #define SBW_MAX_CYCLES 32U
 
 /* Pack cycles [first, first + n) of the per-cycle bit vectors into one word.
- * n must be 1..SBW_CYCLES_PER_WORD. */
+ * Preconditions: n must be 1..SBW_CYCLES_PER_WORD and first + n must not
+ * exceed 32. Outside that range the result is undefined (n = 0 would even
+ * encode 16 cycles). */
 static inline uint32_t sbw_pack_word(uint32_t tms, uint32_t mid, uint32_t tdi,
 				     unsigned int first, unsigned int n)
 {

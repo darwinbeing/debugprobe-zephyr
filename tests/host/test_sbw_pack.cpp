@@ -33,3 +33,24 @@ TEST(sbw_pack_constants)
 	CHECK_EQ(SBW_CYCLES_PER_WORD, 9u);
 	CHECK_EQ(SBW_MAX_CYCLES, 32u);
 }
+
+TEST(sbw_pack_nine_cycles_all_ones_uses_31_bits)
+{
+	/* count field 8, then 27 one-bits: bit 31 stays clear */
+	CHECK_EQ(sbw_pack_word(0x1FF, 0x1FF, 0x1FF, 0, 9), 0x7FFFFFF8u);
+}
+
+TEST(sbw_pack_window_ending_at_bit_31)
+{
+	/* cycles 27..31; only cycle 31 has TMS and TDI set -> bits 0b101 at
+	 * position 4 + 3*4 = 16; count field 4 */
+	CHECK_EQ(sbw_pack_word(0x80000000u, 0x0u, 0x80000000u, 27, 5), 0x00050004u);
+}
+
+TEST(sbw_pack_ignores_bits_outside_the_window)
+{
+	/* cycles 4..6 of all-ones vectors: three cycles of 0b111, count field 2 */
+	CHECK_EQ(sbw_pack_word(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 4, 3), 0x00001FF2u);
+	/* the same window of all-zero vectors */
+	CHECK_EQ(sbw_pack_word(0x0u, 0x0u, 0x0u, 4, 3), 0x00000002u);
+}

@@ -10,7 +10,9 @@
 ; One RX word per command: the TDO samples, shifted in from the MSB side.
 ;
 ; Waveform, after the TMSH/TMSL/TMSLDH/TDIH/TDIL/TDO_RD macros in TI slau320
-; LowLevelFunc430Xv2.h. One slot is 8 state-machine ticks, 4 high and 4 low.
+; LowLevelFunc430Xv2.h. One slot is 8 state-machine ticks, 4 high and 4 low;
+; handing the line back after the TDO slot adds 4 high ticks, so one JTAG cycle
+; is 28 ticks, and each command adds 3 more (push, pull, out x).
 ; The machine only ever waits (pull, push) with SBWTCK high: a low phase
 ; longer than about 7 us resets the target's SBW logic.
 ;
