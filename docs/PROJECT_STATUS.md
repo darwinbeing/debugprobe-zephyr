@@ -148,6 +148,53 @@ check the available hardware allows (see the note below the table):
 
 ---
 
+## Phase 6 — MSP430F5529 Spy-Bi-Wire flash programming
+
+**Implemented:** PIO SBW transport on PIO1 (`drivers/sbw_pio`), pure C++ JTAG /
+CPUXv2 / vendor-command library (`lib/msp430`, port of TI SLAU320
+Replicator430Xv2), vendor-command hook in the DAP engine, SWD/SBW pin
+ownership with the pins returned to high-impedance after every session, Python
+host tool (`tools/msp430/sbw.py`). Design:
+`docs/superpowers/specs/2026-11-11-msp430-sbw-design.md`; user guide:
+`docs/MSP430_SBW.md`.
+
+| Axis | Status |
+|---|---|
+| Host tests | 186/186 C++ (`scripts/run_host_tests.sh`, also under ASan); 117/117 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
+| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe build with the feature on; rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n` (no SBW code in that image) |
+| On-target hardware | **Not run yet** — see the acceptance table below |
+
+What the host-side verification covers: the JTAG cycle sequences and the
+CPUXv2 device sequences were compared mechanically with TI's reference code;
+the PIO program was simulated tick by tick from its generated opcodes (event
+order as TI's macros, low phase at most 5 µs, no wait with the clock low); the
+command parser was fuzzed under ASan/UBSan. None of it has run on a target.
+
+### Phase 6 hardware acceptance (rpi_pico + MSP430F5529 board)
+
+| # | Step | Result |
+|---|---|---|
+| 1 | `info` without a target reports "no MSP430 found" | — |
+| 2 | `info` reports JTAG ID 0x91 and the F5529 device ID | — |
+| 3 | Back up main flash and info memory with `read`; two reads identical | — |
+| 4 | `flash` an image: verify passes, target runs | — |
+| 5 | 50 connect/disconnect cycles; flash at 250 / 500 / 1000 kHz | — |
+| 6 | SWD regression: conformance compare and openocd acceptance, before and after SBW sessions | — |
+
+Things to look at during bring-up, from the code reviews:
+
+- Scope the entry pulse on SBWTCK (expected about 0.7–0.9 µs low) and confirm
+  there is no extra edge on SBWTCK when the first JTAG cycle starts.
+- Idle levels at boot and after a command: SBWTCK low through the pull-down,
+  SBWTDIO/RST high. On a Pico 2 (RP2350 A2) check that SBWTCK really reaches 0 V.
+- After an SWD `DAP_Disconnect` both pins must be high-impedance.
+- At 1 MHz the tightest margins are the data-line setup before the TMS slot's
+  rising edge (125 ns) and TDO settling (375 ns); start at 250 kHz.
+- Run once with `CONFIG_THREAD_ANALYZER=y` and read the USB thread's stack peak
+  (static worst case: about 1.2 KB of 2 KB).
+
+---
+
 ## Verified on hardware vs pending
 
 ### Verified on hardware
