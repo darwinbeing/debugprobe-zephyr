@@ -68,11 +68,15 @@ jobs:
           mkdir -p out
           cp build/zephyr/zephyr.uf2 \
             "out/debugprobe-${{ matrix.slug }}-${{ inputs.version }}.uf2"
+          # BSD-3-Clause code from TI is in the binary: ship its notice with it.
+          cp debugprobe-zephyr/THIRD_PARTY_NOTICES.md out/
 
       - uses: actions/upload-artifact@v4
         with:
           name: uf2-${{ matrix.slug }}
-          path: out/*.uf2
+          path: |
+            out/*.uf2
+            out/THIRD_PARTY_NOTICES.md
           if-no-files-found: error
 
   # Collect every board's .uf2 and publish a GitHub Release at the given tag.
@@ -93,4 +97,6 @@ jobs:
           name: ${{ inputs.version }}
           prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true
-          files: dist/*.uf2
+          files: |
+            dist/*.uf2
+            dist/THIRD_PARTY_NOTICES.md
