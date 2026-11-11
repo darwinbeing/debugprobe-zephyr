@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import devices  # noqa: E402
 import flasher  # noqa: E402
-from fake_firmware import FakeFirmware  # noqa: E402
+from fake_firmware import BUSY, LOCKED, TIMEOUT, FakeFirmware  # noqa: E402
 from flasher import FlashError  # noqa: E402
 from image import Segment  # noqa: E402
 from probe import SbwProbe  # noqa: E402
@@ -61,6 +61,36 @@ class OpenSessionTest(unittest.TestCase):
         fw = FakeFirmware(device_id=0x1234)
         with self.assertRaisesRegex(FlashError, "34h 12h"):
             flasher.open_session(SbwProbe(fw), 250)
+        # open_session leaves the session open; closing it is the caller's job
+        self.assertEqual(fw.state, 1)
+
+
+class OpenSessionRefusalTest(unittest.TestCase):
+    def test_locked_device(self):
+        fw = FakeFirmware()
+        fw.connect_status = LOCKED
+        with self.assertRaisesRegex(FlashError, "lock key"):
+            flasher.open_session(SbwProbe(fw), 250)
+        self.assertEqual(len(fw.connects), 1)
+
+    def test_busy_swd_port(self):
+        fw = FakeFirmware()
+        fw.connect_status = BUSY
+        with self.assertRaisesRegex(FlashError, "SWD"):
+            flasher.open_session(SbwProbe(fw), 250)
+        self.assertEqual(len(fw.connects), 1)
+
+    def test_protocol_version_2(self):
+        fw = FakeFirmware(version=2)
+        with self.assertRaisesRegex(FlashError, "version 2"):
+            flasher.open_session(SbwProbe(fw), 250)
+        self.assertEqual(fw.connects, [])
+
+    def test_firmware_without_cpuxv2_flash(self):
+        fw = FakeFirmware(features=0)
+        with self.assertRaisesRegex(FlashError, "does not support MSP430 CPUXv2"):
+            flasher.open_session(SbwProbe(fw), 250)
+        self.assertEqual(fw.connects, [])
 
 
 class ValidateTest(unittest.TestCase):
@@ -140,6 +170,52 @@ class ProgramTest(unittest.TestCase):
         fw.fail_flash_after = 150  # words
         with self.assertRaisesRegex(FlashError, "programming failed at 0x044BA.*TIMEOUT"):
             flasher.program(probe, F5529, [Segment(0x4400, b"\x55" * 800)])
+
+    def test_erase_failure_stops_before_writing(self):
+        fw, probe = session()
+        fw.fail_op = {5: TIMEOUT}
+        with self.assertRaisesRegex(FlashError, "erase at 0x04400 failed"):
+            flasher.program(probe, F5529, [Segment(0x4400, b"\x55" * 8)])
+        self.assertEqual([op for op in fw.ops if op[0] == "begin"], [])
+
+    def test_flash_begin_failure(self):
+        fw, probe = session()
+        fw.fail_op = {6: TIMEOUT}
+        with self.assertRaisesRegex(FlashError, "programming failed at 0x"):
+            flasher.program(probe, F5529, [Segment(0x4400, b"\x55" * 8)])
+
+    def test_flash_end_failure(self):
+        fw, probe = session()
+        fw.fail_op = {8: TIMEOUT}
+        with self.assertRaisesRegex(FlashError, "programming failed at 0x"):
+            flasher.program(probe, F5529, [Segment(0x4400, b"\x55" * 8)])
+
+    def test_tail_chunk_that_would_end_a_packet_is_split(self):
+        fw, probe = session()
+        data = bytes(range(248))  # 124 words
+        flasher.program(probe, F5529, [Segment(0x4400, data)])
+        self.assertEqual(fw.data_chunks, [93, 30, 1])
+        self.assertEqual(bytes(fw.mem[0x4400 + i] for i in range(248)), data)
+
+    def test_verify_ignores_padding(self):
+        fw, probe = session()
+        fw.mem = {0x4400: 0x12}
+        written = flasher.program(probe, F5529, [Segment(0x4401, b"\xAA")], erase="none")
+        self.assertEqual(written, 2)
+        self.assertEqual((fw.mem[0x4400], fw.mem[0x4401]), (0x12, 0xAA))
+
+    def test_verify_segments_accepts_unaligned_segments(self):
+        fw, probe = session()
+        fw.mem = {0x4401: 0xAA, 0x4402: 0xBB, 0x4403: 0xCC}
+        flasher.verify_segments(probe, [Segment(0x4401, b"\xAA\xBB\xCC")])
+        with self.assertRaisesRegex(FlashError, "verify failed at 0x04402: read 0xBB, expected 0xBC"):
+            flasher.verify_segments(probe, [Segment(0x4401, b"\xAA\xBC\xCC")])
+
+    def test_empty_image(self):
+        fw, probe = session()
+        with self.assertRaisesRegex(FlashError, "contains no data"):
+            flasher.program(probe, F5529, [])
+        self.assertEqual([op for op in fw.ops if op[0] in ("erase", "begin")], [])
 
     def test_progress_callback(self):
         fw, probe = session()

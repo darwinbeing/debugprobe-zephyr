@@ -23,13 +23,26 @@ from image import ImageError, Segment
 from probe import ProbeError, SbwProbe
 
 
+ADDR_LIMIT = 0x100000  # 20-bit address space
+
+
 def _int(text: str) -> int:
     return int(text, 0)
 
 
+def _speed(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid speed {text!r}") from None
+    if not 100 <= value <= 1000:
+        raise argparse.ArgumentTypeError("must be between 100 and 1000 kHz")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sbw.py", description="MSP430F5529 Spy-Bi-Wire programmer")
-    p.add_argument("--speed", type=int, default=250, metavar="KHZ",
+    p.add_argument("--speed", type=_speed, default=250, metavar="KHZ",
                    help="SBW clock in kHz, 100-1000 (default 250)")
     p.add_argument("--serial", help="USB serial number of the probe")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -59,27 +72,58 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
-def _progress(out):
-    def show(done: int, total: int) -> None:
-        out.write(f"\rprogramming {done}/{total} bytes")
-        out.flush()
-    return show
+class _Progress:
+    """The 'programming N/M bytes' line; finish() ends it with a newline if one is open."""
+
+    def __init__(self, out):
+        self._out = out
+        self._open = False
+
+    def __call__(self, done: int, total: int) -> None:
+        self._out.write(f"\rprogramming {done}/{total} bytes")
+        self._out.flush()
+        self._open = True
+
+    def finish(self) -> None:
+        if self._open:
+            self._out.write("\n")
+            self._open = False
 
 
-def _run(args, probe: SbwProbe, out) -> None:
-    if not 100 <= args.speed <= 1000:
-        raise FlashError("--speed must be between 100 and 1000 kHz")
-    identity, device = flasher.open_session(probe, args.speed)
+def _load_image(path: str) -> list[Segment]:
+    segments = image.load(path)
+    if not any(seg.data for seg in segments):
+        raise FlashError(f"{path}: the image contains no data")
+    return segments
+
+
+def _prepare(args):
+    """Everything that can fail without the probe; returns the image, if the command has one."""
+    if args.cmd in ("flash", "verify"):
+        return _load_image(args.image)
+    if args.cmd == "read":
+        if args.addr & 1 or args.length <= 0:
+            raise FlashError("the address must be even and the length positive")
+        if args.addr + args.length > ADDR_LIMIT:
+            raise FlashError(f"0x{args.addr:05X} + {args.length} bytes runs past the end of "
+                             f"the address space (0x{ADDR_LIMIT:05X})")
+    return None
+
+
+def _run(args, probe: SbwProbe, out, segments) -> None:
     try:
+        identity, device = flasher.open_session(probe, args.speed)
         out.write(f"{device.name}: JTAG ID 0x{identity.jtag_id:02X}, core ID "
                   f"0x{identity.core_id:04X}, device ID bytes {identity.device_id & 0xFF:02X}h "
                   f"{identity.device_id >> 8:02X}h\n")
         if args.cmd == "flash":
-            segments = image.load(args.image)
-            flasher.program(probe, device, segments, erase=args.erase,
-                            verify=not args.no_verify, progress=_progress(out))
-            size = sum(len(s.data) for s in segments)
-            out.write(f"\nprogrammed {size} bytes" +
+            progress = _Progress(out)
+            try:
+                written = flasher.program(probe, device, segments, erase=args.erase,
+                                          verify=not args.no_verify, progress=progress)
+            finally:
+                progress.finish()
+            out.write(f"programmed {written} bytes" +
                       ("" if args.no_verify else ", verified") + "\n")
         elif args.cmd == "erase":
             if args.segment is None:
@@ -92,34 +136,42 @@ def _run(args, probe: SbwProbe, out) -> None:
                 probe.erase(probe_mod.ERASE_SEGMENT, base, device.ram_start)
                 out.write(f"erased the segment at 0x{base:05X}\n")
         elif args.cmd == "read":
-            if args.addr & 1 or args.length <= 0:
-                raise FlashError("the address must be even and the length positive")
             data = probe.read_mem(args.addr, (args.length + 1) // 2)[:args.length]
             image.save(args.out, [Segment(args.addr, data)])
             out.write(f"read {len(data)} bytes from 0x{args.addr:05X} into {args.out}\n")
         elif args.cmd == "verify":
-            segments = image.pad_to_words(image.load(args.image))
             flasher.verify_segments(probe, segments)
             out.write("verified\n")
         # "info" and "reset" need nothing more: the session itself resets the target.
     finally:
+        # Always release the target (it is halted once CONNECT succeeded).
         try:
             probe.disconnect()
-        except ProbeError:
+        except (ProbeError, OSError):
             pass
 
 
 def main(argv=None, transport=None, out=sys.stdout, err=sys.stderr) -> int:
     args = _parser().parse_args(argv)
     try:
+        segments = _prepare(args)
         t = transport if transport is not None else probe_mod.UsbTransport(args.serial)
         try:
-            _run(args, SbwProbe(t), out)
+            _run(args, SbwProbe(t), out, segments)
         finally:
-            t.close()
+            try:
+                t.close()
+            except (ProbeError, OSError):
+                pass
     except (ProbeError, FlashError, ImageError, OSError) as e:
         err.write(f"error: {e}\n")
         return 1
+    except KeyboardInterrupt:
+        if args.cmd in ("flash", "erase"):
+            err.write("interrupted; the target's flash may be partially erased or programmed\n")
+        else:
+            err.write("interrupted\n")
+        return 130
     return 0
 
 

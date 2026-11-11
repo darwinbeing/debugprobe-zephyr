@@ -1,7 +1,12 @@
 """Firmware image files: Intel HEX and TI-TXT readers, Intel HEX and raw writers."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+CTRL_Z = "\x1a"  # some tools append it as an end-of-file mark
+_HEX_BYTE = re.compile(r"[0-9A-Fa-f]{2}")
+_HEX_ADDR = re.compile(r"[0-9A-Fa-f]{1,8}")
 
 
 class ImageError(Exception):
@@ -49,7 +54,7 @@ def parse_ihex(text: str) -> list[Segment]:
     eof = False
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
-        if not line:
+        if not line or line == CTRL_Z:
             continue
         if eof:
             raise ImageError(f"line {lineno}: data after the end-of-file record")
@@ -90,20 +95,23 @@ def parse_titxt(text: str) -> list[Segment]:
     done = False
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
-        if not line:
+        if not line or line == CTRL_Z:
             continue
         if done:
             raise ImageError(f"line {lineno}: data after the terminating 'q'")
         try:
             if line.startswith("@"):
-                addr = int(line[1:], 16)
+                text_addr = line[1:].strip()
+                if not _HEX_ADDR.fullmatch(text_addr):
+                    raise ValueError(text_addr)
+                addr = int(text_addr, 16)
             elif line.lower() == "q":
                 done = True
             else:
                 if addr is None:
                     raise ImageError(f"line {lineno}: data before the first @address")
                 for token in line.split():
-                    if len(token) != 2:
+                    if not _HEX_BYTE.fullmatch(token):
                         raise ValueError(token)
                     _store(byte_map, addr, int(token, 16), lineno)
                     addr += 1
@@ -116,7 +124,7 @@ def parse_titxt(text: str) -> list[Segment]:
 
 def load(path: str) -> list[Segment]:
     """Read an image; the format is detected from the first character."""
-    with open(path, "r", errors="replace") as f:
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:  # utf-8-sig drops a BOM
         text = f.read()
     first = text.lstrip()[:1]
     try:
@@ -146,12 +154,15 @@ def write_ihex(segments: list[Segment]) -> str:
     lines = []
     upper = 0
     for seg in segments:
-        for off in range(0, len(seg.data), 16):
+        off = 0
+        while off < len(seg.data):
             addr = seg.addr + off
             if addr >> 16 != upper:
                 upper = addr >> 16
                 lines.append(_record(0x04, 0, bytes([upper >> 8, upper & 0xFF])))
-            lines.append(_record(0x00, addr & 0xFFFF, seg.data[off:off + 16]))
+            n = min(16, len(seg.data) - off, 0x10000 - (addr & 0xFFFF))  # stay inside 64 KB
+            lines.append(_record(0x00, addr & 0xFFFF, seg.data[off:off + n]))
+            off += n
     lines.append(_record(0x01, 0, b""))
     return "\n".join(lines) + "\n"
 

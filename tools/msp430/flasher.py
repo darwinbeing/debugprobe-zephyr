@@ -23,6 +23,8 @@ def open_session(probe, speed_khz: int):
             f"probe speaks SBW protocol version {info.version}, this tool needs "
             f"version {probe_mod.PROTOCOL_VERSION}"
         )
+    if not info.features & probe_mod.FEATURE_CPUXV2_FLASH:
+        raise FlashError("the probe firmware does not support MSP430 CPUXv2 flash devices")
     probe.configure(speed_khz)
 
     attempts = [probe_mod.ENTRY_NORMAL] * NORMAL_ENTRY_TRIES + [probe_mod.ENTRY_MAGIC_PATTERN]
@@ -32,6 +34,10 @@ def open_session(probe, speed_khz: int):
             identity = probe.connect(speed_khz, mode)
             break
         except StatusError as e:
+            if e.status == probe_mod.STATUS_LOCKED:
+                raise FlashError(
+                    "the device's JTAG lock key is programmed; it cannot be read or programmed"
+                ) from None
             if e.status != probe_mod.STATUS_NO_TARGET:
                 raise FlashError(str(e)) from None
             last = e
@@ -110,8 +116,13 @@ def write_segments(probe, device, segments, progress=lambda done, total: None) -
 
 
 def verify_segments(probe, segments) -> None:
+    """Compare flash with the image; only the bytes the image contains are checked,
+    and the segments need not be word-aligned."""
     for seg in segments:
-        actual = probe.read_mem(seg.addr, len(seg.data) // 2)
+        start = seg.addr & ~1
+        words = (seg.end - start + 1) // 2
+        lead = seg.addr - start
+        actual = probe.read_mem(start, words)[lead:lead + len(seg.data)]
         if actual != seg.data:
             i = next(i for i, (a, b) in enumerate(zip(actual, seg.data)) if a != b)
             raise FlashError(
@@ -121,15 +132,19 @@ def verify_segments(probe, segments) -> None:
 
 
 def program(probe, device, segments, erase: str = "main", verify: bool = True,
-            progress=lambda done, total: None) -> None:
-    """Erase, write and verify. The session must be open."""
-    segments = image.pad_to_words(segments)
-    validate(device, segments)
-    for mode, addr in plan_erase(device, segments, erase):
+            progress=lambda done, total: None) -> int:
+    """Erase, write and verify. The session must be open. The image is padded to
+    whole words for writing but verified as given. Returns the bytes written."""
+    if not any(seg.data for seg in segments):
+        raise FlashError("the image contains no data")
+    padded = image.pad_to_words(segments)
+    validate(device, padded)
+    for mode, addr in plan_erase(device, padded, erase):
         try:
             probe.erase(mode, addr, device.ram_start)
         except StatusError as e:
             raise FlashError(f"erase at 0x{addr:05X} failed: {e}") from None
-    write_segments(probe, device, segments, progress)
+    write_segments(probe, device, padded, progress)
     if verify:
         verify_segments(probe, segments)
+    return sum(len(seg.data) for seg in padded)

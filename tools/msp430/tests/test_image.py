@@ -60,6 +60,51 @@ class TiTxtTest(unittest.TestCase):
             image.parse_titxt("01 02\nq\n")
 
 
+class TolerantReadingTest(unittest.TestCase):
+    def _load(self, raw: bytes):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "x.dat")
+            with open(path, "wb") as f:
+                f.write(raw)
+            return image.load(path)
+
+    def test_bom_and_ctrl_z_in_intel_hex(self):
+        want = [Segment(0x10, bytes([1, 2, 3, 4]))]
+        raw = b":0400100001020304E2\n:00000001FF\n"
+        self.assertEqual(self._load(b"\xef\xbb\xbf" + raw), want)
+        self.assertEqual(self._load(raw + b"\x1a\n"), want)
+        self.assertEqual(self._load(raw + b"\x1a"), want)
+
+    def test_bom_and_ctrl_z_in_titxt(self):
+        want = [Segment(0x10, bytes([1, 2, 3, 4]))]
+        raw = b"@0010\n01 02 03 04\nq\n"
+        self.assertEqual(self._load(b"\xef\xbb\xbf" + raw), want)
+        self.assertEqual(self._load(raw + b"\x1a\n"), want)
+        self.assertEqual(self._load(raw + b"\x1a"), want)
+
+    def test_titxt_tokens_must_be_plain_hex(self):
+        with self.assertRaisesRegex(ImageError, "line 2: not hexadecimal"):
+            image.parse_titxt("@4400\n+1 02\nq\n")
+        with self.assertRaisesRegex(ImageError, "line 1: not hexadecimal"):
+            image.parse_titxt("@-10\n01\nq\n")
+        with self.assertRaisesRegex(ImageError, "line 1: not hexadecimal"):
+            image.parse_titxt("@123456789\n01\nq\n")
+        with self.assertRaisesRegex(ImageError, "line 2: not hexadecimal"):
+            image.parse_titxt("@4400\n0x 02\nq\n")
+
+
+class WriteIhexTest(unittest.TestCase):
+    def test_records_do_not_cross_64k(self):
+        seg = Segment(0xFFF8, bytes(range(32)))
+        text = image.write_ihex([seg])
+        for line in text.splitlines():
+            rec = bytes.fromhex(line[1:])
+            if rec[3] == 0:
+                self.assertLessEqual(((rec[1] << 8) | rec[2]) + rec[0], 0x10000, line)
+        self.assertEqual(image.parse_ihex(text), [seg])
+        self.assertIn(":020000040001F9", text)
+
+
 class PaddingTest(unittest.TestCase):
     def test_odd_start_and_length(self):
         segs = image.pad_to_words([Segment(0x4401, bytes([1, 2, 3]))])
