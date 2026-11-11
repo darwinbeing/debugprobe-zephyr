@@ -147,6 +147,13 @@ void sbw_pio_release(const struct device *dev)
 	pio_sm_set_consecutive_pindirs(pio, d->sm, cfg->tdio_pin, 1, false);
 	pio_sm_set_consecutive_pindirs(pio, d->sm, cfg->tck_pin, 1, false);
 
+	/* The clock line was just released from high and decays through the
+	 * pull-down. Applying the pinctrl state briefly enables the pad input,
+	 * which on RP2350 A2 (erratum E9) could pull a line that is still
+	 * mid-transition back up and produce one more short pulse on TEST.
+	 * Waiting until it has settled avoids that. */
+	k_busy_wait(20);
+
 	/* Released = routed to this PIO, high-impedance, idle pulls active. */
 	ret = pinctrl_apply_state(cfg->pcfg, PINCTRL_STATE_DEFAULT);
 	if (ret < 0) {
@@ -248,6 +255,11 @@ int sbw_pio_cycles(const struct device *dev, uint32_t tms, uint32_t mid,
 
 		while (pio_sm_is_rx_fifo_empty(pio, d->sm)) {
 			if ((k_uptime_get_32() - t0) > SBW_RX_TIMEOUT_MS) {
+				/* Preemption between the two tests above can let the
+				 * machine finish: look once more before giving up. */
+				if (!pio_sm_is_rx_fifo_empty(pio, d->sm)) {
+					break;
+				}
 				LOG_ERR("RX timeout, releasing pins");
 				sbw_pio_release(dev);
 				return -ETIMEDOUT;

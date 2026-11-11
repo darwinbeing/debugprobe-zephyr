@@ -4,11 +4,11 @@
  */
 namespace probe::msp430_backend {
 
-/* Register the vendor command and the pin-ownership hook. Call once from
- * main(), before USB is started. */
+/* Register the vendor command, the two pin-ownership hooks and the
+ * transport-disabled hook. Call once from main(), before USB is started. */
 void init();
 
 /* Close an open SBW session and release the pins. Safe when idle. */
-void abort();
+void close_session();
 
 } // namespace probe::msp430_backend

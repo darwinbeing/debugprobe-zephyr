@@ -10,6 +10,7 @@ namespace probe {
 
 bool PioSbwPort::acquire()
 {
+	fault_ = false; /* a new session starts clean */
 	if (!device_is_ready(dev_) || !pin_owner::sbw_claim()) {
 		return false;
 	}
@@ -66,15 +67,21 @@ void PioSbwPort::tclk_cycle(bool was_high, bool level)
 }
 
 /* A driver error means the pins were not in the state the PIO program needs,
- * or the state machine did not answer; the driver has logged it. Report
- * all-zero TDO: every check in the JTAG layers above reads that as "no target"
- * or "not synchronized", so the session fails safely instead of acting on
- * garbage. */
+ * or the state machine did not answer; the driver has logged it once. From
+ * then on this port reports all-zero TDO without touching the driver again
+ * until the next acquire(). All-zero TDO makes every check in the JTAG layers
+ * fail (JTAG ID, full-emulation state, mailbox ready), and memory transfers
+ * end with such a check, so the command in progress ends with an error status
+ * and the session is closed. */
 uint32_t PioSbwPort::clock_cycles(uint32_t tms, uint32_t mid, uint32_t tdi, unsigned count)
 {
 	uint32_t tdo = 0;
 
+	if (fault_) {
+		return 0;
+	}
 	if (sbw_pio_cycles(dev_, tms, mid, tdi, count, &tdo) < 0) {
+		fault_ = true;
 		return 0;
 	}
 	return tdo;

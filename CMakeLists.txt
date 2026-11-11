@@ -12,7 +12,6 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(debugprobe_zephyr LANGUAGES C CXX)
 
 add_subdirectory(lib/dap)
-add_subdirectory(lib/msp430)
 
 target_sources(app PRIVATE
   src/main.cpp
@@ -39,6 +38,7 @@ endif()
 # MSP430 Spy-Bi-Wire programming (vendor command 0x90): glue between the PIO
 # driver in drivers/sbw_pio/, lib/msp430 and the DAP engine.
 if(CONFIG_PROBE_MSP430_SBW)
+  add_subdirectory(lib/msp430)
   target_sources(app PRIVATE
     src/msp430/pio_sbw_port.cpp
     src/msp430/msp430_backend.cpp

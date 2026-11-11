@@ -2,6 +2,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/logging/log.h>
 
 #include "dap/dap_backend.hpp"
 #include "dap/interfaces.hpp"
@@ -13,6 +14,8 @@
 #include "pin_owner.hpp"
 #include "sbw_pio.h"
 #include "usb/dap_class.hpp"
+
+LOG_MODULE_REGISTER(msp430_backend, LOG_LEVEL_INF);
 
 namespace probe::msp430_backend {
 
@@ -70,12 +73,17 @@ void restore_idle_pins()
 
 void init()
 {
-	pin_owner::set_sbw_force_close(abort);
+	if (!device_is_ready(DEVICE_DT_GET(DT_NODELABEL(sbw_pio)))) {
+		LOG_ERR("SBW PIO driver not ready; MSP430 support disabled");
+		return;
+	}
+	pin_owner::set_sbw_force_close(close_session);
 	pin_owner::set_idle_hook(restore_idle_pins);
+	dap_backend::set_transport_disabled_hook(close_session);
 	dap_backend::set_vendor_handler(&g_handler);
 }
 
-void abort()
+void close_session()
 {
 	g_session.abort();
 	g_handler.update_led();

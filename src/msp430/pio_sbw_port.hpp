@@ -26,6 +26,7 @@ private:
 	uint32_t clock_cycles(uint32_t tms, uint32_t mid, uint32_t tdi, unsigned count);
 
 	const struct device *dev_;
+	bool fault_ = false; /* a driver call failed; cleared by acquire() */
 };
 
 } // namespace probe

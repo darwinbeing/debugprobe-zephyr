@@ -28,4 +28,8 @@ void set_vendor_handler(dap::VendorHandler *handler);
 /* The DAP USB interface was disabled (bus reset, deconfiguration). */
 void on_transport_disabled();
 
+/* Called when the DAP USB interface is disabled, i.e. bus reset or
+ * deconfiguration; runs on the USB thread. */
+void set_transport_disabled_hook(void (*hook)());
+
 } // namespace probe::dap_backend

@@ -16,6 +16,7 @@ void fake_idle()
 /* Mimics the real hook: closing the SBW session releases the pins. */
 void fake_force_close()
 {
+	CHECK(pin_owner::sbw_owns()); /* the hook must run while SBW still holds the pins */
 	++g_force_closes;
 	pin_owner::sbw_release();
 }

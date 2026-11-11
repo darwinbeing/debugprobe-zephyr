@@ -11,10 +11,6 @@
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
 
-#if defined(CONFIG_PROBE_MSP430_SBW)
-#include "msp430/msp430_backend.hpp"
-#endif
-
 /* SWD backend selection (Kconfig PROBE_SWD_*):
  *   NULL    -> NullSwdDriver (no SWD; bring-up only)
  *   BITBANG -> ZephyrSwdpDriver over the zephyr,swdp-gpio device (swd_bitbang)
@@ -127,12 +123,20 @@ void set_vendor_handler(dap::VendorHandler *handler)
 	g_engine.set_vendor_handler(handler);
 }
 
+namespace {
+void (*g_transport_disabled_hook)() = nullptr;
+} // namespace
+
+void set_transport_disabled_hook(void (*hook)())
+{
+	g_transport_disabled_hook = hook;
+}
+
 void on_transport_disabled()
 {
-#if defined(CONFIG_PROBE_MSP430_SBW)
-	/* Do not leave a target under JTAG control when the host is gone. */
-	msp430_backend::abort();
-#endif
+	if (g_transport_disabled_hook != nullptr) {
+		g_transport_disabled_hook();
+	}
 }
 
 } // namespace dap_backend

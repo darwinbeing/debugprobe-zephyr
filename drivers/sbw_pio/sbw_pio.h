@@ -38,6 +38,7 @@ void sbw_pio_tck_pulse(const struct device *dev);
  * `tms`, except for TI's TMSLDH cycle (tms = 0, mid = 1), which keeps TCLK high.
  * On success returns 0 and stores the TDO samples in *tdo (bit i from cycle i);
  * SBWTCK is then high and SBWTDIO driven at the last TDI level.
+ * `tdo` must not be NULL.
  * Preconditions: the pins were acquired and SBWTCK is high (the entry
  * sequence ends that way). Errors (*tdo is set to 0):
  *   -EINVAL    count out of range
