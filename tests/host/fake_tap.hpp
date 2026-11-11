@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <deque>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -21,23 +22,24 @@ public:
 	uint16_t core_id = 0x0106;    /* DR under IR_COREIP_ID */
 	uint32_t device_id_ptr = 0x1A00; /* DR under IR_DEVICE_ID */
 	std::deque<uint16_t> quick_words; /* DR under IR_DATA_QUICK, default 0xFFFF */
-	std::deque<uint16_t> jmb_words;   /* DR under IR_JMB_EXCHANGE */
-	uint16_t jmb_default = msp430::kJmbIn0Rdy; /* input ready, no output */
+	std::deque<uint8_t> jtag_id_script;   /* consumed first, one per ir_shift */
+	bool jmb_in_ready = true;             /* IN0RDY in the mailbox status */
+	std::deque<uint32_t> jmb_out;         /* values the target has posted */
+	/* When set, replaces cntrl_sig once IR_CNTRL_SIG_RELEASE is shifted
+	 * (the CPU was released: sync may never come back). */
+	bool has_cntrl_sig_after_release = false;
+	uint16_t cntrl_sig_after_release = 0;
 	uint32_t millis_now = 0;
 	uint32_t millis_step = 1;
 
 	/* --- recordings --- */
 	std::vector<std::string> log;
 	std::vector<std::pair<uint32_t, uint16_t>> mem_writes; /* (address, data) */
+	std::vector<uint16_t> jmb_in;         /* words the probe wrote to the mailbox */
+	bool jmb_protocol_error = false;      /* unexpected mailbox control word */
 
-	/* Queue the four mailbox reads that deliver a 32-bit value. */
-	void push_jmb_out(uint32_t value)
-	{
-		jmb_words.push_back(msp430::kJmbOut1Rdy);
-		jmb_words.push_back(0);
-		jmb_words.push_back(static_cast<uint16_t>(value));
-		jmb_words.push_back(static_cast<uint16_t>(value >> 16));
-	}
+	/* Post a 32-bit value in the target's mailbox output. */
+	void push_jmb_out(uint32_t value) { jmb_out.push_back(value); }
 
 	void set_speed(uint32_t hz) override { log.push_back("speed:" + std::to_string(hz)); }
 	bool open() override
@@ -54,8 +56,12 @@ public:
 	uint8_t ir_shift(uint8_t ir) override
 	{
 		ir_ = ir;
+		jmb_phase_ = JmbPhase::Control;
+		if (ir == msp430::kIrCntrlSigRelease && has_cntrl_sig_after_release) {
+			cntrl_sig = cntrl_sig_after_release;
+		}
 		log.push_back(fmt("ir:%02x", ir));
-		return jtag_id;
+		return pop(jtag_id_script, jtag_id);
 	}
 
 	uint16_t dr_shift16(uint16_t value) override
@@ -69,7 +75,7 @@ public:
 		case msp430::kIrDataQuick:
 			return pop(quick_words, 0xFFFF);
 		case msp430::kIrJmbExchange:
-			return pop(jmb_words, jmb_default);
+			return jmb_shift(value);
 		case msp430::kIrDataToAddr:
 			mem_writes.push_back({addr_, value});
 			return 0;
@@ -103,16 +109,58 @@ private:
 		std::snprintf(buf, sizeof(buf), f, v);
 		return buf;
 	}
-	static uint16_t pop(std::deque<uint16_t> &q, uint16_t fallback)
+	template <typename T>
+	static T pop(std::deque<T> &q, std::type_identity_t<T> fallback)
 	{
 		if (q.empty()) {
 			return fallback;
 		}
-		const uint16_t v = q.front();
+		const T v = q.front();
 		q.pop_front();
 		return v;
 	}
 
+	enum class JmbPhase { Control, OutLow, OutHigh, InData };
+
+	/* JTAG mailbox as i_ReadJmbOut / i_WriteJmbIn16 use it: a control word,
+	 * then either two data reads (32-bit output) or one data write. */
+	uint16_t jmb_shift(uint16_t value)
+	{
+		switch (jmb_phase_) {
+		case JmbPhase::Control:
+			if (value == 0x0000) { /* status read */
+				return static_cast<uint16_t>(
+					(jmb_in_ready ? msp430::kJmbIn0Rdy : 0) |
+					(jmb_out.empty() ? 0 : msp430::kJmbOut1Rdy));
+			}
+			if (value == (msp430::kJmb32Bit | msp430::kJmbOutReq) && !jmb_out.empty()) {
+				jmb_phase_ = JmbPhase::OutLow;
+				return 0;
+			}
+			if (value == msp430::kJmbInReq) {
+				jmb_phase_ = JmbPhase::InData;
+				return 0;
+			}
+			jmb_protocol_error = true;
+			return 0;
+		case JmbPhase::OutLow:
+			jmb_phase_ = JmbPhase::OutHigh;
+			return static_cast<uint16_t>(jmb_out.front());
+		case JmbPhase::OutHigh: {
+			const uint16_t high = static_cast<uint16_t>(jmb_out.front() >> 16);
+			jmb_out.pop_front();
+			jmb_phase_ = JmbPhase::Control;
+			return high;
+		}
+		case JmbPhase::InData:
+			jmb_in.push_back(value);
+			jmb_phase_ = JmbPhase::Control;
+			return 0;
+		}
+		return 0;
+	}
+
+	JmbPhase jmb_phase_ = JmbPhase::Control;
 	uint8_t ir_ = 0;
 	uint32_t addr_ = 0;
 };

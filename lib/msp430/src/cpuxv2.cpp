@@ -1,7 +1,15 @@
 /*
  * MSP430 CPUXv2 device operations: a port of the JTAG control sequences in
- * TI's slau320 Replicator430Xv2 (JTAGfunc430Xv2.c). The sequences are kept
- * call-for-call identical; the TI function is named above each port.
+ * TI's slau320 Replicator430Xv2 (JTAGfunc430Xv2.c). The sequences follow TI
+ * call for call on the JTAG-ID-0x91 path; the TI function is named above each
+ * port. Deliberate differences:
+ *  - mailbox and erase waits are time-limited via Tap::millis(), not counted;
+ *  - ReadMemQuick omits TI's extra IR_CNTRL_SIG_CAPTURE scan (the JTAG-ID-0x99
+ *    check);
+ *  - the magic-pattern connect releases the pins before taking them;
+ *  - set_pc and the mailbox write abort on failure where TI carries on;
+ *  - the sync wait polls 50 times (TI: 51);
+ *  - the funclet is patched while it is written to RAM.
  *
  * Copyright (C) 2016 Texas Instruments Incorporated - http://www.ti.com/
  *
@@ -213,8 +221,14 @@ bool Cpuxv2::jmb_write16(uint16_t value)
 {
 	tap_.ir_shift(kIrJmbExchange);
 	const uint32_t start = tap_.millis();
-	while ((tap_.dr_shift16(0x0000) & kJmbIn0Rdy) == 0) {
-		if (tap_.millis() - start >= kJmbInTimeoutMs) {
+	for (;;) {
+		/* Read the clock before polling: the poll that follows an
+		 * expired deadline still counts. */
+		const bool expired = tap_.millis() - start >= kJmbInTimeoutMs;
+		if ((tap_.dr_shift16(0x0000) & kJmbIn0Rdy) != 0) {
+			break;
+		}
+		if (expired) {
 			return false;
 		}
 	}
@@ -227,6 +241,8 @@ bool Cpuxv2::jmb_write16(uint16_t value)
  * GetCoreipIdXv2 + SyncJtag_AssertPor + read of the device ID. */
 Status Cpuxv2::connect(EntryMode mode, uint32_t slot_hz, Identity &id)
 {
+	funclet_words_ = 0;
+	write_active_ = false;
 	id = Identity{};
 	tap_.set_speed(slot_hz);
 	if (!tap_.open()) {
@@ -283,6 +299,8 @@ void Cpuxv2::disconnect()
 	tap_.dr_shift16(0x0401);
 	tap_.ir_shift(kIrCntrlSigRelease);
 	tap_.close();
+	funclet_words_ = 0;
+	write_active_ = false;
 }
 
 /* ReleaseDevice_430Xv2(addr), default branch: run from addr. */
@@ -317,11 +335,12 @@ bool Cpuxv2::jmb_wait(uint32_t expected, uint32_t timeout_ms)
 {
 	const uint32_t start = tap_.millis();
 	for (;;) {
+		const bool expired = tap_.millis() - start >= timeout_ms;
 		uint32_t value = 0;
 		if (jmb_read32(value) && value == expected) {
 			return true;
 		}
-		if (tap_.millis() - start >= timeout_ms) {
+		if (expired) {
 			return false;
 		}
 	}
@@ -343,13 +362,17 @@ bool Cpuxv2::start_funclet(const uint16_t *code, size_t nwords, uint32_t ram_add
 	return release_to(ram_addr + code[0]);
 }
 
-/* Take control back (SyncJtag_AssertPor) and overwrite the funclet with
- * JMP $, as TI does after every funclet run. */
+/* Take control back (SyncJtag_AssertPor) and, if that worked, overwrite the
+ * funclet with JMP $ as TI does after every funclet run. If the sync failed
+ * the CPU may still be running, so the RAM is left alone. */
 bool Cpuxv2::funclet_cleanup()
 {
+	write_active_ = false;
 	const bool ok = sync_por();
-	for (size_t i = 0; i < funclet_words_; ++i) {
-		write_word(funclet_ram_ + 2u * static_cast<uint32_t>(i), kJmpSelf);
+	if (ok) {
+		for (size_t i = 0; i < funclet_words_; ++i) {
+			write_word(funclet_ram_ + 2u * static_cast<uint32_t>(i), kJmpSelf);
+		}
 	}
 	funclet_words_ = 0;
 	return ok;
@@ -385,6 +408,9 @@ Status Cpuxv2::erase(EraseMode mode, uint32_t addr, uint32_t ram_addr)
  * for data. */
 Status Cpuxv2::flash_begin(uint32_t addr, uint32_t nwords, uint32_t ram_addr)
 {
+	if (nwords == 0) {
+		return Status::BadArg;
+	}
 	const uint16_t params[] = {static_cast<uint16_t>(addr),
 				   static_cast<uint16_t>(addr >> 16),
 				   static_cast<uint16_t>(nwords),
@@ -398,12 +424,16 @@ Status Cpuxv2::flash_begin(uint32_t addr, uint32_t nwords, uint32_t ram_addr)
 		funclet_cleanup();
 		return Status::Timeout;
 	}
+	write_active_ = true;
 	return Status::Ok;
 }
 
 /* WriteFLASH_430Xv2, part 2: feed words through the mailbox. */
 Status Cpuxv2::flash_data(size_t nwords, const uint8_t *src)
 {
+	if (!write_active_) {
+		return Status::BadState;
+	}
 	for (size_t i = 0; i < nwords; ++i) {
 		const uint16_t word = static_cast<uint16_t>(src[2 * i] | (src[2 * i + 1] << 8));
 		if (!jmb_write16(word)) {
@@ -418,6 +448,9 @@ Status Cpuxv2::flash_data(size_t nwords, const uint8_t *src)
  * word was sent), then clean up. */
 Status Cpuxv2::flash_end(bool complete)
 {
+	if (!write_active_) {
+		return Status::BadState;
+	}
 	const bool done = !complete || jmb_wait(kFuncletDone, kWriteDoneTimeoutMs);
 	const bool clean = funclet_cleanup();
 	if (!done) {

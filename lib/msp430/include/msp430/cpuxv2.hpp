@@ -23,15 +23,27 @@ public:
 
 	/* Take the target under JTAG control: entry, ID, lock check, sync,
 	 * power-on reset, watchdog hold, read the device ID. On failure the
-	 * pins are released. `id.jtag_id` is valid for NoTarget too. */
+	 * pins are released. `id.jtag_id` holds the ID that was read, also for
+	 * NoTarget; it is 0 when the magic-pattern entry got no mailbox access
+	 * and no ID was read. */
 	Status connect(EntryMode mode, uint32_t slot_hz, Identity &id);
 	/* Reset the target through JTAG and release the pins. */
 	void disconnect();
 
 	/* Data buffers are little-endian byte pairs, one pair per word. */
 	Status read_mem(uint32_t addr, size_t nwords, uint8_t *dst);
+	/* RAM and peripheral registers only; it cannot program flash. */
 	Status write_mem(uint32_t addr, size_t nwords, const uint8_t *src);
 
+	/* Flash operations. The caller validates addresses and lengths (even,
+	 * inside the device's memory). `ram_addr` is where the funclet is loaded
+	 * (178 bytes for erase, 240 for write); that RAM is overwritten.
+	 * flash_begin must succeed before flash_data / flash_end (otherwise
+	 * BadState). After any failure of erase, flash_begin or flash_data the
+	 * funclet has already been cleaned up and no flash_end is needed.
+	 * flash_end(false) abandons a write. With the Info-A key locked, erasing
+	 * or writing Info segment A is silently ignored by the device and still
+	 * reports Ok. */
 	Status erase(EraseMode mode, uint32_t addr, uint32_t ram_addr);
 	Status flash_begin(uint32_t addr, uint32_t nwords, uint32_t ram_addr);
 	Status flash_data(size_t nwords, const uint8_t *src);
@@ -55,6 +67,7 @@ private:
 	Tap &tap_;
 	uint32_t funclet_ram_ = 0;
 	size_t funclet_words_ = 0;
+	bool write_active_ = false; /* the write funclet is running and waiting for data */
 };
 
 } // namespace msp430

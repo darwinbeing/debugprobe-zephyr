@@ -234,12 +234,14 @@ TEST(cpuxv2_connect_magic_pattern_entry)
 			  "enter:high", "ir:28", "ir:f4", "dr16:4020"};
 	REQUIRE(t.log.size() > head.size());
 	CHECK_LOG(Log(t.log.begin(), t.log.begin() + static_cast<long>(head.size())), head);
+	const std::vector<uint16_t> fed = {0xA55A};
+	CHECK(t.jmb_in == fed);
 }
 
 TEST(cpuxv2_connect_magic_pattern_without_mailbox_is_no_target)
 {
 	FakeTap t;
-	t.jmb_default = 0; /* mailbox input never ready */
+	t.jmb_in_ready = false; /* mailbox input never ready */
 	Cpuxv2 cpu{t};
 	msp430::Identity id;
 	CHECK(cpu.connect(msp430::EntryMode::MagicPattern, 250000, id) == Status::NoTarget);
@@ -263,6 +265,10 @@ TEST(cpuxv2_erase_loads_patches_runs_and_cleans_up)
 	t.push_jmb_out(0xCAFEBABE);
 	Cpuxv2 cpu{t};
 	CHECK(cpu.erase(msp430::EraseMode::Main, 0x14400, 0x2400) == Status::Ok);
+	CHECK(t.jmb_out.empty());
+	CHECK(!t.jmb_protocol_error);
+	/* i_ReadJmbOut: status, JMB32B|OUTREQ, low, high */
+	CHECK(contains(t.log, Log{"ir:86", "dr16:0000", "dr16:0014", "dr16:0000", "dr16:0000"}));
 
 	/* 89 funclet words, the watchdog write of the POR, 89 words of JMP $ */
 	REQUIRE(t.mem_writes.size() == 89u + 1u + 89u);
@@ -302,7 +308,9 @@ TEST(cpuxv2_erase_times_out_but_still_cleans_up)
 {
 	FakeTap t; /* mailbox never reports completion */
 	Cpuxv2 cpu{t};
+	const uint32_t before = t.millis_now;
 	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::Timeout);
+	CHECK_EQ(t.millis_now - before, 201u); /* 200 ms erase wait */
 	CHECK_EQ(t.mem_writes.size(), 89u + 1u + 89u);
 }
 
@@ -325,12 +333,16 @@ TEST(cpuxv2_flash_write_handshake)
 	t.log.clear();
 	const uint8_t data[] = {0x34, 0x12, 0x78, 0x56};
 	CHECK(cpu.flash_data(2, data) == Status::Ok);
+	const std::vector<uint16_t> sent = {0x1234, 0x5678};
+	CHECK(t.jmb_in == sent);
 	/* i_WriteJmbIn16 per word: wait for IN0RDY, INREQ, data */
 	CHECK_LOG(t.log, (Log{"ir:86", "dr16:0000", "dr16:0001", "dr16:1234",
 			      "ir:86", "dr16:0000", "dr16:0001", "dr16:5678"}));
 
 	t.push_jmb_out(0xCAFEBABE);
 	CHECK(cpu.flash_end(true) == Status::Ok);
+	CHECK(t.jmb_out.empty());
+	CHECK(!t.jmb_protocol_error);
 	REQUIRE(t.mem_writes.size() == 120u + 1u + 120u);
 	CHECK_EQ(t.mem_writes.back().second, 0x3FFF);
 }
@@ -339,7 +351,9 @@ TEST(cpuxv2_flash_begin_times_out_when_funclet_does_not_start)
 {
 	FakeTap t;
 	Cpuxv2 cpu{t};
+	const uint32_t before = t.millis_now;
 	CHECK(cpu.flash_begin(0x4400, 2, 0x2400) == Status::Timeout);
+	CHECK_EQ(t.millis_now - before, 51u); /* 50 ms ready wait */
 	CHECK_EQ(t.mem_writes.size(), 120u + 1u + 120u); /* cleaned up */
 }
 
@@ -349,9 +363,11 @@ TEST(cpuxv2_flash_data_times_out_and_cleans_up)
 	Cpuxv2 cpu{t};
 	t.push_jmb_out(0xABADBABE);
 	CHECK(cpu.flash_begin(0x4400, 2, 0x2400) == Status::Ok);
-	t.jmb_default = 0; /* mailbox input never ready */
+	t.jmb_in_ready = false; /* mailbox input never ready */
 	const uint8_t data[] = {0x34, 0x12};
+	const uint32_t before = t.millis_now;
 	CHECK(cpu.flash_data(1, data) == Status::Timeout);
+	CHECK_EQ(t.millis_now - before, 21u); /* 20 ms mailbox wait */
 	CHECK_EQ(t.mem_writes.size(), 120u + 1u + 120u);
 }
 
@@ -365,4 +381,95 @@ TEST(cpuxv2_flash_end_incomplete_skips_the_completion_wait)
 	CHECK(cpu.flash_end(false) == Status::Ok);
 	CHECK(!contains(t.log, Log{"ir:86"}));
 	CHECK_EQ(t.mem_writes.size(), 120u + 1u + 120u);
+}
+
+TEST(cpuxv2_connect_fails_when_core_id_is_zero)
+{
+	FakeTap t;
+	t.core_id = 0;
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) == Status::TargetError);
+	REQUIRE(!t.log.empty());
+	CHECK(t.log.back() == "close");
+}
+
+TEST(cpuxv2_connect_fails_when_id_changes_during_sync)
+{
+	FakeTap t;
+	/* the 8th IR shift of a normal connect is the ID check in SyncJtag_AssertPor */
+	t.jtag_id_script = {0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x89};
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) == Status::TargetError);
+	REQUIRE(!t.log.empty());
+	CHECK(t.log.back() == "close");
+	CHECK(!contains(t.log, Log{"dr16:0c01"})); /* no POR was attempted */
+}
+
+TEST(cpuxv2_erase_load_failure_is_target_error)
+{
+	FakeTap t;
+	t.cntrl_sig = 0x0000;
+	Cpuxv2 cpu{t};
+	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::TargetError);
+	CHECK(t.mem_writes.empty());
+}
+
+TEST(cpuxv2_erase_cleanup_sync_failure_is_target_error)
+{
+	FakeTap t;
+	t.push_jmb_out(0xCAFEBABE);
+	t.has_cntrl_sig_after_release = true;
+	t.cntrl_sig_after_release = 0x0101;
+	Cpuxv2 cpu{t};
+	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::TargetError);
+	CHECK(t.jmb_out.empty()); /* the completion was seen */
+	CHECK_EQ(t.mem_writes.size(), 89u); /* RAM not rewritten: sync failed */
+}
+
+TEST(cpuxv2_flash_end_times_out_without_completion)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	t.push_jmb_out(0xABADBABE);
+	CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::Ok);
+	const uint8_t data[] = {0x34, 0x12};
+	CHECK(cpu.flash_data(1, data) == Status::Ok);
+	const uint32_t before = t.millis_now;
+	CHECK(cpu.flash_end(true) == Status::Timeout);
+	CHECK_EQ(t.millis_now - before, 101u); /* 100 ms completion wait */
+	CHECK_EQ(t.mem_writes.size(), 120u + 1u + 120u);
+}
+
+TEST(cpuxv2_flash_calls_need_an_active_write)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	const uint8_t data[] = {0x34, 0x12};
+	CHECK(cpu.flash_data(1, data) == Status::BadState);
+	CHECK(cpu.flash_end(false) == Status::BadState);
+	CHECK(cpu.flash_end(true) == Status::BadState);
+	CHECK(t.log.empty());
+
+	t.push_jmb_out(0xCAFEBABE);
+	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::Ok);
+	const size_t writes = t.mem_writes.size();
+	CHECK(cpu.flash_end(false) == Status::BadState);
+	CHECK_EQ(t.mem_writes.size(), writes);
+
+	t.push_jmb_out(0xABADBABE);
+	CHECK(cpu.flash_begin(0x4400, 2, 0x2400) == Status::Ok);
+	t.quick_words = {0x2955};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) == Status::Ok);
+	CHECK(cpu.flash_end(false) == Status::BadState); /* new session, no write */
+}
+
+TEST(cpuxv2_flash_begin_rejects_zero_words)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	CHECK(cpu.flash_begin(0x4400, 0, 0x2400) == Status::BadArg);
+	CHECK(t.log.empty());
 }
