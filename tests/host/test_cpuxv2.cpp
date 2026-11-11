@@ -248,6 +248,7 @@ TEST(cpuxv2_connect_magic_pattern_without_mailbox_is_no_target)
 	CHECK_EQ(id.jtag_id, 0);
 	REQUIRE(!t.log.empty());
 	CHECK(t.log.back() == "close");
+	CHECK(!t.jmb_protocol_error);
 }
 
 TEST(cpuxv2_disconnect_resets_and_releases)
@@ -312,6 +313,7 @@ TEST(cpuxv2_erase_times_out_but_still_cleans_up)
 	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::Timeout);
 	CHECK_EQ(t.millis_now - before, 201u); /* 200 ms erase wait */
 	CHECK_EQ(t.mem_writes.size(), 89u + 1u + 89u);
+	CHECK(!t.jmb_protocol_error);
 }
 
 TEST(cpuxv2_flash_write_handshake)
@@ -355,6 +357,7 @@ TEST(cpuxv2_flash_begin_times_out_when_funclet_does_not_start)
 	CHECK(cpu.flash_begin(0x4400, 2, 0x2400) == Status::Timeout);
 	CHECK_EQ(t.millis_now - before, 51u); /* 50 ms ready wait */
 	CHECK_EQ(t.mem_writes.size(), 120u + 1u + 120u); /* cleaned up */
+	CHECK(!t.jmb_protocol_error);
 }
 
 TEST(cpuxv2_flash_data_times_out_and_cleans_up)
@@ -369,6 +372,7 @@ TEST(cpuxv2_flash_data_times_out_and_cleans_up)
 	CHECK(cpu.flash_data(1, data) == Status::Timeout);
 	CHECK_EQ(t.millis_now - before, 21u); /* 20 ms mailbox wait */
 	CHECK_EQ(t.mem_writes.size(), 120u + 1u + 120u);
+	CHECK(!t.jmb_protocol_error);
 }
 
 TEST(cpuxv2_flash_end_incomplete_skips_the_completion_wait)
@@ -414,6 +418,7 @@ TEST(cpuxv2_erase_load_failure_is_target_error)
 	Cpuxv2 cpu{t};
 	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::TargetError);
 	CHECK(t.mem_writes.empty());
+	CHECK(contains(t.log, Log{"ir:c8", "dr16:1501"})); /* cleanup sync attempted */
 }
 
 TEST(cpuxv2_erase_cleanup_sync_failure_is_target_error)
@@ -440,6 +445,7 @@ TEST(cpuxv2_flash_end_times_out_without_completion)
 	CHECK(cpu.flash_end(true) == Status::Timeout);
 	CHECK_EQ(t.millis_now - before, 101u); /* 100 ms completion wait */
 	CHECK_EQ(t.mem_writes.size(), 120u + 1u + 120u);
+	CHECK(!t.jmb_protocol_error);
 }
 
 TEST(cpuxv2_flash_calls_need_an_active_write)
@@ -472,4 +478,135 @@ TEST(cpuxv2_flash_begin_rejects_zero_words)
 	Cpuxv2 cpu{t};
 	CHECK(cpu.flash_begin(0x4400, 0, 0x2400) == Status::BadArg);
 	CHECK(t.log.empty());
+}
+
+TEST(cpuxv2_flash_begin_patches_high_words)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	t.push_jmb_out(0xABADBABE);
+	CHECK(cpu.flash_begin(0x1C400, 0x10002, 0x2400) == Status::Ok);
+	REQUIRE(t.mem_writes.size() > 5u);
+	CHECK_EQ(t.mem_writes[2].second, 0xC400); /* address low */
+	CHECK_EQ(t.mem_writes[3].second, 0x0001); /* address high */
+	CHECK_EQ(t.mem_writes[4].second, 0x0002); /* length low */
+	CHECK_EQ(t.mem_writes[5].second, 0x0001); /* length high */
+}
+
+TEST(cpuxv2_mailbox_wait_ignores_stray_values)
+{
+	{
+		FakeTap t;
+		Cpuxv2 cpu{t};
+		t.push_jmb_out(0x12345678);
+		t.push_jmb_out(0xCAFEBABE);
+		CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::Ok);
+		CHECK(t.jmb_out.empty());
+	}
+	{
+		FakeTap t;
+		Cpuxv2 cpu{t};
+		t.push_jmb_out(0x12345678);
+		CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::Timeout);
+		CHECK(t.jmb_out.empty()); /* the stray value was read and rejected */
+	}
+}
+
+TEST(cpuxv2_write_state_ends_with_the_write)
+{
+	const uint8_t data[] = {0x34, 0x12};
+	{
+		FakeTap t;
+		Cpuxv2 cpu{t};
+		t.push_jmb_out(0xABADBABE);
+		CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::Ok);
+		CHECK(cpu.flash_data(1, data) == Status::Ok);
+		t.push_jmb_out(0xCAFEBABE);
+		CHECK(cpu.flash_end(true) == Status::Ok);
+		CHECK(cpu.flash_data(1, data) == Status::BadState);
+	}
+	{
+		FakeTap t;
+		Cpuxv2 cpu{t};
+		t.push_jmb_out(0xABADBABE);
+		CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::Ok);
+		t.jmb_in_ready = false;
+		CHECK(cpu.flash_data(1, data) == Status::Timeout);
+		CHECK(cpu.flash_end(false) == Status::BadState);
+	}
+	{
+		FakeTap t;
+		Cpuxv2 cpu{t};
+		t.push_jmb_out(0xABADBABE);
+		CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::Ok);
+		cpu.disconnect();
+		CHECK(cpu.flash_end(false) == Status::BadState);
+	}
+}
+
+TEST(cpuxv2_flash_begin_load_failure_is_target_error)
+{
+	FakeTap t;
+	t.cntrl_sig = 0x0000;
+	Cpuxv2 cpu{t};
+	CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::TargetError);
+	CHECK(t.mem_writes.empty());
+	CHECK(contains(t.log, Log{"ir:c8", "dr16:1501"}));
+	CHECK(cpu.flash_end(false) == Status::BadState);
+}
+
+TEST(cpuxv2_flash_end_cleanup_sync_failure_is_target_error)
+{
+	FakeTap t;
+	t.has_cntrl_sig_after_release = true;
+	t.cntrl_sig_after_release = 0x0101;
+	Cpuxv2 cpu{t};
+	t.push_jmb_out(0xABADBABE);
+	CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::Ok);
+	const uint8_t data[] = {0x34, 0x12};
+	CHECK(cpu.flash_data(1, data) == Status::Ok);
+	t.push_jmb_out(0xCAFEBABE);
+	CHECK(cpu.flash_end(true) == Status::TargetError);
+	CHECK(t.jmb_out.empty());
+	CHECK_EQ(t.mem_writes.size(), 120u); /* no RAM overwrite after the failed sync */
+}
+
+TEST(cpuxv2_other_operations_refused_during_a_write)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	t.push_jmb_out(0xABADBABE);
+	CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::Ok);
+	t.log.clear();
+	uint8_t buf[2] = {};
+	const uint8_t data[] = {0x34, 0x12};
+	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::BadState);
+	CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::BadState);
+	CHECK(cpu.read_mem(0x4400, 1, buf) == Status::BadState);
+	CHECK(cpu.write_mem(0x2400, 1, data) == Status::BadState);
+	CHECK(t.log.empty());
+}
+
+TEST(cpuxv2_mailbox_wait_polls_once_more_after_the_deadline)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	t.push_jmb_out(0xCAFEBABE);
+	t.jmb_hidden_polls = 1;
+	t.millis_per_shift = 250;
+	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::Ok);
+}
+
+TEST(cpuxv2_mailbox_write_polls_once_more_after_the_deadline)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	t.push_jmb_out(0xABADBABE);
+	CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::Ok);
+	t.jmb_hidden_polls = 1;
+	t.millis_per_shift = 30;
+	const uint8_t data[] = {0x34, 0x12};
+	CHECK(cpu.flash_data(1, data) == Status::Ok);
+	const std::vector<uint16_t> sent = {0x1234};
+	CHECK(t.jmb_in == sent);
 }

@@ -24,6 +24,8 @@ public:
 	std::deque<uint16_t> quick_words; /* DR under IR_DATA_QUICK, default 0xFFFF */
 	std::deque<uint8_t> jtag_id_script;   /* consumed first, one per ir_shift */
 	bool jmb_in_ready = true;             /* IN0RDY in the mailbox status */
+	uint32_t jmb_hidden_polls = 0;  /* this many mailbox status reads report "nothing ready" first */
+	uint32_t millis_per_shift = 0;  /* added to the clock by every dr_shift16 (a slow poll) */
 	std::deque<uint32_t> jmb_out;         /* values the target has posted */
 	/* When set, replaces cntrl_sig once IR_CNTRL_SIG_RELEASE is shifted
 	 * (the CPU was released: sync may never come back). */
@@ -66,6 +68,7 @@ public:
 
 	uint16_t dr_shift16(uint16_t value) override
 	{
+		millis_now += millis_per_shift;
 		log.push_back(fmt("dr16:%04x", value));
 		switch (ir_) {
 		case msp430::kIrCntrlSigCapture:
@@ -129,6 +132,10 @@ private:
 		switch (jmb_phase_) {
 		case JmbPhase::Control:
 			if (value == 0x0000) { /* status read */
+				if (jmb_hidden_polls > 0) {
+					--jmb_hidden_polls;
+					return 0;
+				}
 				return static_cast<uint16_t>(
 					(jmb_in_ready ? msp430::kJmbIn0Rdy : 0) |
 					(jmb_out.empty() ? 0 : msp430::kJmbOut1Rdy));
@@ -137,7 +144,7 @@ private:
 				jmb_phase_ = JmbPhase::OutLow;
 				return 0;
 			}
-			if (value == msp430::kJmbInReq) {
+			if (value == msp430::kJmbInReq && jmb_in_ready) {
 				jmb_phase_ = JmbPhase::InData;
 				return 0;
 			}

@@ -9,7 +9,10 @@
  *  - the magic-pattern connect releases the pins before taking them;
  *  - set_pc and the mailbox write abort on failure where TI carries on;
  *  - the sync wait polls 50 times (TI: 51);
- *  - the funclet is patched while it is written to RAM.
+ *  - the funclet is patched while it is written to RAM;
+ *  - the core ID is checked after the IR_DEVICE_ID read;
+ *  - execute_por returns early when the watchdog write fails;
+ *  - funclet cleanup skips the RAM overwrite when the sync fails.
  *
  * Copyright (C) 2016 Texas Instruments Incorporated - http://www.ti.com/
  *
@@ -128,6 +131,9 @@ bool Cpuxv2::set_pc(uint32_t addr)
 /* WriteMemQuick_430Xv2 */
 Status Cpuxv2::write_mem(uint32_t addr, size_t nwords, const uint8_t *src)
 {
+	if (write_active_) {
+		return Status::BadState;
+	}
 	for (size_t i = 0; i < nwords; ++i) {
 		const uint16_t word = static_cast<uint16_t>(src[2 * i] | (src[2 * i + 1] << 8));
 		if (!write_word(addr + 2u * static_cast<uint32_t>(i), word)) {
@@ -140,6 +146,9 @@ Status Cpuxv2::write_mem(uint32_t addr, size_t nwords, const uint8_t *src)
 /* ReadMemQuick_430Xv2 (JTAG ID 0x91 path) */
 Status Cpuxv2::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
 {
+	if (write_active_) {
+		return Status::BadState;
+	}
 	if (!set_pc(addr)) {
 		return Status::TargetError;
 	}
@@ -381,6 +390,9 @@ bool Cpuxv2::funclet_cleanup()
 /* EraseFLASH_430Xv2 */
 Status Cpuxv2::erase(EraseMode mode, uint32_t addr, uint32_t ram_addr)
 {
+	if (write_active_) {
+		return Status::BadState;
+	}
 	uint16_t fctl1 = 0;
 	switch (mode) {
 	case EraseMode::Segment: fctl1 = 0xA502; break;
@@ -408,6 +420,9 @@ Status Cpuxv2::erase(EraseMode mode, uint32_t addr, uint32_t ram_addr)
  * for data. */
 Status Cpuxv2::flash_begin(uint32_t addr, uint32_t nwords, uint32_t ram_addr)
 {
+	if (write_active_) {
+		return Status::BadState;
+	}
 	if (nwords == 0) {
 		return Status::BadArg;
 	}

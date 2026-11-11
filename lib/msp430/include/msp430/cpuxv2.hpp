@@ -43,7 +43,8 @@ public:
 	 * funclet has already been cleaned up and no flash_end is needed.
 	 * flash_end(false) abandons a write. With the Info-A key locked, erasing
 	 * or writing Info segment A is silently ignored by the device and still
-	 * reports Ok. */
+	 * reports Ok. During an active write only flash_data, flash_end, connect
+	 * and disconnect are allowed. */
 	Status erase(EraseMode mode, uint32_t addr, uint32_t ram_addr);
 	Status flash_begin(uint32_t addr, uint32_t nwords, uint32_t ram_addr);
 	Status flash_data(size_t nwords, const uint8_t *src);
