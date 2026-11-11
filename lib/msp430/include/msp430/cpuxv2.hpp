@@ -40,7 +40,9 @@ public:
 	 * (178 bytes for erase, 240 for write); that RAM is overwritten.
 	 * flash_begin must succeed before flash_data / flash_end (otherwise
 	 * BadState). After any failure of erase, flash_begin or flash_data the
-	 * funclet has already been cleaned up and no flash_end is needed.
+	 * funclet has already been cleaned up and no flash_end is needed. Any of
+	 * these may return TargetError when the cleanup after a failure cannot
+	 * re-synchronize the target; that outranks the operation's own result.
 	 * flash_end(false) abandons a write. With the Info-A key locked, erasing
 	 * or writing Info segment A is silently ignored by the device and still
 	 * reports Ok. During an active write only flash_data, flash_end, connect
@@ -64,6 +66,7 @@ private:
 	bool start_funclet(const uint16_t *code, size_t nwords, uint32_t ram_addr,
 			   const uint16_t *params, size_t nparams);
 	bool funclet_cleanup();
+	Status finish_funclet(Status result);
 
 	Tap &tap_;
 	uint32_t funclet_ram_ = 0;

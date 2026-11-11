@@ -610,3 +610,42 @@ TEST(cpuxv2_mailbox_write_polls_once_more_after_the_deadline)
 	const std::vector<uint16_t> sent = {0x1234};
 	CHECK(t.jmb_in == sent);
 }
+
+TEST(cpuxv2_failed_cleanup_outranks_the_timeout)
+{
+	const uint8_t data[] = {0x34, 0x12};
+	{
+		FakeTap t;
+		Cpuxv2 cpu{t};
+		t.has_cntrl_sig_after_release = true;
+		t.cntrl_sig_after_release = 0x0101;
+		CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::TargetError);
+	}
+	{
+		FakeTap t;
+		Cpuxv2 cpu{t};
+		t.has_cntrl_sig_after_release = true;
+		t.cntrl_sig_after_release = 0x0101;
+		CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::TargetError);
+	}
+	{
+		FakeTap t;
+		Cpuxv2 cpu{t};
+		t.has_cntrl_sig_after_release = true;
+		t.cntrl_sig_after_release = 0x0101;
+		t.push_jmb_out(0xABADBABE);
+		CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::Ok);
+		t.jmb_in_ready = false;
+		CHECK(cpu.flash_data(1, data) == Status::TargetError);
+	}
+	{
+		FakeTap t;
+		Cpuxv2 cpu{t};
+		t.has_cntrl_sig_after_release = true;
+		t.cntrl_sig_after_release = 0x0101;
+		t.push_jmb_out(0xABADBABE);
+		CHECK(cpu.flash_begin(0x4400, 1, 0x2400) == Status::Ok);
+		CHECK(cpu.flash_data(1, data) == Status::Ok);
+		CHECK(cpu.flash_end(true) == Status::TargetError);
+	}
+}

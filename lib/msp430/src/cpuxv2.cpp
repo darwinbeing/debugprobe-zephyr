@@ -387,6 +387,13 @@ bool Cpuxv2::funclet_cleanup()
 	return ok;
 }
 
+/* Clean up after a funclet. If the cleanup itself fails the target is in
+ * an unknown state, which outranks the operation's own result. */
+Status Cpuxv2::finish_funclet(Status result)
+{
+	return funclet_cleanup() ? result : Status::TargetError;
+}
+
 /* EraseFLASH_430Xv2 */
 Status Cpuxv2::erase(EraseMode mode, uint32_t addr, uint32_t ram_addr)
 {
@@ -409,11 +416,7 @@ Status Cpuxv2::erase(EraseMode mode, uint32_t addr, uint32_t ram_addr)
 		return Status::TargetError;
 	}
 	const bool done = jmb_wait(kFuncletDone, kEraseTimeoutMs);
-	const bool clean = funclet_cleanup();
-	if (!done) {
-		return Status::Timeout;
-	}
-	return clean ? Status::Ok : Status::TargetError;
+	return finish_funclet(done ? Status::Ok : Status::Timeout);
 }
 
 /* WriteFLASH_430Xv2, part 1: load and start the funclet, wait until it asks
@@ -436,8 +439,7 @@ Status Cpuxv2::flash_begin(uint32_t addr, uint32_t nwords, uint32_t ram_addr)
 		return Status::TargetError;
 	}
 	if (!jmb_wait(kFuncletReady, kReadyTimeoutMs)) {
-		funclet_cleanup();
-		return Status::Timeout;
+		return finish_funclet(Status::Timeout);
 	}
 	write_active_ = true;
 	return Status::Ok;
@@ -452,8 +454,7 @@ Status Cpuxv2::flash_data(size_t nwords, const uint8_t *src)
 	for (size_t i = 0; i < nwords; ++i) {
 		const uint16_t word = static_cast<uint16_t>(src[2 * i] | (src[2 * i + 1] << 8));
 		if (!jmb_write16(word)) {
-			funclet_cleanup();
-			return Status::Timeout;
+			return finish_funclet(Status::Timeout);
 		}
 	}
 	return Status::Ok;
@@ -467,11 +468,7 @@ Status Cpuxv2::flash_end(bool complete)
 		return Status::BadState;
 	}
 	const bool done = !complete || jmb_wait(kFuncletDone, kWriteDoneTimeoutMs);
-	const bool clean = funclet_cleanup();
-	if (!done) {
-		return Status::Timeout;
-	}
-	return clean ? Status::Ok : Status::TargetError;
+	return finish_funclet(done ? Status::Ok : Status::Timeout);
 }
 
 } // namespace msp430

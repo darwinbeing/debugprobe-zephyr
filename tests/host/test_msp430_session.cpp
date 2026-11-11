@@ -35,6 +35,8 @@ struct Fx {
 const Bytes kBadArg = {0x90, 0x01};
 const Bytes kBadState = {0x90, 0x02};
 const Bytes kOk = {0x90, 0x00};
+const Bytes kTargetError = {0x90, 0x06};
+const Bytes kTimeout = {0x90, 0x07};
 
 } // namespace
 
@@ -291,4 +293,313 @@ TEST(session_erase_cleanup_failure_closes_the_session)
 	CHECK_BYTES(f.run({0x90, 0x05, 0x02, 0x00, 0x44, 0x00, 0x00, 0x00, 0x24, 0x00, 0x00}),
 		    target_error);
 	CHECK(f.s.state() == State::Idle);
+}
+
+namespace {
+
+void le32(Bytes &b, uint32_t v)
+{
+	for (int i = 0; i < 4; ++i) {
+		b.push_back(static_cast<uint8_t>(v >> (8 * i)));
+	}
+}
+
+Bytes read_req(uint32_t addr, uint16_t nwords)
+{
+	Bytes b = {0x90, 0x03};
+	le32(b, addr);
+	b.push_back(static_cast<uint8_t>(nwords));
+	b.push_back(static_cast<uint8_t>(nwords >> 8));
+	return b;
+}
+
+Bytes write_req(uint32_t addr, size_t nbytes)
+{
+	Bytes b = {0x90, 0x04};
+	le32(b, addr);
+	for (size_t i = 0; i < nbytes; ++i) {
+		b.push_back(static_cast<uint8_t>(i));
+	}
+	return b;
+}
+
+Bytes erase_req(uint8_t mode, uint32_t addr, uint32_t ram)
+{
+	Bytes b = {0x90, 0x05, mode};
+	le32(b, addr);
+	le32(b, ram);
+	return b;
+}
+
+Bytes begin_req(uint32_t addr, uint32_t nwords, uint32_t ram)
+{
+	Bytes b = {0x90, 0x06};
+	le32(b, addr);
+	le32(b, nwords);
+	le32(b, ram);
+	return b;
+}
+
+Bytes data_req(size_t nbytes)
+{
+	Bytes b = {0x90, 0x07};
+	for (size_t i = 0; i < nbytes; ++i) {
+		b.push_back(static_cast<uint8_t>(i));
+	}
+	return b;
+}
+
+const Bytes kConnectReq = {0x90, 0x01, 0xFA, 0x00, 0x00};
+
+size_t count_wipes(const FakeTap &t)
+{
+	size_t n = 0;
+	for (const auto &w : t.mem_writes) {
+		if (w.second == 0x3FFF) {
+			++n;
+		}
+	}
+	return n;
+}
+
+bool log_has(const FakeTap &t, const char *entry)
+{
+	for (const auto &l : t.log) {
+		if (l == entry) {
+			return true;
+		}
+	}
+	return false;
+}
+
+} // namespace
+
+TEST(session_ops_need_a_connection)
+{
+	Fx f;
+	CHECK_BYTES(f.run(read_req(0x4400, 1)), kBadState);
+	CHECK_BYTES(f.run(write_req(0x2400, 2)), kBadState);
+	CHECK_BYTES(f.run(erase_req(2, 0x4400, 0x2400)), kBadState);
+	CHECK_BYTES(f.run(begin_req(0x4400, 2, 0x2400)), kBadState);
+	CHECK_BYTES(f.run(data_req(2)), kBadState);
+	CHECK_BYTES(f.run({0x90, 0x08}), kBadState);
+	CHECK(f.tap.log.empty());
+	CHECK(f.s.state() == State::Idle);
+}
+
+TEST(session_small_response_buffers)
+{
+	Fx f;
+	uint8_t r9[9] = {};
+	CHECK_EQ(f.s.handle(Bytes{0x90, 0x00}, r9), 2u);
+	CHECK_EQ(r9[1], 0x01);
+	uint8_t r10[10] = {};
+	CHECK_EQ(f.s.handle(Bytes{0x90, 0x00}, r10), 10u);
+	CHECK_EQ(r10[1], 0x00);
+
+	uint8_t c10[10] = {};
+	CHECK_EQ(f.s.handle(kConnectReq, c10), 2u);
+	CHECK_EQ(c10[1], 0x01);
+	CHECK(f.tap.log.empty());
+	uint8_t c11[11] = {};
+	f.tap.quick_words = {0x2955};
+	CHECK_EQ(f.s.handle(kConnectReq, c11), 11u);
+	CHECK_EQ(c11[1], 0x00);
+}
+
+TEST(session_requests_one_byte_short)
+{
+	Fx f;
+	f.connect();
+	CHECK_BYTES(f.run({0x90, 0x03, 0x00, 0x44, 0x00, 0x00, 0x01}), kBadArg);
+	CHECK_BYTES(f.run({0x90, 0x04, 0x00, 0x24, 0x00}), kBadArg);
+	CHECK_BYTES(f.run({0x90, 0x05, 0x02, 0x00, 0x44, 0x00, 0x00, 0x00, 0x24, 0x00}), kBadArg);
+	CHECK_BYTES(f.run({0x90, 0x06, 0x00, 0x44, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x24, 0x00}),
+		    kBadArg);
+	CHECK(f.tap.log.empty());
+}
+
+TEST(session_trailing_bytes_are_rejected)
+{
+	Fx f;
+	CHECK_BYTES(f.run({0x90, 0x00, 0x00}), kBadArg);
+	CHECK_BYTES(f.run({0x90, 0x01, 0xFA, 0x00, 0x00, 0x00}), kBadArg);
+	CHECK(f.tap.log.empty());
+	f.connect();
+	Bytes r = read_req(0x4400, 1);
+	r.push_back(0);
+	CHECK_BYTES(f.run(r), kBadArg);
+	Bytes e = erase_req(2, 0x4400, 0x2400);
+	e.push_back(0);
+	CHECK_BYTES(f.run(e), kBadArg);
+	Bytes b = begin_req(0x4400, 2, 0x2400);
+	b.push_back(0);
+	CHECK_BYTES(f.run(b), kBadArg);
+	CHECK_BYTES(f.run({0x90, 0x02, 0x00}), kBadArg);
+	CHECK(f.s.state() == State::Connected);
+	CHECK(f.tap.log.empty());
+
+	f.tap.push_jmb_out(0xABADBABE);
+	CHECK_BYTES(f.run(begin_req(0x4400, 2, 0x2400)), kOk);
+	CHECK_BYTES(f.run({0x90, 0x08, 0x00}), kBadArg);
+	CHECK(f.s.state() == State::Flashing);
+}
+
+TEST(session_range_rules)
+{
+	Fx f;
+	f.connect();
+	CHECK_BYTES(f.run(write_req(0x2401, 2)), kBadArg);
+	CHECK_BYTES(f.run(write_req(0xFFFFE, 4)), kBadArg);
+	CHECK(f.tap.log.empty());
+	CHECK_BYTES(f.run({0x90, 0x04, 0xFE, 0xFF, 0x0F, 0x00, 0x34, 0x12}), kOk);
+	REQUIRE(!f.tap.mem_writes.empty());
+	CHECK_EQ(f.tap.mem_writes.back().first, 0xFFFFEu);
+	CHECK_EQ(f.tap.mem_writes.back().second, 0x1234);
+	f.tap.log.clear();
+	CHECK_BYTES(f.run(read_req(0xFFFFE, 1)), (Bytes{0x90, 0x00, 0xFF, 0xFF}));
+	f.tap.log.clear();
+
+	CHECK_BYTES(f.run(erase_req(0, 0x4401, 0x2400)), kBadArg);
+	CHECK_BYTES(f.run(erase_req(0, 0x100000, 0x2400)), kBadArg);
+	CHECK_BYTES(f.run(erase_req(0, 0x4400, 0x2401)), kBadArg);
+	CHECK_BYTES(f.run(erase_req(0, 0x4400, 0xFFFFE)), kBadArg);
+	CHECK_BYTES(f.run(erase_req(0, 0x4400, 0xFFF50)), kBadArg);
+	CHECK(f.tap.log.empty());
+	f.tap.push_jmb_out(0xCAFEBABE);
+	CHECK_BYTES(f.run(erase_req(0, 0x4400, 0xFFF4E)), kOk);
+	f.tap.log.clear();
+
+	CHECK_BYTES(f.run(begin_req(0x4401, 2, 0x2400)), kBadArg);
+	CHECK_BYTES(f.run(begin_req(0, 0x80000000u, 0x2400)), kBadArg);
+	CHECK_BYTES(f.run(begin_req(0xFFFFE, 2, 0x2400)), kBadArg);
+	CHECK_BYTES(f.run(begin_req(0x4400, 2, 0xFFFFE)), kBadArg);
+	CHECK_BYTES(f.run(begin_req(0x4400, 2, 0xFFF12)), kBadArg);
+	CHECK(f.tap.log.empty());
+	f.tap.push_jmb_out(0xABADBABE);
+	CHECK_BYTES(f.run(begin_req(0x4400, 2, 0xFFF10)), kOk);
+	CHECK(f.s.state() == State::Flashing);
+}
+
+TEST(session_data_size_limits)
+{
+	Fx f;
+	f.connect();
+	const Bytes rd = f.run(read_req(0x4400, 508));
+	REQUIRE(rd.size() == 2 + 1016u);
+	CHECK_EQ(rd[1], 0x00);
+	CHECK_BYTES(f.run(write_req(0x2400, 1016)), kOk);
+	CHECK_EQ(f.tap.mem_writes.size(), 508u);
+	CHECK_BYTES(f.run(write_req(0x2400, 1018)), kBadArg);
+
+	f.tap.push_jmb_out(0xABADBABE);
+	CHECK_BYTES(f.run(begin_req(0x4400, 600, 0x2400)), kOk);
+	CHECK_BYTES(f.run(data_req(1016)), kOk);
+	CHECK(f.s.state() == State::Flashing);
+	CHECK_BYTES(f.run(data_req(1018)), kBadArg);
+	CHECK(f.s.state() == State::Connected);
+}
+
+TEST(session_flash_data_framing_errors_abandon_the_write)
+{
+	Fx f;
+	f.connect();
+	f.tap.push_jmb_out(0xABADBABE);
+	CHECK_BYTES(f.run(begin_req(0x4400, 2, 0x2400)), kOk);
+	f.tap.mem_writes.clear();
+	CHECK_BYTES(f.run(data_req(0)), kBadArg);
+	CHECK(f.s.state() == State::Connected);
+	CHECK_EQ(count_wipes(f.tap), 120u);
+
+	f.tap.push_jmb_out(0xABADBABE);
+	CHECK_BYTES(f.run(begin_req(0x4400, 2, 0x2400)), kOk);
+	CHECK_BYTES(f.run(data_req(3)), kBadArg);
+	CHECK(f.s.state() == State::Connected);
+}
+
+TEST(session_flash_data_timeout_returns_to_connected)
+{
+	Fx f;
+	f.connect();
+	f.tap.push_jmb_out(0xABADBABE);
+	CHECK_BYTES(f.run(begin_req(0x4400, 2, 0x2400)), kOk);
+	f.tap.jmb_in_ready = false;
+	CHECK_BYTES(f.run(data_req(2)), kTimeout);
+	CHECK(f.s.state() == State::Connected);
+	CHECK_BYTES(f.run({0x90, 0x08}), kBadState);
+}
+
+TEST(session_closing_while_flashing_abandons_the_write)
+{
+	for (int how = 0; how < 3; ++how) {
+		Fx f;
+		f.connect();
+		f.tap.push_jmb_out(0xABADBABE);
+		CHECK_BYTES(f.run(begin_req(0x4400, 2, 0x2400)), kOk);
+		f.tap.mem_writes.clear();
+		if (how == 0) {
+			f.s.abort();
+			CHECK(f.s.state() == State::Idle);
+		} else if (how == 1) {
+			CHECK_BYTES(f.run({0x90, 0x02}), kOk);
+			CHECK(f.s.state() == State::Idle);
+		} else {
+			f.tap.quick_words = {0x2955};
+			CHECK_BYTES(f.run(kConnectReq).size() > 2 ? kOk : kBadArg, kOk);
+			CHECK(f.s.state() == State::Connected);
+		}
+		CHECK(count_wipes(f.tap) >= 120u);
+		CHECK(log_has(f.tap, "close"));
+	}
+}
+
+TEST(session_failed_cleanup_is_a_target_error)
+{
+	{
+		Fx f;
+		f.connect();
+		f.tap.has_cntrl_sig_after_release = true;
+		f.tap.cntrl_sig_after_release = 0x0101;
+		f.tap.push_jmb_out(0xABADBABE);
+		CHECK_BYTES(f.run(begin_req(0x4400, 1, 0x2400)), kOk);
+		CHECK_BYTES(f.run(data_req(4)), kTargetError);
+		CHECK(f.s.state() == State::Idle);
+	}
+	{
+		Fx f;
+		f.connect();
+		f.tap.has_cntrl_sig_after_release = true;
+		f.tap.cntrl_sig_after_release = 0x0101;
+		f.tap.push_jmb_out(0xABADBABE);
+		CHECK_BYTES(f.run(begin_req(0x4400, 2, 0x2400)), kOk);
+		CHECK_BYTES(f.run(data_req(2)), kOk);
+		CHECK_BYTES(f.run({0x90, 0x08}), kTargetError);
+		CHECK(f.s.state() == State::Idle);
+	}
+	{
+		Fx f;
+		f.connect();
+		f.tap.has_cntrl_sig_after_release = true;
+		f.tap.cntrl_sig_after_release = 0x0101;
+		CHECK_BYTES(f.run(erase_req(2, 0x4400, 0x2400)), kTargetError);
+		CHECK(f.s.state() == State::Idle);
+	}
+}
+
+TEST(session_connect_speed_bounds)
+{
+	{
+		Fx f;
+		f.tap.quick_words = {0x2955};
+		CHECK_BYTES(f.run({0x90, 0x01, 0x64, 0x00, 0x00}).size() > 2 ? kOk : kBadArg, kOk);
+		REQUIRE(!f.tap.log.empty());
+		CHECK(f.tap.log.front() == "speed:100000");
+	}
+	{
+		Fx f;
+		f.tap.quick_words = {0x2955};
+		CHECK_BYTES(f.run({0x90, 0x01, 0xE8, 0x03, 0x00}).size() > 2 ? kOk : kBadArg, kOk);
+		REQUIRE(!f.tap.log.empty());
+		CHECK(f.tap.log.front() == "speed:1000000");
+	}
 }

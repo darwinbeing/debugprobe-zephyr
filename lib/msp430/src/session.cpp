@@ -1,5 +1,7 @@
 #include "msp430/session.hpp"
 
+#include "msp430/funclets.hpp"
+
 namespace msp430 {
 
 namespace {
@@ -55,13 +57,13 @@ size_t Session::handle(std::span<const uint8_t> request, std::span<uint8_t> resp
 
 	switch (static_cast<Op>(request[1])) {
 	case Op::Info:
-		st = op_info(out, n);
+		st = op_info(args, out, n);
 		break;
 	case Op::Connect:
 		st = op_connect(args, out, n);
 		break;
 	case Op::Disconnect:
-		st = op_disconnect();
+		st = op_disconnect(args);
 		break;
 	case Op::ReadMem:
 		st = op_read_mem(args, out, n);
@@ -79,7 +81,7 @@ size_t Session::handle(std::span<const uint8_t> request, std::span<uint8_t> resp
 		st = op_flash_data(args);
 		break;
 	case Op::FlashEnd:
-		st = op_flash_end();
+		st = op_flash_end(args);
 		break;
 	default:
 		break;
@@ -107,9 +109,9 @@ void Session::abort()
 	flash_remaining_ = 0;
 }
 
-Status Session::op_info(Out out, size_t &n)
+Status Session::op_info(In args, Out out, size_t &n)
 {
-	if (out.size() < 8) {
+	if (!args.empty() || out.size() < 8) {
 		return Status::BadArg;
 	}
 	out[0] = kProtocolVersion;
@@ -122,7 +124,7 @@ Status Session::op_info(Out out, size_t &n)
 
 Status Session::op_connect(In args, Out out, size_t &n)
 {
-	if (args.size() < 3 || out.size() < 9) {
+	if (args.size() != 3 || out.size() < 9) {
 		return Status::BadArg;
 	}
 	const uint16_t speed_khz = get16(args, 0);
@@ -149,10 +151,13 @@ Status Session::op_connect(In args, Out out, size_t &n)
 	return st;
 }
 
-Status Session::op_disconnect()
+Status Session::op_disconnect(In args)
 {
 	if (state_ == State::Idle) {
 		return Status::BadState;
+	}
+	if (!args.empty()) {
+		return Status::BadArg;
 	}
 	abort();
 	return Status::Ok;
@@ -163,7 +168,7 @@ Status Session::op_read_mem(In args, Out out, size_t &n)
 	if (state_ != State::Connected) {
 		return Status::BadState;
 	}
-	if (args.size() < 6) {
+	if (args.size() != 6) {
 		return Status::BadArg;
 	}
 	const uint32_t addr = get32(args, 0);
@@ -202,13 +207,13 @@ Status Session::op_erase(In args)
 	if (state_ != State::Connected) {
 		return Status::BadState;
 	}
-	if (args.size() < 9) {
+	if (args.size() != 9) {
 		return Status::BadArg;
 	}
 	const uint8_t mode = args[0];
 	const uint32_t addr = get32(args, 1);
 	const uint32_t ram = get32(args, 5);
-	if (mode > 2 || !range_ok(addr, 1) || !range_ok(ram, 1)) {
+	if (mode > 2 || !range_ok(addr, 1) || !range_ok(ram, kFlashEraseWords)) {
 		return Status::BadArg;
 	}
 	return cpu_.erase(static_cast<EraseMode>(mode), addr, ram);
@@ -219,13 +224,13 @@ Status Session::op_flash_begin(In args)
 	if (state_ != State::Connected) {
 		return Status::BadState;
 	}
-	if (args.size() < 12) {
+	if (args.size() != 12) {
 		return Status::BadArg;
 	}
 	const uint32_t addr = get32(args, 0);
 	const uint32_t nwords = get32(args, 4);
 	const uint32_t ram = get32(args, 8);
-	if (nwords == 0 || !range_ok(addr, nwords) || !range_ok(ram, 1)) {
+	if (nwords == 0 || !range_ok(addr, nwords) || !range_ok(ram, kFlashWriteWords)) {
 		return Status::BadArg;
 	}
 	const Status st = cpu_.flash_begin(addr, nwords, ram);
@@ -244,28 +249,35 @@ Status Session::op_flash_data(In args)
 	const size_t nwords = args.size() / 2;
 	if (args.empty() || (args.size() & 1u) != 0 || args.size() > max_data_bytes_ ||
 	    nwords > flash_remaining_) {
-		/* The funclet cannot be resynchronized: abandon the write. */
-		cpu_.flash_end(false);
+		/* Protocol rule: any FLASH_DATA error ends the write (the
+		 * funclet itself could have continued). */
+		const Status cleanup = cpu_.flash_end(false);
 		state_ = State::Connected;
-		return Status::BadArg;
+		flash_remaining_ = 0;
+		return cleanup == Status::TargetError ? cleanup : Status::BadArg;
 	}
 	const Status st = cpu_.flash_data(nwords, args.data());
 	if (st == Status::Ok) {
 		flash_remaining_ -= static_cast<uint32_t>(nwords);
 	} else {
 		state_ = State::Connected; /* Cpuxv2 already cleaned up */
+		flash_remaining_ = 0;
 	}
 	return st;
 }
 
-Status Session::op_flash_end()
+Status Session::op_flash_end(In args)
 {
 	if (state_ != State::Flashing) {
 		return Status::BadState;
 	}
+	if (!args.empty()) {
+		return Status::BadArg;
+	}
 	const bool complete = flash_remaining_ == 0;
 	const Status st = cpu_.flash_end(complete);
 	state_ = State::Connected;
+	flash_remaining_ = 0;
 	if (!complete && st == Status::Ok) {
 		return Status::BadState;
 	}
