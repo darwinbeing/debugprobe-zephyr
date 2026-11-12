@@ -188,6 +188,11 @@ Read-only commands only; nothing was written to the target.
 - Main flash (128 KB) was read three times, at 250 kHz, 100 kHz and 250 kHz
   again, with different chunk sizes: byte-identical each time. Measured read
   rate: 5.4 kB/s at 250 kHz, 2.1 kB/s at 100 kHz.
+- The backup was then checked for coherence, outside the repository: the
+  vector table and the C start-up code fit the F5529 memory map; a disassembly
+  (Ghidra, MSP430X) decodes the code region, and all but one of its 2385 direct
+  calls land on a function entry (the exception is a register-indirect call);
+  three CRCs that the target's firmware itself checks reproduce on the dump.
 - Open: a 16-byte read at 0x017F0 (bootloader area) returned zeros and, on a
   second read in the same session, different data, both with status OK. It
   was not investigated further on this board, whose firmware exists nowhere
