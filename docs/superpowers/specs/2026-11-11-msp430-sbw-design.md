@@ -1,8 +1,9 @@
 # MSP430F5529 Spy-Bi-Wire Support — Design (Phase A: Flash Programming)
 
 Date: 2026-11-11
-Status: Implemented and host-verified; on-target acceptance pending (see
-`docs/PROJECT_STATUS.md`, Phase 6). This document describes the code as built.
+Status: Implemented; verified on an MSP430F5529 with an rpi_pico probe on
+2026-11-11 (see `docs/PROJECT_STATUS.md`, Phase 6, also for what was not run).
+This document describes the code as built.
 Extends: `2026-06-11-debugprobe-zephyr-design.md` (the overall firmware design).
 
 ## Background and Goal
@@ -507,7 +508,9 @@ Expected throughput at 250 kHz: about 2 kB/s for flash writes (77 JTAG cycles
 per word through the mailbox, 14 µs per cycle) and about 6 kB/s for reads (23
 cycles per word). A 16 KB image takes about 11 s to program and verify; a full
 128 KB image about 70 s plus 21 s. `--speed 500` matches TI's reference
-implementation and roughly halves these times.
+implementation and roughly halves these times. Measured on an MSP430F5529:
+77 s plus 25 s at 250 kHz, 40 s plus 13 s at 500 kHz, 22 s plus 7 s at
+1000 kHz.
 
 ## Error Handling Principles
 

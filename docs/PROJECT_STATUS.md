@@ -162,7 +162,7 @@ host tool (`tools/msp430/sbw.py`). Design:
 |---|---|
 | Host tests | 193/193 C++ (`scripts/run_host_tests.sh`, also under ASan); 148/148 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
 | 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe build with the feature on; rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n` (no SBW code in that image) |
-| On-target hardware | **In progress (2026-11-11):** identification, `selftest`, the backups and `trial` pass on an MSP430F5529; mass erase and a full `flash` have not been run yet (acceptance table below) |
+| On-target hardware | **Verified on an MSP430F5529 with an rpi_pico probe (2026-11-11):** acceptance steps 2–7 pass, including mass erase and full programming at 250, 500 and 1000 kHz. Not run: step 1 and the SWD regression (step 8); see the table and the open points below |
 
 What the host-side verification covers. During the code reviews (with
 throwaway harnesses that are not in the repository) the JTAG cycle sequences
@@ -210,6 +210,26 @@ one byte differed, at 0x24200), and `erase --segment 0x24200` (no difference
 left). Each command line was first run against the fake firmware loaded with
 the real backup, to check which erase and write commands it sends.
 
+Steps 6 and 7 followed the same day. The image was the 128 KB backup itself.
+At 250, 500 and 1000 kHz, in one session each: compare with the backup, mass
+erase, read all of main flash back (blank in all four banks every time; the
+info segments unchanged), program, verify, compare; then an independent
+compare at 250 kHz. Before the two higher speeds: `selftest`, two or three
+full read-backs and `trial` at that speed. Finally the plain `flash` command
+with its defaults. The procedure had a fallback that writes the backup back
+with segment erases; it was not needed. Measured:
+
+| Speed | Mass erase | Programming 128 KB | Read-back |
+|---|---|---|---|
+| 250 kHz | 0.54 s | 77 s (1.7 kB/s) | 5.4 kB/s |
+| 500 kHz | 0.30 s | 40 s (3.3 kB/s) | about 10 kB/s |
+| 1000 kHz | 0.17 s | 22 s (6.0 kB/s) | about 18 kB/s |
+
+Not exercised on hardware: the magic-pattern entry (every connect succeeded
+with the normal entry), a locked device, `info` without a target, a write to
+the info segments, 100 kHz for anything but reads, and the other two probe
+boards. The scope measurements listed below were not made.
+
 ### Phase 6 hardware acceptance (rpi_pico + MSP430F5529 board)
 
 The procedure is "First use on a board" in `docs/MSP430_SBW.md`. Nothing
@@ -222,9 +242,9 @@ before step 6 changes the firmware on the board.
 | 3 | `selftest` passes | ✓ 2026-11-11 |
 | 4 | Two backups of main flash at 250 and 100 kHz are identical; info memory saved | ✓ 2026-11-11; also identical to the reads made before the fix |
 | 5 | `trial --backup` passes | ✓ 2026-11-11 (segment 0x24200); an independent compare afterwards found no difference from the backup |
-| 6 | `flash` an image: verify passes, target runs | — |
-| 7 | 50 connect/disconnect cycles; flash at 250 / 500 / 1000 kHz | — |
-| 8 | SWD regression: conformance compare and openocd acceptance, before and after SBW sessions | — |
+| 6 | `flash` an image: verify passes, target runs | ✓ 2026-11-11: `flash` of the 128 KB backup with the default mass erase at 250 kHz, programmed and verified in 103 s; an independent compare found no difference. That the application runs afterwards was not observed by the tester |
+| 7 | 50 connect/disconnect cycles; flash at 250 / 500 / 1000 kHz | ✓ 2026-11-11: 50 cycles at 250 kHz and 50 at 1000 kHz, all on the first entry attempt; mass erase, blank check, program and verify at 250, 500 and 1000 kHz, main flash and info segments equal to the backup after each |
+| 8 | SWD regression: conformance compare and openocd acceptance, before and after SBW sessions | not run: the probe is soldered to the MSP430 board, and SWD traffic must not be driven onto its TEST and RST pins. `DAP_Info` and `DAP_Disconnect` answer normally after the SBW sessions |
 
 Things to look at during bring-up, from the code reviews:
 
@@ -249,6 +269,7 @@ Things to look at during bring-up, from the code reviews:
 - SWD backends (phase 3): DPIDR read via both PIO and bitbang; matches official firmware. (Note: the phase-3 `0x10212927` value was a misread from a not-yet-live target; the genuine RP2040 DPIDR `0x0bc12477` was confirmed in phase 5 with a live target. The protocol/engine work was unaffected.)
 - UART bridge + serial (phase 4-core): loopback echo both directions; serial from hwinfo propagated to DAP_Info and USB iSerialNumber.
 - Autobaud apply path (phase 4b): MAGIC_BAUD sentinel + 4 KB stack overflow + race fixes all hold.
+- MSP430F5529 Spy-Bi-Wire (phase 6, rpi_pico, 2026-11-11): identify, RAM self-test, read, segment erase, mass erase, program and verify at 250, 500 and 1000 kHz; details in the Phase 6 section.
 - Conformance A/B (phase 5): 26 protocol-deterministic byte-identical + 1 environment-dependent (`swj_pins_read`, matched) + 4 whitelisted enhancements (3 DAP_Info strings + DAP packet size 64→1024), 0 unexpected mismatches vs official v2.3.1 (`compare` → 27 identical / 4 whitelisted → PASS).  **Live on-hardware A/B done 2026-06-12** — official firmware captured live, byte-for-byte identical to the source-derived prediction on all 31 commands; packet-size bump re-captured 2026-06-13.
 - **Full openocd debug acceptance (phase 5, rpi_pico/PIO, 2026-06-12): ✓ PASS** against a live RP2040 target — multidrop connect (`DPIDR 0x0bc12477`, Cortex-M0+ detected), `reset halt`, single-step, memory read, RAM write+readback (3 locations), flash erase+program+verify (top sector), and `reset run` all pass. Also verified attaching to a **running** target (connect → halt → resume), confirming the probe is not BOOTSEL-limited. The earlier connect failure was the target not being live on the bus (the garbage `DPIDR 0x10212927` was a misread), not a probe-firmware issue.
 
@@ -263,6 +284,13 @@ Things to look at during bring-up, from the code reviews:
    acceptance above was run on rpi_pico/PIO; the other five (rpi_pico/bitbang,
    rpi_pico2 × {PIO, bitbang}, rpi_debug_probe × {PIO, bitbang}) follow the same
    documented procedure and remain to be run when those boards are on the bench.
+
+3. **SWD regression with the MSP430 feature in the firmware** — the phase-5
+   conformance compare and openocd acceptance have not been repeated since
+   phase 6 changed the SWD pin handling (pins high-impedance when idle, pinctrl
+   re-applied on connect). It needs a probe whose SWD pins are free.
+
+4. **MSP430 Spy-Bi-Wire on rpi_pico2 and rpi_debug_probe** — built, not run.
 
 ---
 

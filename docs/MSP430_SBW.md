@@ -147,14 +147,15 @@ higher speeds afterwards.
 
 ## Speed
 
-Read-back was measured on an MSP430F5529: 5.4 kB/s at 250 kHz and 2.1 kB/s at
-100 kHz. The other figures are estimates from the protocol.
+Measured on an MSP430F5529 with a Raspberry Pi Pico as the probe and a 128 KB
+image:
 
-| `--speed` | Programming | Read-back |
-|---|---|---|
-| 250 kHz (default) | about 2 kB/s | 5.4 kB/s (measured) |
-| 500 kHz | about 4 kB/s | about 12 kB/s |
-| 1000 kHz | about 7 kB/s | about 24 kB/s |
+| `--speed` | Programming | Read-back | `flash` of 128 KB, with verify |
+|---|---|---|---|
+| 100 kHz | not measured | 2.1 kB/s | not measured |
+| 250 kHz (default) | 1.7 kB/s | 5.4 kB/s | about 100 s |
+| 500 kHz | 3.3 kB/s | about 10 kB/s | about 55 s |
+| 1000 kHz | 6.0 kB/s | about 18 kB/s | about 30 s |
 
 While a command runs, the probe's UART bridge can pause for up to about half a
 second at a time (longer at 100 kHz). The target is halted during that time
