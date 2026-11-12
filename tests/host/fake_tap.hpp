@@ -20,7 +20,11 @@ public:
 	uint16_t cntrl_sig = 0x0301;  /* DR under IR_CNTRL_SIG_CAPTURE */
 	std::deque<uint16_t> cntrl_sig_script; /* consumed first, one per read */
 	uint16_t core_id = 0x0106;    /* DR under IR_COREIP_ID */
-	uint32_t device_id_ptr = 0x1A00; /* DR under IR_DEVICE_ID */
+	/* The device-descriptor pointer the device holds. Under IR_DEVICE_ID a
+	 * real device shifts it out in plain order, and Tap::dr_shift20 applies
+	 * TI's 20-bit de-scramble to every result, so the caller sees it
+	 * scrambled (measured on an MSP430F5529: 0x001A0 for 0x01A00). */
+	uint32_t device_id_ptr = 0x1A00;
 	std::deque<uint16_t> quick_words; /* DR under IR_DATA_QUICK, default 0xFFFF */
 	std::deque<uint8_t> jtag_id_script;   /* consumed first, one per ir_shift */
 	bool jmb_in_ready = true;             /* IN0RDY in the mailbox status */
@@ -122,7 +126,10 @@ private:
 		if (ir_ == msp430::kIrAddr16Bit) {
 			addr_ = value;
 		}
-		return ir_ == msp430::kIrDeviceId ? device_id_ptr : 0;
+		if (ir_ != msp430::kIrDeviceId) {
+			return 0;
+		}
+		return ((device_id_ptr << 16) + (device_id_ptr >> 4)) & 0xFFFFFu;
 	}
 
 public:

@@ -86,6 +86,22 @@ TEST(cpuxv2_read_mem_follows_ti_readmemquick)
 	CHECK_BYTES(out, want_bytes);
 }
 
+TEST(cpuxv2_connect_reads_the_device_id_at_the_pointer_the_device_holds)
+{
+	/* A pointer with five different nibbles pins both halves of the
+	 * conversion; the F5529's 0x01A00 has zeros in the nibbles that move. */
+	FakeTap t;
+	t.device_id_ptr = 0xABCD4;
+	t.quick_words = {0x2955};
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) == Status::Ok);
+	CHECK_EQ(id.device_id_ptr, 0xABCD4u);
+	/* the ID word is read at pointer + 4 = 0xABCD8 */
+	const Log pc = set_pc_log("0a80", "bcd8");
+	CHECK(std::search(t.log.begin(), t.log.end(), pc.begin(), pc.end()) != t.log.end());
+}
+
 TEST(cpuxv2_write_mem_needs_full_emulation_state)
 {
 	FakeTap t;

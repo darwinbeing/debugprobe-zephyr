@@ -110,7 +110,8 @@ TEST(sbw_tap_dr20_descrambles_result)
 	MockSbwPort p;
 	SbwTap t{p};
 	t.reset();
-	/* The target returns 0x01A00 as raw 0x1A000 (TI: ((v << 16) + (v >> 4)) & 0xFFFFF).
+	/* TI's AllShifts de-scrambles every 20-bit result:
+	 * ((v << 16) + (v >> 4)) & 0xFFFFF turns raw 0x1A000 into 0x01A00.
 	 * raw 0x1A000 = 0001 1010 0000 0000 0000 on cycles 3..22 -> cycles 6,7,9 */
 	p.tdo_script.push_back((1u << 6) | (1u << 7) | (1u << 9));
 	CHECK_EQ(t.dr_shift20(0), 0x01A00u);

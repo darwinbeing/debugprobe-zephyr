@@ -16,7 +16,11 @@
  *  - the JTAG ID captured by the IR scan is checked in the full-emulation-state
  *    check and before every mailbox access;
  *  - read_mem and write_mem end with a full-emulation-state check, so a link
- *    that dies mid-transfer is reported instead of returning zeroed data.
+ *    that dies mid-transfer is reported instead of returning zeroed data;
+ *  - the device-ID pointer is converted back from the 20-bit de-scramble. TI's
+ *    Spy-Bi-Wire build keeps the de-scrambled value and so reads DeviceId from
+ *    the wrong address (it never uses DeviceId). Measured on an MSP430F5529:
+ *    the de-scrambled value is 0x001A0, the descriptor is at 0x01A00.
  *
  * Copyright (C) 2016 Texas Instruments Incorporated - http://www.ti.com/
  *
@@ -313,7 +317,11 @@ Status Cpuxv2::connect(EntryMode mode, uint32_t slot_hz, Identity &id)
 	tap_.ir_shift(kIrCoreipId);
 	id.core_id = tap_.dr_shift16(0);
 	tap_.ir_shift(kIrDeviceId);
-	id.device_id_ptr = tap_.dr_shift20(0);
+	/* The device shifts the ID pointer out in plain order ("un-scrambled",
+	 * as TI's comment says), but dr_shift20 de-scrambles every 20-bit
+	 * result: convert it back. */
+	const uint32_t scrambled = tap_.dr_shift20(0);
+	id.device_id_ptr = ((scrambled & 0xFFFFu) << 4) | (scrambled >> 16);
 
 	uint8_t raw[2] = {};
 	if (id.core_id == 0 || !sync_por() ||
