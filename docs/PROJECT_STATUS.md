@@ -162,7 +162,7 @@ host tool (`tools/msp430/sbw.py`). Design:
 |---|---|
 | Host tests | 193/193 C++ (`scripts/run_host_tests.sh`, also under ASan); 148/148 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
 | 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe build with the feature on; rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n` (no SBW code in that image) |
-| On-target hardware | **In progress (2026-11-11):** identification, `selftest` and the backups pass on an MSP430F5529; nothing has written to flash yet (acceptance table below) |
+| On-target hardware | **In progress (2026-11-11):** identification, `selftest`, the backups and `trial` pass on an MSP430F5529; mass erase and a full `flash` have not been run yet (acceptance table below) |
 
 What the host-side verification covers. During the code reviews (with
 throwaway harnesses that are not in the repository) the JTAG cycle sequences
@@ -194,8 +194,16 @@ Read-only commands only; nothing was written to the target.
   else. The tool never reads that area, and reads elsewhere were stable
   afterwards.
 
-With the fixed firmware on the probe, steps 2–4 of the acceptance table
+With the fixed firmware on the probe, steps 2–5 of the acceptance table
 passed the same day through `sbw.py`.
+
+Before `trial`, the flash routines were approached one at a time in the blank
+segment at 0x24200, each followed by a compare of main flash and the info
+segments with the backup: a 512-byte write of 0xFF with `--erase none` (runs
+the write funclet, cannot change flash), a one-word write of 0xFFFE (exactly
+one byte differed, at 0x24200), and `erase --segment 0x24200` (no difference
+left). Each command line was first run against the fake firmware loaded with
+the real backup, to check which erase and write commands it sends.
 
 ### Phase 6 hardware acceptance (rpi_pico + MSP430F5529 board)
 
@@ -208,7 +216,7 @@ before step 6 changes the firmware on the board.
 | 2 | `info` reports JTAG ID 0x91 and device ID bytes 55h 29h (anything else: stop) | ✓ 2026-11-11 (core ID 0x0103) |
 | 3 | `selftest` passes | ✓ 2026-11-11 |
 | 4 | Two backups of main flash at 250 and 100 kHz are identical; info memory saved | ✓ 2026-11-11; also identical to the reads made before the fix |
-| 5 | `trial --backup` passes | — |
+| 5 | `trial --backup` passes | ✓ 2026-11-11 (segment 0x24200); an independent compare afterwards found no difference from the backup |
 | 6 | `flash` an image: verify passes, target runs | — |
 | 7 | 50 connect/disconnect cycles; flash at 250 / 500 / 1000 kHz | — |
 | 8 | SWD regression: conformance compare and openocd acceptance, before and after SBW sessions | — |
