@@ -533,7 +533,7 @@ implementation and roughly halves these times.
 
 ## Testing and Acceptance
 
-As built: 192 C++ host tests and 139 Python tests. Beyond the tests listed
+As built: 192 C++ host tests and 148 Python tests. Beyond the tests listed
 below, the reviews compared `SbwTap` and `Cpuxv2` mechanically with TI's
 reference source, simulated the PIO program tick by tick from its generated
 opcodes, fuzzed `Session` under ASan/UBSan, and ran mutation passes over

@@ -39,21 +39,21 @@ Keep the wires short (10–20 cm). The target must be powered by its own supply.
 
 ```bash
 pip install -r tools/msp430/requirements.txt
-cd tools/msp430        # or call the script by its path
+alias sbw="python3 $PWD/tools/msp430/sbw.py"   # from the repository root
 
-./sbw.py info                              # identify the target
-./sbw.py selftest                          # check the read and write paths using the target's RAM
-./sbw.py read 0x4400 0x20000 -o main.hex   # dump memory (here: all of main flash)
-./sbw.py trial --backup main.hex           # prove erase/program/verify on one blank segment
-./sbw.py verify firmware.hex               # compare flash with an image
-./sbw.py reset                             # reset the target and let it run
+sbw info                              # identify the target
+sbw selftest                          # check the read and write paths using the target's RAM
+sbw read 0x4400 0x20000 -o main.hex   # dump memory (here: all of main flash)
+sbw trial --backup main.hex           # prove erase/program/verify on one blank segment
+sbw verify firmware.hex               # compare flash with an image
+sbw reset                             # reset the target and let it run
 ```
 
 The two commands that destroy flash contents:
 
 ```bash
-./sbw.py flash firmware.hex                # erases ALL main flash, programs, verifies, resets
-./sbw.py erase                             # erases ALL main flash
+sbw flash firmware.hex                # erases ALL main flash, programs, verifies, resets
+sbw erase                             # erases ALL main flash
 ```
 
 Global options go before the command: `--speed KHZ` sets the SBW clock
@@ -90,21 +90,23 @@ interrupted with Ctrl-C.
 Do these in order. Nothing before step 6 changes the firmware that is on the
 board, and each step checks something the later ones rely on.
 
-1. **`./sbw.py info`** must report `MSP430F5529`, JTAG ID `0x91` and device ID
+1. **`sbw info`** must report `MSP430F5529`, JTAG ID `0x91` and device ID
    bytes `55h 29h`. If the tool reports an unsupported device with other ID
    bytes, stop: either the target is a different chip or the probe is not
    reading correctly. Do not edit the device table to make it pass.
-2. **`./sbw.py selftest`** writes known data to the target's RAM and reads it
+2. **`sbw selftest`** writes known data to the target's RAM and reads it
    back, and re-reads the device ID inside a larger block. It proves that the
    probe writes and reads the right data at the right addresses. Flash is not
    touched.
-3. **Back up main flash twice, at two speeds, to two files:**
+3. **Back up main flash twice, at two speeds, to two files,** in a directory
+   outside the repository (a `git clean` would delete them otherwise):
 
    ```bash
-   ./sbw.py --speed 250 read 0x4400 0x20000 -o main-250.hex
-   ./sbw.py --speed 100 read 0x4400 0x20000 -o main-100.hex
+   mkdir -p ~/msp430-backup && cd ~/msp430-backup
+   sbw --speed 250 read 0x4400 0x20000 -o main-250.hex
+   sbw --speed 100 read 0x4400 0x20000 -o main-100.hex
    cmp main-250.hex main-100.hex && echo identical
-   ./sbw.py read 0x1800 0x200 -o info.hex
+   sbw read 0x1800 0x200 -o info.hex
    ```
 
    The two reads are split into chunks at different addresses, so an error
@@ -112,21 +114,30 @@ board, and each step checks something the later ones rely on.
    must be equal as well. Keep the files read-only and copy them somewhere
    else. (`info.hex` is for your records: it includes information segment A,
    which the tool will not write back.)
-4. **`./sbw.py trial --backup main-250.hex`** picks a 512-byte segment that is
+4. **`sbw trial --backup main-250.hex`** picks a 512-byte segment that is
    blank in the backup, checks that the target still matches the backup,
    programs a test pattern into that segment, verifies it, erases the segment
    again, and then checks that all of main flash still matches the backup. It
-   exercises erase, program and verify on real flash while the original
-   firmware is intact. It needs a blank segment; if the firmware fills the
-   flash completely, skip this step and accept that step 6 is the first test
-   of the write path.
+   exercises segment erase, program and verify on real flash while the
+   original firmware is intact.
+   - If it fails or is interrupted after it started writing, the segment may
+     hold part of the test pattern. The message names the segment: run
+     `sbw erase --segment 0x…` and then `sbw verify main-250.hex`, and find
+     out why it failed before going on.
+   - If it reports a difference outside the test segment, write nothing more
+     until the cause is known.
+   - It needs a blank segment. If the firmware fills the flash completely,
+     skip this step and accept that step 6 is the first test of the write
+     path.
 5. **Know how you would recover** if step 6 goes wrong. This tool never touches
    the F5529's USB bootloader, so TI's BSL tools can program `main-250.hex`
    back if the board exposes USB and the BSL entry; otherwise a TI programmer
    (MSP-FET, or the eZ-FET on a LaunchPad) can.
-6. **`./sbw.py flash firmware.hex`**, at the speed that worked so far. To test
-   the whole path without changing the firmware, flash the backup itself:
-   `./sbw.py flash main-250.hex`.
+6. **`sbw flash firmware.hex`**, at the speed that worked so far. This is
+   also the first use of the mass erase, which cannot be tried out without
+   erasing. If the verify fails, put the backup back with
+   `sbw flash --erase segments main-250.hex`: it uses only the segment erase
+   that step 4 proved, and takes a few minutes.
 
 Stay at 250 kHz (or 100) until a flash and verify have succeeded once; try
 higher speeds afterwards.

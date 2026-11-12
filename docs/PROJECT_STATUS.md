@@ -160,7 +160,7 @@ host tool (`tools/msp430/sbw.py`). Design:
 
 | Axis | Status |
 |---|---|
-| Host tests | 192/192 C++ (`scripts/run_host_tests.sh`, also under ASan); 139/139 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
+| Host tests | 192/192 C++ (`scripts/run_host_tests.sh`, also under ASan); 148/148 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
 | 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe build with the feature on; rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n` (no SBW code in that image) |
 | On-target hardware | **Not run yet** — see the acceptance table below |
 
