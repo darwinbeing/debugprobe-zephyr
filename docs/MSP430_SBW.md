@@ -79,6 +79,9 @@ Details:
 - `read` writes Intel HEX, or raw bytes if the file name ends in `.bin`. It
   refuses to replace an existing file unless you pass `--force`, writes the
   file only after the whole read succeeded, and prints the SHA-256 of the data.
+- Do not use `read` on the bootloader area (`0x1000`–`0x17FF`). The device
+  normally protects it; on an F5529 a read there returned zeros and then
+  different data, without an error.
 - **Every command resets the target**, including `info` and `read`: taking
   control of the CPU involves a power-on reset, and releasing it a JTAG reset.
 
@@ -144,11 +147,12 @@ higher speeds afterwards.
 
 ## Speed
 
-Estimated from the protocol; not yet measured on hardware.
+Read-back was measured on an MSP430F5529: 5.4 kB/s at 250 kHz and 2.1 kB/s at
+100 kHz. The other figures are estimates from the protocol.
 
 | `--speed` | Programming | Read-back |
 |---|---|---|
-| 250 kHz (default) | about 2 kB/s | about 6 kB/s |
+| 250 kHz (default) | about 2 kB/s | 5.4 kB/s (measured) |
 | 500 kHz | about 4 kB/s | about 12 kB/s |
 | 1000 kHz | about 7 kB/s | about 24 kB/s |
 

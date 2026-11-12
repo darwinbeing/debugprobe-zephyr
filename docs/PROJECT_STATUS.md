@@ -160,17 +160,42 @@ host tool (`tools/msp430/sbw.py`). Design:
 
 | Axis | Status |
 |---|---|
-| Host tests | 192/192 C++ (`scripts/run_host_tests.sh`, also under ASan); 148/148 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
+| Host tests | 193/193 C++ (`scripts/run_host_tests.sh`, also under ASan); 148/148 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
 | 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe build with the feature on; rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n` (no SBW code in that image) |
-| On-target hardware | **Not run yet** — see the acceptance table below |
+| On-target hardware | **Started 2026-11-11:** the link, identification and memory reads work on an MSP430F5529 (see below); the acceptance table has not been run yet |
 
 What the host-side verification covers. During the code reviews (with
 throwaway harnesses that are not in the repository) the JTAG cycle sequences
 and the CPUXv2 device sequences were compared mechanically with TI's reference
 code; the PIO program was simulated tick by tick from its generated opcodes
 (event order as TI's macros, low phase at most 5 µs, no wait with the clock
-low); the command parser was fuzzed under ASan/UBSan. None of it has run on a
-target.
+low); the command parser was fuzzed under ASan/UBSan.
+
+### First on-target run (2026-11-11, rpi_pico + MSP430F5529)
+
+Read-only commands only; nothing was written to the target.
+
+- `info` failed with "unsupported device: ID bytes FFh 3Fh at 0x001A4". Cause:
+  `connect` used the device-descriptor pointer after `dr_shift20`'s 20-bit
+  de-scramble, but the device shifts that pointer out in plain order, so the
+  value was 0x001A0 instead of 0x01A00 and the ID was read from vacant memory.
+  Fixed by converting the pointer back in `connect`. TI's Spy-Bi-Wire source
+  has the same slip but never uses the ID.
+- Everything else worked with that firmware, driven through the vendor command
+  by throwaway scripts: SBW entry, JTAG ID 0x91, lock-key check (not locked),
+  core ID 0x0103, sync and POR, and memory reads. The descriptor at 0x01A00
+  reads `06 06 59 08 55 29 19 12`.
+- Main flash (128 KB) was read three times, at 250 kHz, 100 kHz and 250 kHz
+  again, with different chunk sizes: byte-identical each time. Measured read
+  rate: 5.4 kB/s at 250 kHz, 2.1 kB/s at 100 kHz.
+- Open: a 16-byte read at 0x017F0 (bootloader area) returned zeros and, on a
+  second read in the same session, different data, both with status OK. It
+  was not investigated further on this board, whose firmware exists nowhere
+  else. The tool never reads that area, and reads elsewhere were stable
+  afterwards.
+
+The acceptance steps below have not been run yet: they need the fixed
+firmware on the probe.
 
 ### Phase 6 hardware acceptance (rpi_pico + MSP430F5529 board)
 

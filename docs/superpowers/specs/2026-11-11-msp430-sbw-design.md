@@ -269,7 +269,7 @@ A port of `JTAGfunc430Xv2.c`, written against `Tap`:
 
 | Operation | TI function(s) |
 |---|---|
-| `connect(mode)` | `GetCoreID` (one attempt), `IsLockKeyProgrammed`, `GetCoreipIdXv2`, `SyncJtag_AssertPor` → `ExecutePOR_430Xv2` (includes watchdog hold), then read the device ID at `DeviceIdPointer + 4` |
+| `connect(mode)` | `GetCoreID` (one attempt), `IsLockKeyProgrammed`, `GetCoreipIdXv2`, `SyncJtag_AssertPor` → `ExecutePOR_430Xv2` (includes watchdog hold), then read the device ID at `DeviceIdPointer + 4` (the pointer is converted back from `dr_shift20`'s de-scramble: the device shifts it out in plain order, found on the first on-target run) |
 | `disconnect()` | `ReleaseDevice_430Xv2(V_RESET)`, then release the pins |
 | `read_mem` | `ReadMemQuick_430Xv2`, plus a final JTAG-control check |
 | `write_mem` | `WriteMemQuick_430Xv2` (RAM and peripherals only), plus a final JTAG-control check |
@@ -533,7 +533,7 @@ implementation and roughly halves these times.
 
 ## Testing and Acceptance
 
-As built: 192 C++ host tests and 148 Python tests. Beyond the tests listed
+As built: 193 C++ host tests and 148 Python tests. Beyond the tests listed
 below, the reviews compared `SbwTap` and `Cpuxv2` mechanically with TI's
 reference source, simulated the PIO program tick by tick from its generated
 opcodes, fuzzed `Session` under ASan/UBSan, and ran mutation passes over
