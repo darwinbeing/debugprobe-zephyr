@@ -54,7 +54,7 @@ def open_session(probe, speed_khz: int):
         raise FlashError(
             f"unsupported device: ID bytes {raw & 0xFF:02X}h {raw >> 8:02X}h at "
             f"0x{identity.device_id_ptr + 4:05X} (JTAG ID 0x{identity.jtag_id:02X}); "
-            "add it to tools/msp430/devices.py"
+            "this tool supports " + ", ".join(d.name for d in devices.DEVICES.values())
         )
     return identity, device
 

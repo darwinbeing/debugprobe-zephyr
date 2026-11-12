@@ -59,8 +59,11 @@ class OpenSessionTest(unittest.TestCase):
 
     def test_unknown_device(self):
         fw = FakeFirmware(device_id=0x1234)
-        with self.assertRaisesRegex(FlashError, "34h 12h"):
+        with self.assertRaisesRegex(FlashError, "34h 12h") as cm:
             flasher.open_session(SbwProbe(fw), 250)
+        # names what is supported; does not suggest editing the device table
+        self.assertIn("this tool supports MSP430F5529", str(cm.exception))
+        self.assertNotIn("add it", str(cm.exception))
         # open_session leaves the session open; closing it is the caller's job
         self.assertEqual(fw.state, 1)
 
