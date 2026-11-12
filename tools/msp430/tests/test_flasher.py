@@ -270,6 +270,22 @@ class SelftestTest(unittest.TestCase):
         with self.assertRaisesRegex(FlashError, "RAM read-back differs at 0x02410"):
             flasher.selftest(probe, identity, device)
 
+    def test_shifted_reads_are_caught(self):
+        fw = FakeFirmware()
+        probe = SbwProbe(fw)
+        identity, device = flasher.open_session(probe, 250)
+        fw.read_shift = 2
+        with self.assertRaisesRegex(FlashError, "RAM read-back differs"):
+            flasher.selftest(probe, identity, device)
+
+    def test_high_id_byte_mismatch(self):
+        fw = FakeFirmware()
+        probe = SbwProbe(fw)
+        identity, device = flasher.open_session(probe, 250)
+        fw.mem[0x1A05] = 0x28
+        with self.assertRaisesRegex(FlashError, "device ID read inside a block differs"):
+            flasher.selftest(probe, identity, device)
+
     def test_descriptor_mismatch(self):
         fw = FakeFirmware()
         probe = SbwProbe(fw)
@@ -285,6 +301,9 @@ class TrialTest(unittest.TestCase):
         for a in range(0x4400, 0x20000):
             self.fw.mem[a] = (a * 7) & 0xFF
         self.backup = [Segment(0x4400, self.probe.read_mem(0x4400, 0x10000))]
+
+    def backup_full(self):
+        return [Segment(0x4400, self.probe.read_mem(0x4400, (0x24400 - 0x4400) // 2))]
 
     def erased(self):
         return [op for op in self.fw.ops if op[0] in ("erase", "begin")]
@@ -324,10 +343,61 @@ class TrialTest(unittest.TestCase):
             flasher.trial(self.probe, F5529, self.backup)
         self.assertEqual(self.erased(), [])
 
+    ADVICE = ('segment 0x24200 may hold part of the test pattern: run '
+              '"erase --segment 0x24200", then "verify" with your backup')
+
+    def test_a_programmed_byte_in_the_top_segment_moves_the_trial_down(self):
+        self.fw.mem[0x24300] = 0x12
+        self.assertEqual(flasher.trial(self.probe, F5529, self.backup_full()), 0x24000)
+
+    def test_pattern_verify_failure_gives_cleanup_advice(self):
+        self.fw.stuck = {0x24210: 0xFF}
+        with self.assertRaises(FlashError) as cm:
+            flasher.trial(self.probe, F5529, self.backup_full())
+        self.assertIn("verify failed at 0x24210", str(cm.exception))
+        self.assertIn(self.ADVICE, str(cm.exception))
+
+    def test_second_erase_does_nothing(self):
+        self.fw.skip_segment_erases = {2}
+        with self.assertRaises(FlashError) as cm:
+            flasher.trial(self.probe, F5529, self.backup_full())
+        self.assertIn("the test segment is not blank", str(cm.exception))
+        self.assertIn(self.ADVICE, str(cm.exception))
+
+    def test_failed_erase_gives_cleanup_advice(self):
+        self.fw.fail_op = {5: 7}
+        with self.assertRaises(FlashError) as cm:
+            flasher.trial(self.probe, F5529, self.backup_full())
+        self.assertIn(self.ADVICE, str(cm.exception))
+
+    def test_leftover_pattern_is_explained(self):
+        backup = self.backup_full()
+        for i in range(4):
+            self.fw.mem[0x24200 + i] = 0x11 + i
+        with self.assertRaises(FlashError) as cm:
+            flasher.trial(self.probe, F5529, backup)
+        msg = str(cm.exception)
+        self.assertIn("nothing was changed", msg)
+        self.assertIn("if an earlier trial was interrupted, " + self.ADVICE, msg)
+        self.assertEqual(self.erased(), [])
+
+    def test_difference_outside_the_segment_has_no_advice(self):
+        backup = self.backup_full()
+        self.fw.mem[0x5000] ^= 0xFF
+        with self.assertRaises(FlashError) as cm:
+            flasher.trial(self.probe, F5529, backup)
+        self.assertIn("nothing was changed", str(cm.exception))
+        self.assertNotIn("erase --segment", str(cm.exception))
+
     def test_damage_during_the_trial(self):
         self.fw.also_erase = 0x4400
-        with self.assertRaisesRegex(FlashError, "after the trial.*0x04400"):
+        with self.assertRaises(FlashError) as cm:
             flasher.trial(self.probe, F5529, self.backup)
+        msg = str(cm.exception)
+        self.assertIn("outside the test segment", msg)
+        self.assertIn("0x04400", msg)
+        self.assertIn("do not write anything", msg)
+        self.assertNotIn("flash command", msg)
 
 
 if __name__ == "__main__":

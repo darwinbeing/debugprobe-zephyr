@@ -180,10 +180,15 @@ def selftest(probe, identity, device, out=None) -> None:
     say(f"device descriptor at 0x{identity.device_id_ptr:05X}: ID bytes match")
 
 
-def trial(probe, device, backup_segments, out=None) -> int:
+def _trial_cleanup(base: int) -> str:
+    return (f"segment 0x{base:05X} may hold part of the test pattern: run "
+            f"\"erase --segment 0x{base:05X}\", then \"verify\" with your backup")
+
+
+def trial(probe, device, backup_segments, out=None, on_segment=None) -> int:
     """Erase, program, verify and erase again one blank main-flash segment, then
     check that the rest of main flash still matches the backup. Returns the
-    segment's address."""
+    segment's address. on_segment(base) is called just before anything is changed."""
     def say(line):
         if out is not None:
             out.write(line + "\n")
@@ -214,29 +219,54 @@ def trial(probe, device, backup_segments, out=None) -> int:
     def read_main():
         return probe.read_mem(start, (end - start) // 2)
 
-    def first_difference(actual):
-        return start + next(i for i, (a, b) in enumerate(zip(actual, backup)) if a != b)
+    def differences(actual):
+        """(first difference overall, first difference outside the test segment or None)."""
+        first = outside = None
+        for i, (a, b) in enumerate(zip(actual, backup)):
+            if a != b:
+                addr = start + i
+                if first is None:
+                    first = addr
+                if not base <= addr < base + size:
+                    outside = addr
+                    break
+        return first, outside
 
     say(f"reading main flash to compare it with the backup (segment 0x{base:05X} will be used)")
     actual = read_main()
     if actual != backup:
-        raise FlashError("the target's flash does not match the backup (first difference at "
-                         f"0x{first_difference(actual):05X}); nothing was changed")
+        first, outside = differences(actual)
+        msg = ("the target's flash does not match the backup (first difference at "
+               f"0x{first:05X}); nothing was changed")
+        if outside is None:
+            msg += "; if an earlier trial was interrupted, " + _trial_cleanup(base)
+        raise FlashError(msg)
+
+    if on_segment is not None:
+        on_segment(base)
 
     say(f"programming and verifying a test pattern in the segment at 0x{base:05X}")
     pattern = bytes((i * 37 + 11) & 0xFF for i in range(size))
-    program(probe, device, [Segment(base, pattern)], erase="segments", verify=True)
+    try:
+        program(probe, device, [Segment(base, pattern)], erase="segments", verify=True)
+    except FlashError as e:
+        raise FlashError(f"{e}; {_trial_cleanup(base)}") from None
 
     say(f"erasing the segment at 0x{base:05X} again")
     try:
         probe.erase(probe_mod.ERASE_SEGMENT, base, device.ram_start)
     except StatusError as e:
-        raise FlashError(f"erase at 0x{base:05X} failed: {e}") from None
+        raise FlashError(f"erase at 0x{base:05X} failed: {e}; {_trial_cleanup(base)}") from None
 
     say("reading main flash again to compare it with the backup")
     actual = read_main()
     if actual != backup:
-        raise FlashError("after the trial the target's flash differs from the backup (first "
-                         f"difference at 0x{first_difference(actual):05X}); restore the backup "
-                         "with the flash command")
+        first, outside = differences(actual)
+        if outside is None:
+            raise FlashError("after the trial the test segment is not blank (first difference "
+                             f"at 0x{first:05X}); {_trial_cleanup(base)}")
+        raise FlashError("after the trial the target's flash differs from the backup outside "
+                         f"the test segment (first difference at 0x{outside:05X}); do not "
+                         "write anything: run \"verify\" with your backup again and find "
+                         "the cause first")
     return base

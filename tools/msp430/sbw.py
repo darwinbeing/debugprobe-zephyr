@@ -175,7 +175,8 @@ def _run(args, probe: SbwProbe, out, segments) -> None:
             out.write(f"read {len(data)} bytes from 0x{args.addr:05X} into {args.out}\n")
             out.write(f"sha256: {hashlib.sha256(data).hexdigest()}\n")
         elif args.cmd == "trial":
-            base = flasher.trial(probe, device, segments, out)
+            base = flasher.trial(probe, device, segments, out,
+                                 on_segment=lambda b: setattr(args, "trial_base", b))
             out.write(f"trial passed: segment 0x{base:05X} was erased, programmed, verified "
                       "and erased again; main flash matches the backup\n")
         elif args.cmd == "selftest":
@@ -209,11 +210,10 @@ def main(argv=None, transport=None, out=sys.stdout, err=sys.stderr) -> int:
         err.write(f"error: {e}\n")
         return 1
     except KeyboardInterrupt:
-        if args.cmd in ("flash", "erase", "trial") and getattr(args, "session_open", False):
-            hint = ('; run "trial" again or compare the flash with your backup'
-                    if args.cmd == "trial" else "")
-            err.write("interrupted; the target's flash may be partially erased or "
-                      f"programmed{hint}\n")
+        if args.cmd == "trial" and getattr(args, "trial_base", None) is not None:
+            err.write("interrupted; " + flasher._trial_cleanup(args.trial_base) + "\n")
+        elif args.cmd in ("flash", "erase") and getattr(args, "session_open", False):
+            err.write("interrupted; the target's flash may be partially erased or programmed\n")
         else:
             err.write("interrupted\n")
         return 130

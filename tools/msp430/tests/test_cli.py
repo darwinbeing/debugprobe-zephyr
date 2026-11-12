@@ -357,10 +357,14 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(fw.connects, [])
 
-    def _trial_interrupted(self, op):
+    def _trial_fw(self):
         fw = FakeFirmware()
         for a in range(0x4400, 0x20000):
             fw.mem[a] = (a * 7) & 0xFF
+        return fw
+
+    def _trial_interrupted(self, op):
+        fw = self._trial_fw()
         with tempfile.TemporaryDirectory() as d:
             backup = os.path.join(d, "backup.hex")
             self.assertEqual(run(["read", "0x4400", "0x20000", "-o", backup], fw)[0], 0)
@@ -373,11 +377,29 @@ class CliTest(unittest.TestCase):
 
     def test_ctrl_c_during_trial_pattern_write(self):
         err = self._trial_interrupted(7)
-        self.assertIn("partially erased or programmed", err)
-        self.assertIn("compare the flash with your backup", err)
+        self.assertIn('segment 0x24200 may hold part of the test pattern: run '
+                      '"erase --segment 0x24200", then "verify" with your backup', err)
+        self.assertTrue(err.startswith("interrupted; "))
 
     def test_ctrl_c_during_trial_first_read(self):
-        self._trial_interrupted(3)
+        self.assertEqual(self._trial_interrupted(3).strip(), "interrupted")
+
+    def test_trial_after_an_interrupted_trial(self):
+        fw = self._trial_fw()
+        with tempfile.TemporaryDirectory() as d:
+            backup = os.path.join(d, "backup.hex")
+            self.assertEqual(run(["read", "0x4400", "0x20000", "-o", backup], fw)[0], 0)
+            for i in range(4):
+                fw.mem[0x24200 + i] = 0x11 + i
+            code, _, err = run(["trial", "--backup", backup], fw)
+            self.assertEqual(code, 1)
+            self.assertIn("nothing was changed", err)
+            self.assertIn('erase --segment 0x24200', err)
+            self.assertEqual([op for op in fw.ops if op[0] == "erase"], [])
+            self.assertEqual(run(["erase", "--segment", "0x24200"], fw)[0], 0)
+            code, out, _ = run(["trial", "--backup", backup], fw)
+            self.assertEqual(code, 0)
+            self.assertIn("trial passed", out)
 
 
 if __name__ == "__main__":
