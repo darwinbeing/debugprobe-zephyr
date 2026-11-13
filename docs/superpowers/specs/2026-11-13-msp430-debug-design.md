@@ -142,7 +142,18 @@ are 20-bit numbers in 32-bit fields.
   included); for a device the probe does not know, the window is empty. Any
   other address — main flash, information memory, BSL, vacant memory — is
   refused with `PROTECTED`. A wrong host table can therefore only narrow the
-  window, never open flash.
+  window, never open flash. The DMA controller registers (0x0500–0x05FF) are
+  also refused, since a DMA transfer could copy into the flash controller.
+- In read-only mode `DBG_WRITE_REG` to the PC is `PROTECTED` unless the new
+  PC lies in the identified device's main flash (F5529: 0x4400–0x243FF) or
+  equals the current PC (GDB writes all registers back). This keeps jumps
+  into the BSL, information memory or host-written RAM out of reach.
+- What read-only mode guarantees: the probe never writes flash, the flash
+  controller or the DMA registers for the host, and never moves the PC
+  outside main flash. It does not stop the firmware's own code from doing
+  what it does when it runs (the firmware may write its own information
+  memory), nor code the user places by other means, such as a changed return
+  address on the stack.
 - New status `RUNNING` (0x0A): an operation that needs a halted CPU while it
   runs.
 
