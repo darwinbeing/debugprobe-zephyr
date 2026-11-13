@@ -88,19 +88,27 @@ public:
 	 * the context is restored and the CPU released with the EEM on (as
 	 * resume()); once the EEM has stopped it, its context is saved again
 	 * (SyncJtag_Conditional_SaveContextXv2) and trigger block 0 and
-	 * BREAKREACT are written back as they were. A CPU that is off with no
-	 * interrupt pending executes nothing: it is released and taken again
-	 * without a trigger. Ok: stop reason Step. BadState when not attached,
-	 * Running when it runs (nothing sent). Timeout: the stop did not show
-	 * within 495 reads of the EEM control register (the instruction may
-	 * have put the CPU to sleep); the CPU is stopped and its context saved
-	 * as halt() does, trigger block 0 written back, stop reason Request.
-	 * TargetError, the debugger detached: after a release without a
-	 * trigger the JTAG ID is not 0x91 (the target reset, lost power or went
-	 * into LPMx.5): the EEM is turned off, the CPU released where it is
-	 * with nothing written to it, the pins released; or the sync after the
-	 * release failed: the CPU is let go as attach(Running) describes for
-	 * its failures, trigger block 0 written back before. */
+	 * BREAKREACT are written back as they were. With GIE set and an
+	 * interrupt pending, the CPU takes it after the instruction and the
+	 * step ends at the handler's first instruction, as in MSPDS and the
+	 * DLL. A CPU that is off with no interrupt pending executes nothing: it
+	 * is released and taken again without a trigger; an interrupt that
+	 * arrives during that brief release runs until the sync stops it, and
+	 * the result is still Step. The CPU is released with the firmware's own
+	 * WDTCTL, so the watchdog counts during each step (as in the DLL).
+	 * Ok: stop reason Step. BadState when not attached, Running when it
+	 * runs (nothing sent). Timeout: the stop did not show within 495 reads
+	 * of the EEM control register; the CPU is stopped and its context saved
+	 * as halt() does, trigger block 0 written back, stop reason Request. A
+	 * step over an instruction that enters a low-power mode ends so,
+	 * although the instruction executed (design spec item 17): the CPU
+	 * fetches nothing more. TargetError, the debugger detached: after a
+	 * release without a trigger the JTAG ID is not 0x91 (the target reset,
+	 * lost power or went into LPMx.5): the EEM is turned off, the CPU
+	 * released where it is with nothing more written to it, the pins
+	 * released; or the sync after the release failed: the CPU is let go as
+	 * attach(Running) describes for its failures, trigger block 0 written
+	 * back before. */
 	Status step();
 
 	/* R0 (PC) and R2 (SR) come from the saved context, R3 reads 0. Values

@@ -1838,7 +1838,12 @@ Log step_give_back(const unsigned tb0[5])
 /* A breakpoint in trigger block 0 with a different value in each of its
  * five registers (value, control, mask, combination 0, BREAKREACT), so that
  * each must come back from its own read. */
-const unsigned kTb0Bp[5] = {0x14600, 0x0040, 0x00003, 0x0005, 0x00A1};
+constexpr unsigned kTb0Bp[5] = {0x14600, 0x0040, 0x00003, 0x0005, 0x00A1};
+
+/* kTb0Bp under the step trigger (the MyIn table leaves the value register
+ * alone): what the sync's own EEM stop after a step timeout finds in trigger
+ * block 0 and puts back. */
+constexpr unsigned kTb0StepTrigger[5] = {kTb0Bp[0], 0, 0xFFFFF, 1, 1};
 
 void set_tb0(FakeTap &t, const unsigned tb0[5])
 {
@@ -1969,9 +1974,8 @@ TEST(debugger_step_timeout_halts_through_the_eem_and_gives_trigger_block_0_back)
 	f.t.mab = 0x4A04;
 	CHECK(f.d.step() == Status::Timeout);
 	CHECK(f.scripts_consumed());
-	const unsigned step_tb0[5] = {0x14600, 0, 0xFFFFF, 1, 1};
 	CHECK_LOG(f.t.log, step_borrow() + restore_release(0x4520, 0x0008, 0x6904, 0x0007) +
-				   step_poll(496) + eem_stop(1, step_tb0) + sync_tail(0x6904, 0x0009) +
+				   step_poll(496) + eem_stop(1, kTb0StepTrigger) + sync_tail(0x6904, 0x0009) +
 				   step_give_back(kTb0Bp));
 	CHECK(tb0_holds(f.t, kTb0Bp));
 	CHECK(f.d.attached());
@@ -2143,8 +2147,7 @@ TEST(debugger_step_timeout_with_a_failed_sync_gives_trigger_block_0_back)
 	CHECK(!f.d.running());
 	CHECK(f.d.stop_reason() == StopReason::None);
 	CHECK(tb0_holds(f.t, kTb0Bp));
-	const unsigned step_tb0[5] = {0x14600, 0, 0xFFFFF, 1, 1};
-	CHECK(contains(f.t.log, eem_stop(1, step_tb0)));
+	CHECK(contains(f.t.log, eem_stop(1, kTb0StepTrigger)));
 	const Log tail = Log{ir(0x30), d16(0x0006)} + step_give_back(kTb0Bp) + Log{ir(0xA8), "close"};
 	CHECK_LOG(last(f.t.log, tail.size()), tail);
 }
@@ -2192,4 +2195,26 @@ TEST(debugger_failure_after_a_step_leaves_trigger_block_0_alone)
 	CHECK_LOG(f.t.log, Log{"ir:28"} + kAbandon);
 	CHECK(f.t.eem_writes.empty());
 	CHECK_EQ(f.t.eem[0x00], 0x4800u);
+}
+
+TEST(debugger_step_after_an_sr_write_clearing_cpuoff_uses_the_trigger)
+{
+	/* SingleStepXv2.c:88 looks at the SR the release writes back (the DLL
+	 * passes its register cache): a CPU saved in LPM3 whose SR was written
+	 * without CPUOFF wakes up on the release and is stepped with the
+	 * trigger, released at its PC (no Note 1411 correction) */
+	Fx f;
+	attached_in_lpm3(f);
+	REQUIRE(f.d.write_reg(2, 0x00C8) == Status::Ok); /* SCG1 + SCG0 + GIE */
+	CHECK(f.t.log.empty());
+	f.t.cntrl_sig = 0x0301;
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.captured = {0x00C8, 0x0000};
+	REQUIRE(f.d.step() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK_LOG(f.t.log, step_borrow() + restore_release(0x4522, 0x00C8, 0x6904, 0x0007) +
+				   step_poll(1) + Log{ir(0xD0), d16(0)} + sync_tail(0x6904, 0x00C8) +
+				   step_give_back(kTb0Zero));
+	CHECK(f.d.stop_reason() == StopReason::Step);
+	CHECK_EQ(f.d.pc(), 0x4520u);
 }
