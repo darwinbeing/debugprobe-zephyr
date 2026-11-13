@@ -95,10 +95,21 @@ public:
 	Status read_mem(uint32_t addr, size_t nwords, uint8_t *dst);
 	Status write_mem(uint32_t addr, size_t nwords, const uint8_t *src);
 
-	/* One instruction-fetch trigger per breakpoint, index < kHwBreakpoints.
-	 * Halted only. */
+	/* Breakpoint `index` (< kHwBreakpoints) on the instruction fetch at
+	 * `addr`: EEM trigger block `index` compares the MAB, combination
+	 * `index` holds it alone, BREAKREACT bit `index` arms it; it stops the
+	 * CPU once resume() enables the EEM. Setting an index again moves it.
+	 * BadState when not attached, Running while the CPU runs, BadArg (no
+	 * TAP traffic) for an index of kHwBreakpoints or more, an odd address
+	 * or one above 20 bits. TargetError if the trigger block's value does
+	 * not read back (no such trigger block, or a dead link): the block is
+	 * then disarmed, so a breakpoint this index held before is gone too. */
 	Status set_breakpoint(unsigned index, uint32_t addr);
-	/* kNoBreakpoint clears all trigger blocks. */
+	/* Disarm breakpoint `index` (its combination register and BREAKREACT
+	 * bit cleared), Ok also when it was not set; kAllBreakpoints disarms
+	 * every trigger block. BadState and Running as set_breakpoint; BadArg
+	 * (no TAP traffic) for any other index of kHwBreakpoints or more. Reads
+	 * nothing back: a dead link goes unnoticed here. */
 	Status clear_breakpoint(unsigned index);
 
 private:

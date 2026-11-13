@@ -95,10 +95,21 @@
  *    does, trigger block 0 is restored and Timeout returned (MSPDS returns
  *    an error and leaves trigger block 0 set up for the step);
  *  - breakpoints: one trigger block per breakpoint, set up as the trigger
- *    SyncJtag_Conditional_SaveContextXv2 uses for "next instruction fetch",
- *    with the exact address; the value register is read back to confirm
- *    that the trigger block exists. All trigger blocks are cleared on
- *    attach and detach.
+ *    SyncJtag_Conditional_SaveContextXv2 uses for "next instruction fetch"
+ *    (lines 130-137), with the exact address and no mask, as the DLL's code
+ *    breakpoint (DLL430_OldApiV3.cpp:2536, AddressCondition430,
+ *    Trigger430::setMask). Combination i holds trigger i alone; the DLL
+ *    assigns combinations from 0 up (TriggerConfigurator430). The value
+ *    register is read back to confirm that the trigger block exists; if it
+ *    does not read back, the block is disarmed and TargetError returned.
+ *    Clearing writes the combination register and BREAKREACT only; the DLL
+ *    also zeroes value, control and mask (Trigger430::reset) and rewrites
+ *    CCNT1_REACT, STOR_REACT and the sequencer control SEQ_CTL
+ *    (TriggerManager430::writeTriggerReactions, Sequencer430), which are
+ *    left as found here. Breakpoints change only while the CPU is halted
+ *    (the DLL also changes hardware breakpoints of a running CPU), and the
+ *    index and address are checked (BadArg; the DLL checks neither). All
+ *    trigger blocks are cleared on attach and detach.
  *
  * Copyright (C) 2012 Texas Instruments Incorporated - http://www.ti.com/
  *
@@ -883,6 +894,66 @@ Status Debugger::write_mem(uint32_t addr, size_t nwords, const uint8_t *src)
 		write_word(a, word);
 	}
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
+}
+
+/* Trigger block `index` set up through EemDataExchangeXv2.c:88-106 as
+ * SyncJtag_Conditional_SaveContextXv2.c:130-137 sets up trigger block 0 for
+ * "next instruction fetch", with the exact address (mask none, as the DLL's
+ * code breakpoint); combination `index` holds trigger `index` alone. The
+ * read-back and the disarming on its failure are not in MSPDS (see the
+ * header). */
+Status Debugger::set_breakpoint(unsigned index, uint32_t addr)
+{
+	if (!attached_) {
+		return Status::BadState;
+	}
+	if (running_) {
+		return Status::Running;
+	}
+	if (index >= kHwBreakpoints || addr >= kAddressSpace || (addr & 1u) != 0) {
+		return Status::BadArg;
+	}
+	const uint8_t tb = static_cast<uint8_t>(index * kTriggerBlockSize);
+	tap_.ir_shift(kIrEmexDataExchange32);
+	eem_write(static_cast<uint8_t>(tb + kMbTrigVal), addr);
+	eem_write(static_cast<uint8_t>(tb + kMbTrigCtl), kCmpEqualFetchMab);
+	eem_write(static_cast<uint8_t>(tb + kMbTrigMsk), kNoMask);
+	eem_write(static_cast<uint8_t>(tb + kMbTrigCmb), 1u << index);
+	if ((eem_read(static_cast<uint8_t>(tb + kMbTrigVal)) & 0xFFFFFu) != addr) {
+		/* no such trigger block, or a dead link: disarm it, and with it a
+		 * breakpoint this index held before */
+		bp_used_ &= ~(1u << index);
+		eem_write(static_cast<uint8_t>(tb + kMbTrigCmb), 0);
+		eem_write(kBreakReact, bp_used_);
+		return Status::TargetError;
+	}
+	bp_addr_[index] = addr;
+	bp_used_ |= 1u << index;
+	eem_write(kBreakReact, bp_used_);
+	return Status::Ok;
+}
+
+/* The combination register and BREAKREACT only (see the header). */
+Status Debugger::clear_breakpoint(unsigned index)
+{
+	if (!attached_) {
+		return Status::BadState;
+	}
+	if (running_) {
+		return Status::Running;
+	}
+	if (index == kAllBreakpoints) {
+		clear_triggers();
+		return Status::Ok;
+	}
+	if (index >= kHwBreakpoints) {
+		return Status::BadArg;
+	}
+	bp_used_ &= ~(1u << index);
+	tap_.ir_shift(kIrEmexDataExchange32);
+	eem_write(static_cast<uint8_t>(index * kTriggerBlockSize + kMbTrigCmb), 0);
+	eem_write(kBreakReact, bp_used_);
+	return Status::Ok;
 }
 
 } // namespace msp430
