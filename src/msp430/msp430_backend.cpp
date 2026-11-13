@@ -8,6 +8,7 @@
 #include "dap/interfaces.hpp"
 #include "leds.hpp"
 #include "msp430/cpuxv2.hpp"
+#include "msp430/debug.hpp"
 #include "msp430/pio_sbw_port.hpp"
 #include "msp430/sbw_tap.hpp"
 #include "msp430/session.hpp"
@@ -28,7 +29,8 @@ constexpr uint16_t kMaxDataBytes = probe::usb::kDapPacketSize - 8;
 PioSbwPort g_port{DEVICE_DT_GET(DT_NODELABEL(sbw_pio))};
 msp430::SbwTap g_tap{g_port};
 msp430::Cpuxv2 g_cpu{g_tap};
-msp430::Session g_session{g_cpu, kMaxDataBytes};
+msp430::Debugger g_dbg{g_tap, g_cpu};
+msp430::Session g_session{g_cpu, g_dbg, kMaxDataBytes};
 LedHostStatus g_led; /* stateless: drives the DAP-connected LED, if any */
 
 class Handler final : public dap::VendorHandler {
@@ -44,7 +46,8 @@ public:
 		return n;
 	}
 
-	/* Light the DAP-connected LED while an SBW session is open. */
+	/* Light the DAP-connected LED while an SBW session (programming or
+	 * debugging) is open. */
 	void update_led()
 	{
 		const bool open = g_session.state() != msp430::State::Idle;
