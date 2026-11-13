@@ -1032,7 +1032,7 @@ TEST(debugger_set_breakpoint_checks_its_arguments)
 	CHECK(f.t.log.empty());
 }
 
-TEST(debugger_set_breakpoint_detects_a_missing_trigger_block)
+TEST(debugger_set_breakpoint_detects_a_floating_line)
 {
 	Fx f;
 	f.attached();
@@ -1046,6 +1046,29 @@ TEST(debugger_set_breakpoint_detects_a_missing_trigger_block)
 	CHECK_LOG(f.t.log, want);
 	CHECK_EQ(f.t.eem[0x3E], 0u);
 	CHECK_EQ(f.t.eem[0x80], 0u);
+}
+
+TEST(debugger_set_breakpoint_detects_a_missing_trigger_block)
+{
+	Fx f;
+	f.attached();
+	f.t.eem_read_as[0x38] = 0; /* no trigger block 7: its value reads 0 */
+	CHECK(f.d.set_breakpoint(7, 0x4400) == Status::TargetError);
+	const Log want = Log{ir(0xB0)} + eem_write(0x38, 0x4400) + eem_write(0x3A, 0) +
+			 eem_write(0x3C, 0) + eem_write(0x3E, 0x0080) + eem_read(0x38) +
+			 eem_write(0x3E, 0) + eem_write(0x80, 0);
+	CHECK_LOG(f.t.log, want);
+	CHECK_EQ(f.t.eem[0x3E], 0u);
+	CHECK_EQ(f.t.eem[0x80], 0u);
+}
+
+TEST(debugger_set_breakpoint_reads_back_20_bits)
+{
+	Fx f;
+	f.attached();
+	f.t.eem_read_as[0x10] = 0xFFF14A2C; /* bits above the 20-bit address */
+	REQUIRE(f.d.set_breakpoint(2, 0x14A2C) == Status::Ok);
+	CHECK_EQ(f.t.eem[0x80], 0x0004u);
 }
 
 TEST(debugger_set_breakpoint_failure_disarms_the_breakpoint_it_replaces)

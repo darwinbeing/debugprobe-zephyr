@@ -25,6 +25,24 @@ TEST(fake_tap_eem_exchange_reads_and_writes_without_error)
 	CHECK(!t.eem_protocol_error);
 }
 
+TEST(fake_tap_eem_read_as_replaces_what_a_register_reads)
+{
+	FakeTap t;
+	t.eem_read_as[0x10] = 0xFFF14A2C;
+	t.ir_shift(msp430::kIrEmexDataExchange32);
+	t.dr_shift32(0x10); /* the write is stored as before */
+	t.dr_shift32(0x00014A2C);
+	t.dr_shift32(0x11);
+	CHECK_EQ(t.dr_shift32(0), 0xFFF14A2Cu);
+	t.dr_shift32(0x12); /* other registers read what was written */
+	t.dr_shift32(0x00000005);
+	t.dr_shift32(0x13);
+	CHECK_EQ(t.dr_shift32(0), 0x00000005u);
+	CHECK_EQ(t.eem[0x10], 0x00014A2Cu);
+	CHECK_EQ(t.eem_writes.size(), 2u);
+	CHECK(!t.eem_protocol_error);
+}
+
 TEST(fake_tap_eem_ir_shift_with_address_pending_is_an_error)
 {
 	FakeTap t;
