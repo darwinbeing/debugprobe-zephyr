@@ -34,8 +34,9 @@
  *  - after the watchdog is held and before SR is saved, the sync waits up to
  *    100 ms for the flash controller to finish an erase or write the
  *    firmware had started (FCTL3.BUSY; not in MSPDS). The design spec
- *    (item 14) put this wait before the hold; holding first keeps the
- *    watchdog from resetting the device during the wait;
+ *    (item 14) originally put this wait before the hold; the Task 5 review
+ *    changed both. Holding first keeps the watchdog from resetting the
+ *    device during the wait;
  *  - SyncJtag_AssertPor_SaveContextXv2 leaves out the per-module clock
  *    control (ETKEYSEL/ETCLKSEL), whose module codes come from the DLL's
  *    device database; the modules keep their reset defaults. GENCLKCTRL ends
