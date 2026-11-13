@@ -112,8 +112,10 @@ public:
 	 *  - MOVA Rn, &0x0FF6: (w & 0xF0FF) == 0x0060 (abs19:16 = 0), then
 	 *    0x0FF6 only: ReadCpuRegXv2 with altRomAddressForCpuRead
 	 *    (edt.h:541-589), the register captured from the data bus;
-	 *  - JMP $-4, 0x3FFD: after those MOVAs (edt.h:565, 663);
-	 *  - NOP (MOV #0, R3), 0x4303: SetPcXv2 (edt.h:745);
+	 *  - JMP $-4, 0x3FFD, which MSPDS feeds after those MOVAs (edt.h:565,
+	 *    663), and NOP (MOV #0, R3), 0x4303, which SetPcXv2 feeds after its
+	 *    MOVA (edt.h:745): both accepted wherever an instruction is due, not
+	 *    only there;
 	 *  - SAFE_PC_ADDRESS 0x0004 (Bios/src/hal/JTAG_defs.h:118) as the first
 	 *    word after a power-on reset through the control signal (POR bit
 	 *    0x0800), which the CPU takes for its PC
@@ -123,7 +125,15 @@ public:
 	 * release (IR_CNTRL_SIG_RELEASE) while an extension word is still due
 	 * (the CPU would fetch it from memory) sets unexpected_instruction: the
 	 * CPU would execute something the debugger never feeds, such as a store
-	 * to flash or to the flash controller. */
+	 * to flash or to the flash controller.
+	 * The decoder works per shift and ignores TCLK and CPUSUSP: it cannot
+	 * see the CPU run from memory between fed words, nor which word a clock
+	 * edge latches (in MSPDS a word is shifted first and the clock that
+	 * follows latches it). A sequence with clocks added or dropped, such as
+	 * two more TCLK cycles under IR_ADDR_CAPTURE with the control signal at
+	 * 0x1401, or no TCLK cycle between the 0x0FF6 and 0x3FFD shifts, passes
+	 * it; the exact transcripts of test_debugger.cpp catch those (see
+	 * debugger_never_writes_flash). */
 	std::vector<uint16_t> cpu_words;
 	bool unexpected_instruction = false;
 

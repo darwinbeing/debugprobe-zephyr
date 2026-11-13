@@ -324,8 +324,9 @@ TEST(fake_tap_flags_a_20_or_32_bit_shift_under_data_to_addr)
 
 namespace {
 
-/* `words` under IR_DATA_16BIT, a TCLK cycle before each, as the MSPDS
- * helpers feed them */
+/* `words` under IR_DATA_16BIT with a TCLK cycle before each shift. The
+ * decoder ignores TCLK, so the order does not matter here; in MSPDS the
+ * word is shifted first and the clock that follows latches it. */
 void feed(FakeTap &t, const std::vector<uint16_t> &words)
 {
 	t.ir_shift(msp430::kIrData16Bit);

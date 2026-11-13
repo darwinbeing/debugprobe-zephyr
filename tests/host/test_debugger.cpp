@@ -2317,7 +2317,18 @@ TEST(debugger_attach_detaches_an_open_session_first)
  * only store is MOVA Rn, &0x0FF6); uses only the JTAG instructions listed
  * at the end; feeds nothing to the mailbox. The fault flags are checked
  * after each operation (the fixture checks them at the end of every
- * test). */
+ * test).
+ *
+ * This test alone is not the guarantee. FakeTap decodes the fed words per
+ * shift and ignores TCLK and CPUSUSP, so it cannot see the CPU run from
+ * memory between fed words, nor which word a clock edge latches: two more
+ * TCLK cycles under IR_ADDR_CAPTURE with the control signal at 0x1401, or
+ * a TCLK cycle dropped between the 0x0FF6 and 0x3FFD shifts, pass it. The
+ * guarantee is the three together: the fault flags, checked in every
+ * test's fixture; the address and IR allow-lists here; and the exact
+ * transcripts (the *_follows_mspds_* tests and the others that compare a
+ * whole transcript), which pin debug.cpp to the MSPDS macros clock for
+ * clock and catch such clock changes. */
 TEST(debugger_never_writes_flash)
 {
 	using Write = std::pair<uint32_t, uint16_t>;
