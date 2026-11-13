@@ -11,12 +11,15 @@
  * Deliberate differences from MSPDS:
  *  - a sync that does not complete (SyncJtagXv2, wait_for_synch), a CPU pipe
  *    that never empties, or a JTAG ID other than 0x91 in the IR capture of
- *    SyncJtagXv2 (MSPDS discards it there) or at the start of
- *    SyncJtag_AssertPor_SaveContextXv2 (MSPDS takes the other devices'
- *    paths there) ends the operation with TargetError; the CPU, not yet in
- *    full emulation, is then released without anything written (MSPDS
- *    carries on, except that a failed wait_for_synch returns an error
- *    without releasing the CPU);
+ *    SyncJtagXv2 or wait_for_synch (MSPDS discards it there) or at the
+ *    start of SyncJtag_AssertPor_SaveContextXv2 (MSPDS takes the other
+ *    devices' paths there) ends the operation with TargetError; the CPU,
+ *    not yet in full emulation, is then released without anything written
+ *    to the target's memory (MSPDS carries on, except that a failed
+ *    wait_for_synch returns an error without releasing the CPU). When
+ *    SyncJtag_AssertPor_SaveContextXv2 has already switched the system
+ *    clocks to JCK (GENCLKCTRL), they are switched back first (lines
+ *    198-201, as its success path ends);
  *  - WDTCTL is checked for its read password 0x69 before it is written, not
  *    afterwards as the DLL does (WatchdogControl::checkRead);
  *  - "check for Init State" after a sync is Cpuxv2::in_full_emulation(),
@@ -30,8 +33,10 @@
  *    RestoreContext_ReleaseJtagXv2, the PC 2 lower if the control signal
  *    shows CPUOFF), SR and WDTCTL unwritten. In
  *    SyncJtag_AssertPor_SaveContextXv2 the power-on reset has left the CPU
- *    at SAFE_PC_ADDRESS (0x0004, vacant memory) and the reset vector is not
- *    read yet: the CPU gets another power-on reset (EEM off,
+ *    at SAFE_PC_ADDRESS (0x0004, vacant memory), or after a failed
+ *    init-state check its state is unknown, and the reset vector is not
+ *    read yet: the system clocks are switched back (GENCLKCTRL 0x000E,
+ *    lines 198-201), then the CPU gets another power-on reset (EEM off,
  *    ReleaseDevice_430Xv2(V_RESET), as detach(Reset)) and starts at its
  *    reset vector;
  *  - the PC derived from the MAB (MAB - 4, or - 2 in a low-power mode) is
@@ -52,7 +57,8 @@
  *    control (ETKEYSEL/ETCLKSEL), whose module codes come from the DLL's
  *    device database; the modules keep their reset defaults. GENCLKCTRL ends
  *    at 0x000E as in MSPDS: MCLK, SMCLK and ACLK stop while the CPU is
- *    halted;
+ *    halted. It also ends there when the macro fails after switching the
+ *    clocks to JCK (0x6D8E); MSPDS then returns with them on JCK;
  *  - SingleStepXv2 polls up to 496 times as MSPDS does (its counter starts
  *    at 4); if the CPU has not stopped by then, it is stopped as halt()
  *    does, trigger block 0 is restored and Timeout returned (MSPDS returns
@@ -310,16 +316,26 @@ bool Debugger::sync_jtag()
 }
 
 /* wait_for_synch, edt.h:819-830 (50 polls; MSPDS reads up to 51 times but
- * fails on the 51st anyway). */
+ * fails on the 51st anyway). MSPDS discards the JTAG ID of the capture. */
 bool Debugger::wait_for_sync()
 {
-	tap_.ir_shift(kIrCntrlSigCapture);
+	if (tap_.ir_shift(kIrCntrlSigCapture) != kJtagId91) {
+		return false;
+	}
 	for (unsigned i = 0; i < kSyncPolls; ++i) {
 		if ((tap_.dr_shift16(0) & kSigSync) != 0) {
 			return true;
 		}
 	}
 	return false;
+}
+
+/* SyncJtag_AssertPor_SaveContextXv2.c:198-201: switch the system clocks back
+ * to their own sources but keep them stopped while the CPU is halted. */
+void Debugger::restore_system_clocks()
+{
+	tap_.ir_shift(kIrEmexDataExchange32);
+	eem_write(kGenClkCtrl, kStopClocks);
 }
 
 /* eem_read_control() + SetReg_16Bits(0) */
@@ -354,7 +370,9 @@ void Debugger::eem_write(uint8_t reg, uint32_t value)
 /* ---- context save and restore ---- */
 
 /* Not in MSPDS: release a CPU that has not reached full emulation, without
- * writing anything to the target, and let go of the pins. */
+ * writing anything to the target's memory, and let go of the pins. EEM
+ * registers only: the EEM is turned off (and on the reset path the caller
+ * has first switched the system clocks back, restore_system_clocks()). */
 void Debugger::abandon()
 {
 	write_control(kEmuClkEn | kClearStop);
@@ -534,6 +552,7 @@ Status Debugger::sync_assert_por()
 	tap_.ir_shift(kIrCntrlSig16Bit);
 	tap_.dr_shift16(0x1501);
 	if (!wait_for_sync()) {
+		restore_system_clocks(); /* as MSPDS leaves them on success */
 		abandon();
 		return Status::TargetError;
 	}
@@ -566,10 +585,12 @@ Status Debugger::sync_assert_por()
 	tap_.set_tclk();
 	write_control(kEmuFeatEn | kEmuClkEn | kClearStop);
 	/* "check that sequence exits on Init State" (unchecked in MSPDS), then
-	 * hold the watchdog. On failure the CPU is in full emulation with its PC
-	 * at SAFE_PC, so it is reset again rather than let go there; see the
-	 * file header. No flash wait: after the POR no flash operation runs. */
+	 * hold the watchdog. On failure the POR has left the CPU at SAFE_PC, or
+	 * (failed init-state check) its state is unknown: it is not let go
+	 * there but, its clocks switched back, reset again; see the file
+	 * header. No flash wait: after the POR no flash operation runs. */
 	if (!cpu_.in_full_emulation() || !hold_watchdog()) {
+		restore_system_clocks();
 		release_with_reset();
 		return Status::TargetError;
 	}
@@ -579,8 +600,7 @@ Status Debugger::sync_assert_por()
 	ctx_.sr = 0; /* always 0 after a POR */
 	ctx_.irq = 0;
 	/* module clock control (ETKEYSEL/ETCLKSEL): not ported, see the header */
-	tap_.ir_shift(kIrEmexDataExchange32);
-	eem_write(kGenClkCtrl, kStopClocks);
+	restore_system_clocks();
 	/* JTAG ID 0x91: reset the vacant-memory flag in SFRIFG1 */
 	const uint16_t sfr = read_word(kSfrIfg1);
 	if ((sfr & kVmaIfg) != 0) {

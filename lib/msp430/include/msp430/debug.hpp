@@ -28,12 +28,13 @@ public:
 	 * the CPU stops at the reset vector (stop reason Reset). Then the device
 	 * ID is read and all EEM triggers are cleared. Statuses as
 	 * Cpuxv2::connect. On failure the pins are released and the CPU is let
-	 * go: before it reached full emulation with nothing written; in full
-	 * emulation before its context was saved, at the PC where it stopped
-	 * (SR and WDTCTL unwritten), except that with Reset, whose power-on
-	 * reset left the CPU at a safe address, it gets another power-on reset
-	 * as detach(Reset) does; after that with its context restored, as
-	 * detach(Run) does. */
+	 * go: before it reached full emulation with nothing written to its
+	 * memory; in full emulation before its context was saved, at the PC
+	 * where it stopped (SR and WDTCTL unwritten), except that with Reset,
+	 * whose power-on reset left the CPU at a safe address, it gets another
+	 * power-on reset as detach(Reset) does; after that with its context
+	 * restored, as detach(Run) does. With Reset, system clocks already
+	 * switched to the JTAG clock are switched back before any release. */
 	Status attach(AttachMode mode, uint32_t slot_hz, Identity &id);
 	/* Clear the triggers, then Run: restore the context and let the program
 	 * continue where it stopped; Reset: power-on reset and run. Releases
@@ -90,6 +91,7 @@ private:
 	Status sync_assert_por();
 	bool sync_jtag();
 	bool wait_for_sync();
+	void restore_system_clocks();
 	bool hold_watchdog();
 	void save_status_register();
 	void wait_flash_idle();
