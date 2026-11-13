@@ -35,8 +35,11 @@ config PROBE_MSP430_SBW
 	  docs/MSP430_DEBUG.md.
 
 # The SBW vendor command runs on the USB device thread and nests deeper than
-# the SWD path (engine -> Session -> Cpuxv2 -> SbwTap -> port -> PIO driver).
-# Zephyr's default of 1024 bytes leaves no margin for it.
+# the SWD path (engine -> Session -> Debugger -> Cpuxv2/SbwTap -> port -> PIO
+# driver). Zephyr's default of 1024 bytes leaves no margin for it. Static worst
+# case of the debug paths, measured with -fstack-usage and the call graph on
+# 2026-11-13: 1312 of 2048 bytes on the RP2040 boards (rpi_pico2: 1164), so
+# 2048 is kept.
 config USBD_THREAD_STACK_SIZE
 	default 2048 if PROBE_MSP430_SBW
 
