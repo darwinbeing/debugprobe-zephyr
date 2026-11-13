@@ -40,7 +40,8 @@ public:
 	 * switched to the JTAG clock are switched back before any release. */
 	Status attach(AttachMode mode, uint32_t slot_hz, Identity &id);
 	/* A running CPU is halted first (halt()); if that fails, the CPU has
-	 * been let go as halt() describes and nothing more is done. Then the
+	 * been let go as halt() describes and nothing more is done: with Reset,
+	 * no reset happens and the program keeps running as it is. Then the
 	 * triggers are cleared and the EEM sequencer is turned off, and Run:
 	 * the context is restored and the program continues where it stopped,
 	 * EEM off; Reset: power-on reset and run. Releases the pins. Does

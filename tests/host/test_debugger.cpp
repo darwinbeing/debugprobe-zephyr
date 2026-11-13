@@ -1615,15 +1615,93 @@ TEST(debugger_run_control_needs_an_attached_cpu)
 	CHECK(f.d.halt() == Status::BadState);
 	CHECK(f.d.resume() == Status::BadState);
 	CHECK(f.d.poll(halted) == Status::BadState);
+	CHECK(halted); /* as documented: true when not attached */
 	CHECK(f.t.log.empty());
 	f.attached();
 	f.d.detach(DetachAction::Run);
 	f.t.log.clear();
 	CHECK(f.d.halt() == Status::BadState);
 	CHECK(f.d.resume() == Status::BadState);
+	halted = false;
 	CHECK(f.d.poll(halted) == Status::BadState);
+	CHECK(halted);
 	CHECK(f.t.log.empty());
 	CHECK(!f.d.running());
+}
+
+TEST(debugger_halt_refuses_a_watchdog_without_its_password)
+{
+	/* The sync's watchdog check fails after the CPU reached full emulation:
+	 * released at the PC where it stopped (release_unsaved), SR and WDTCTL
+	 * unwritten, EEM off. */
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.mem_writes.clear();
+	f.t.memory[0x015C] = 0x1234; /* link fault: not a WDTCTL read */
+	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
+	CHECK(f.d.halt() == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.t.mem_writes.empty());
+	CHECK(!contains(f.t.log, Log{"dr20:00144"})); /* no flash-controller wait */
+	const Log want = read_word(0x015C) + release_at(0x4520, false, 0x0006) + Log{"close"};
+	CHECK_LOG(last(f.t.log, want.size()), want);
+}
+
+TEST(debugger_poll_when_the_link_dies_after_the_id_read)
+{
+	/* The line floats from the EEM control read on: it reads 0xFFFF, which
+	 * has EEM_STOPPED set, so the sync is attempted; its ID capture fails and
+	 * the CPU is let go (abandon()). Nothing reaches memory or the EEM
+	 * registers. */
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.mem_writes.clear();
+	f.t.eem_writes.clear();
+	f.t.eem_control_writes.clear();
+	f.t.ones_after_shifts = f.t.shifts() + 1;
+	bool halted = true;
+	CHECK(f.d.poll(halted) == Status::TargetError);
+	CHECK(!halted);
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK_LOG(f.t.log, (Log{"ir:28", "ir:d0", "dr16:0000", "ir:d0", "dr16:0000",
+				"ir:30", "dr16:0005", "ir:c8", "dr16:1501", "ir:28"} +
+			    kAbandon));
+	CHECK(f.t.eem_control_writes == (std::vector<uint16_t>{0x0005, 0x0006}));
+	CHECK(f.t.mem_writes.empty());
+	CHECK(f.t.eem_writes.empty());
+}
+
+TEST(debugger_halt_racing_a_breakpoint_stop_reports_a_request)
+{
+	/* A breakpoint stops the CPU between WaitForEem's look (not stopped) and
+	 * the macro's own look (stopped): the macro skips the stop request and
+	 * syncs, and halt() reports Request. The CPU's state equals that of a
+	 * breakpoint stop; only the label differs, as in the DLL, whose polling
+	 * has the same window before its stop. */
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.set_breakpoint(2, 0x4600) == Status::Ok);
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.eem_control_script = {0x0000, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	f.t.mab = 0x4604;
+	REQUIRE(f.d.halt() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::Request);
+	CHECK_EQ(f.d.breakpoint_hit(), msp430::kNoBreakpoint);
+	CHECK_EQ(f.d.pc(), 0x4600u);
+	/* the same transcript as a stop poll() finds, after the one look */
+	CHECK_LOG(f.t.log, Log{"ir:28", "ir:d0", "dr16:0000", "ir:d0", "dr16:0000"} +
+				   sync_tail(0x6904, 0x0008));
 }
 
 /* Task 12's test of the same name, without step() (Task 11) */
