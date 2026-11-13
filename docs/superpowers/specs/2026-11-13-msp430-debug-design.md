@@ -119,7 +119,7 @@ are 20-bit numbers in 32-bit fields.
 
 | op | Name | Request args | Response data |
 |---|---|---|---|
-| 0x00 | INFO | – | as before; `version` = 2, new `state` values 3 DebugHalted, 4 DebugRunning; `features` bit 1: debugging; ninth byte `u8 hw_breakpoints` (0 until a debug session identified the device) |
+| 0x00 | INFO | – | as before; `version` = 2, new `state` values 3 DebugHalted, 4 DebugRunning; `features` bit 1: debugging; ninth byte `u8 hw_breakpoints` (the F5529's 8 EEM triggers; B1 supports only the F5529) |
 | 0x09 | DBG_ATTACH | `u8 mode` (0 attach without reset, 1 reset and halt at the reset vector), `u8 flags` (bit 0: full mode, B2 only), `u16 speed_khz`, `u32 ram_lo`, `u32 ram_hi` (the device's RAM range from the host's device table) | the CONNECT identity block, then `u32 pc`, `u8 stop_reason`, `u8 hw_breakpoints` |
 | 0x0A | DBG_DETACH | `u8 action` (0 restore context and run, 1 reset and run) | – |
 | 0x0B | DBG_HALT | – | `u32 pc` |
