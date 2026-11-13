@@ -41,23 +41,6 @@ class FramingTest(unittest.TestCase):
         self.assertEqual(rsp.frame(rsp.escape(b"#$*")), wire(b"}\x03}\x04}\x0a"))
 
 
-class RunLengthTest(unittest.TestCase):
-    def test_examples_from_the_gdb_manual(self):
-        self.assertEqual(rsp.run_length_decode(b"0* "), b"0000")
-        self.assertEqual(rsp.run_length_decode(b'0*"00'), b"00000000")
-
-    def test_count_is_the_character_minus_29(self):
-        self.assertEqual(rsp.run_length_decode(b"ab*!c"), b"abbbbbc")
-        self.assertEqual(rsp.run_length_decode(b"a*~"), b"a" * 98)
-        self.assertEqual(rsp.run_length_decode(b"x* * "), b"x" * 7)  # repeats the expanded run
-        self.assertEqual(rsp.run_length_decode(b"no runs"), b"no runs")
-
-    def test_invalid_runs(self):
-        for bad in (b"* ", b"0*", b"0*\x1d"):  # nothing to repeat, no count, count 0
-            with self.assertRaises(ValueError, msg=bad):
-                rsp.run_length_decode(bad)
-
-
 class PacketReaderTest(unittest.TestCase):
     def test_packets_acks_and_interrupts(self):
         r = rsp.PacketReader()
@@ -82,10 +65,10 @@ class PacketReaderTest(unittest.TestCase):
     def test_split_at_every_position(self):
         x_data = b"}#$*\x03:"
         stream = (b"+" + rsp.frame(b"m4400,2") + b"\x03" +
-                  rsp.frame(b"X2400,6:" + rsp.escape(x_data)) + b"-" + wire(b"0* "))
+                  rsp.frame(b"X2400,6:" + rsp.escape(x_data)) + b"-" + wire(b"X2400,3:a* "))
         expected = [("ack", None), ("packet", b"m4400,2"), ("interrupt", None),
                     ("packet", b"X2400,6:" + rsp.escape(x_data)), ("nack", None),
-                    ("packet", b"0000")]
+                    ("packet", b"X2400,3:a* ")]
         self.assertEqual(rsp.PacketReader().feed(stream), expected)
         for i in range(len(stream) + 1):
             r = rsp.PacketReader()
@@ -118,12 +101,17 @@ class PacketReaderTest(unittest.TestCase):
         self.assertEqual(r.feed(b"$g#68"), [("bad", None)])
         self.assertEqual(r.feed(b"$g#6g"), [("bad", None)])  # not hex
         self.assertEqual(r.feed(b"$\x07# 7$\x07#+7"), [("bad", None), ("bad", None)])  # two hex digits
-        self.assertEqual(r.feed(b"$0* #c0"), [("bad", None)])  # sum of the expanded payload
         self.assertEqual(r.feed(b"$m0,2#FB"), [("packet", b"m0,2")])  # either case
 
-    def test_invalid_run_length_is_a_bad_packet(self):
+    def test_raw_star_in_X_packet_data_is_a_data_byte(self):
+        # GDB need not escape '*' in what it sends, and never run-length
+        # encodes: "a*  " is four bytes, not a run of 'a'
+        data = b"a*  *"
         r = rsp.PacketReader()
-        self.assertEqual(r.feed(wire(b"*!") + wire(b"0*\x1c")), [("bad", None), ("bad", None)])
+        events = r.feed(wire(b"X2400,5:" + data))
+        self.assertEqual(events, [("packet", b"X2400,5:a*  *")])
+        self.assertEqual(rsp.unescape(events[0][1].split(b":", 1)[1]), data)
+        self.assertEqual(r.feed(wire(b"X2400,1:*")), [("packet", b"X2400,1:*")])
 
     def test_garbage_before_a_packet_is_dropped(self):
         r = rsp.PacketReader()
@@ -143,7 +131,7 @@ class PacketReaderTest(unittest.TestCase):
         self.assertEqual(packet, b"X2400,6:}]}\x03}\x04}\x0a\x03:")
         self.assertEqual(rsp.frame(packet), b"$X2400,6:}]}\x03}\x04}\x0a\x03:#59")
         events = rsp.PacketReader().feed(rsp.frame(packet))
-        self.assertEqual(events, [("packet", packet)])  # '}' 0x0a is not a run
+        self.assertEqual(events, [("packet", packet)])
         head, body = events[0][1].split(b":", 1)
         self.assertEqual((head, rsp.unescape(body)), (b"X2400,6", data))
 

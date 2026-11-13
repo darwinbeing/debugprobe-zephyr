@@ -7,13 +7,11 @@
 Binary payloads (the X packet, qXfer replies) escape '#', '$', '}' and '*'
 as '}' followed by the byte XOR 0x20.
 
-Run-length encoding: '*' and a count character c repeat the character
-before the '*' c - 29 more times ("0* " is "0000"). The checksum covers the
-packet as sent, runs unexpanded. The GDB manual describes runs in replies;
-GDB sends none, and it escapes '*' in its binary data, so the reader can
-expand runs in what it receives without misreading data. This module never
-sends runs, and frame() refuses a '*' because GDB would read it as the
-start of one.
+Run-length encoding ('*' and a count character) exists only in replies:
+GDB expands runs in what the server sends, so this module never sends them
+and frame() refuses a '*'. Packets GDB sends are not run-length encoded and
+are not expanded here: a '*' in a received packet is a data byte (the
+manual requires GDB to escape only '#', '$' and '}' in binary data).
 """
 from __future__ import annotations
 
@@ -61,37 +59,15 @@ def unescape(data: bytes) -> bytes:
     return bytes(out)
 
 
-def run_length_decode(data: bytes) -> bytes:
-    """`data` with its runs expanded. ValueError for a '*' with nothing
-    before it, without a count character, or with a count below 1 (the
-    counts GDB's own decoder accepts)."""
-    if b"*" not in data:
-        return bytes(data)
-    out = bytearray()
-    i = 0
-    while i < len(data):
-        b = data[i]
-        if b != 0x2A:  # '*'
-            out.append(b)
-            i += 1
-            continue
-        if not out or i + 1 >= len(data) or data[i + 1] - 29 < 1:
-            raise ValueError("invalid run-length encoding")
-        out += out[-1:] * (data[i + 1] - 29)
-        i += 2
-    return bytes(out)
-
-
 class PacketReader:
     """Splits the bytes GDB sends into events:
-    ("packet", payload), ("bad", None) for a packet with a wrong checksum or
-    an invalid run (answer it with a nack and GDB sends it again),
-    ("interrupt", None), ("ack", None) and ("nack", None). The payload has
-    its runs expanded; binary data in it is still escaped. 0x03 inside a
-    packet is data (an escaped '#'), not an interrupt. Other bytes between
-    packets are dropped, and so is an unfinished packet when a new '$'
-    arrives (packets never contain a raw '$'). An incomplete packet waits
-    for more data."""
+    ("packet", payload), ("bad", None) for a packet with a wrong checksum
+    (answer it with a nack and GDB sends it again), ("interrupt", None),
+    ("ack", None) and ("nack", None). The payload is the bytes as sent;
+    binary data in it is still escaped. 0x03 inside a packet is data (an
+    escaped '#'), not an interrupt. Other bytes between packets are dropped,
+    and so is an unfinished packet when a new '$' arrives (packets never
+    contain a raw '$'). An incomplete packet waits for more data."""
 
     def __init__(self):
         self._buf = bytearray()
@@ -123,7 +99,4 @@ class PacketReader:
     def _packet(raw: bytes, digits: bytes) -> tuple:
         if not _HEX.issuperset(digits) or int(digits, 16) != checksum(raw):
             return ("bad", None)
-        try:
-            return ("packet", run_length_decode(raw))
-        except ValueError:
-            return ("bad", None)
+        return ("packet", raw)
