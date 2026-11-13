@@ -23,7 +23,8 @@ class Debugger {
 public:
 	Debugger(Tap &tap, Cpuxv2 &cpu) : tap_(tap), cpu_(cpu) {}
 
-	/* Take the CPU under JTAG control (normal entry: RST stays high).
+	/* An open session is first ended as detach(Run) does. Then take the CPU
+	 * under JTAG control (normal entry: RST stays high).
 	 * Running: SyncJtag_Conditional_SaveContextXv2, the program stops where
 	 * it is (stop reason Request). Reset: SyncJtag_AssertPor_SaveContextXv2,
 	 * the CPU stops at the reset vector (stop reason Reset). Then the device

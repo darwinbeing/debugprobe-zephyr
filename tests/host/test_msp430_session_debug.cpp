@@ -68,6 +68,13 @@ Bytes bp_req(uint8_t index, uint32_t addr)
 	return b;
 }
 
+Bytes reg_req(uint8_t index, uint32_t value)
+{
+	Bytes b = {0x90, 0x10, index};
+	le32(b, value);
+	return b;
+}
+
 Bytes erase_req(uint8_t mode, uint32_t addr, uint32_t ram)
 {
 	Bytes b = {0x90, 0x05, mode};
@@ -294,73 +301,88 @@ TEST(session_dbg_attach_refused_while_connected_or_flashing)
 
 /* DBG_ATTACH in a debug session ends it as DBG_DETACH 0 does (a running CPU
  * is halted first; the program continues where it stopped), then attaches as
- * from Idle: the transcript is DBG_DETACH 0's followed by a fresh
- * DBG_ATTACH's, the RAM window comes from the new request, and the old
- * session's breakpoints are gone. */
+ * from Idle, with or without reset: the transcript is DBG_DETACH 0's followed
+ * by a fresh DBG_ATTACH's, the RAM window comes from the new request, and the
+ * old session's breakpoints are gone. */
 TEST(session_dbg_attach_in_a_debug_session_detaches_it_first)
 {
-	const Bytes req = attach_req(0, 0, 0x2400, 0x3000);
-	const Bytes want = {0x90, 0x00,
-			    0x91, 0x06, 0x01, 0x00, 0x1A, 0x00, 0x00, 0x55, 0x29, /* identity */
-			    0x20, 0x45, 0x00, 0x00,                               /* PC 0x4520 */
-			    0x01,                                                 /* stopped on request */
-			    0x08};                                                /* 8 breakpoints */
-	for (const bool running : {false, true}) {
-		/* The reference: DBG_DETACH 0 from the same session, then DBG_ATTACH
-		 * from Idle. */
-		Log detach;
-		Log fresh;
-		{
-			Fx g;
-			g.open_session(running);
-			if (running) {
-				g.cpu_runs();
-				g.tap.eem_control_script.push_front(0x0000); /* the halt's own look */
+	/* the reply and DBG_STATUS for attach mode 0 (PC 0x4520, stopped on
+	 * request) and mode 1 (the reset vector 0x441A, reset) */
+	const Bytes want[2] = {
+		{0x90, 0x00, 0x91, 0x06, 0x01, 0x00, 0x1A, 0x00, 0x00, 0x55, 0x29, /* identity */
+		 0x20, 0x45, 0x00, 0x00, 0x01, 0x08},                               /* 8 breakpoints */
+		{0x90, 0x00, 0x91, 0x06, 0x01, 0x00, 0x1A, 0x00, 0x00, 0x55, 0x29,
+		 0x1A, 0x44, 0x00, 0x00, 0x04, 0x08},
+	};
+	const Bytes status[2] = {
+		{0x90, 0x00, 0x01, 0x01, 0xFF, 0x20, 0x45, 0, 0},
+		{0x90, 0x00, 0x01, 0x04, 0xFF, 0x1A, 0x44, 0, 0},
+	};
+	for (const uint8_t mode : {0, 1}) {
+		const Bytes req = attach_req(mode, 0, 0x2400, 0x3000);
+		for (const bool running : {false, true}) {
+			/* The reference: DBG_DETACH 0 from the same session, then
+			 * DBG_ATTACH from Idle. */
+			Log detach;
+			Log fresh;
+			{
+				Fx g;
+				g.open_session(running);
+				if (running) {
+					g.cpu_runs();
+					g.tap.eem_control_script.push_front(0x0000); /* the halt's own look */
+				}
+				REQUIRE(g.run({0x90, 0x0A, 0x00}) == kOk);
+				detach = g.tap.log;
+				g.tap.log.clear();
+				if (mode == 0) {
+					g.cpu_runs();
+				}
+				CHECK_BYTES(g.run(req), want[mode]);
+				fresh = g.tap.log;
 			}
-			REQUIRE(g.run({0x90, 0x0A, 0x00}) == kOk);
-			detach = g.tap.log;
-			g.tap.log.clear();
-			g.cpu_runs();
-			CHECK_BYTES(g.run(req), want);
-			fresh = g.tap.log;
+			REQUIRE(!detach.empty());
+			CHECK(detach.back() == "close");
+			CHECK(std::find(detach.begin(), detach.end(), "ir:a8") != detach.end());
+			CHECK(std::find(detach.begin(), detach.end(), "dr16:0c01") == detach.end());
+			REQUIRE(!fresh.empty());
+			CHECK(fresh.front() == "speed:250000");
+
+			Fx f;
+			f.open_session(running);
+			if (running) {
+				/* the halt: WaitForEem's look, the sync's look, the stop poll */
+				f.tap.eem_control_script = {0x0000, 0x0000, 0x0080};
+				f.tap.captured = {0x0008, 0x0000};
+			}
+			if (mode == 0) {
+				/* the new session's look and stop poll */
+				f.tap.eem_control_script.insert(f.tap.eem_control_script.end(),
+								{0x0000, 0x0080});
+				f.tap.captured.insert(f.tap.captured.end(), {0x0008, 0x0000});
+			}
+			CHECK_BYTES(f.run(req), want[mode]);
+			CHECK_LOG(f.tap.log, detach + fresh); /* the old session's release first */
+			CHECK(f.tap.eem_control_script.empty());
+			CHECK(f.tap.captured.empty());
+			CHECK(f.s.state() == State::DebugHalted);
+			CHECK_BYTES(f.run({0x90, 0x0D}), status[mode]);
+
+			/* the RAM window of the new request, not the old session's */
+			CHECK_BYTES(f.run(write_req(0x2400, 2)), kOk);
+			CHECK_BYTES(f.run(write_req(0x2FFE, 2)), kOk);
+			CHECK_BYTES(f.run(write_req(0x1C00, 2)), kProtected);
+			CHECK_BYTES(f.run(write_req(0x3000, 2)), kProtected);
+
+			/* breakpoint 5 is gone: a stop at its address reports no
+			 * breakpoint (the fake's EEM stops the CPU there anyway) */
+			CHECK_BYTES(f.run({0x90, 0x0C}), kOk);
+			f.tap.eem_control_script = {0x0080, 0x0080};
+			f.tap.captured = {0x0008, 0x0000};
+			f.tap.mab = 0x4604;
+			CHECK_BYTES(f.run({0x90, 0x0D}),
+				    (Bytes{0x90, 0x00, 0x01, 0x02, 0xFF, 0x00, 0x46, 0, 0}));
 		}
-		REQUIRE(!detach.empty());
-		CHECK(detach.back() == "close");
-		CHECK(std::find(detach.begin(), detach.end(), "ir:a8") != detach.end());
-		CHECK(std::find(detach.begin(), detach.end(), "dr16:0c01") == detach.end()); /* no reset */
-		REQUIRE(!fresh.empty());
-		CHECK(fresh.front() == "speed:250000");
-
-		Fx f;
-		f.open_session(running);
-		if (running) {
-			/* the halt: WaitForEem's look, the sync's look, the stop poll;
-			 * then the new session's look and stop poll */
-			f.tap.eem_control_script = {0x0000, 0x0000, 0x0080, 0x0000, 0x0080};
-			f.tap.captured = {0x0008, 0x0000, 0x0008, 0x0000};
-		} else {
-			f.cpu_runs();
-		}
-		CHECK_BYTES(f.run(req), want);
-		CHECK_LOG(f.tap.log, detach + fresh); /* the old session's release first */
-		CHECK(f.tap.eem_control_script.empty());
-		CHECK(f.tap.captured.empty());
-		CHECK(f.s.state() == State::DebugHalted);
-		CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x01, 0xFF, 0x20, 0x45, 0, 0}));
-
-		/* the RAM window of the new request, not the old session's */
-		CHECK_BYTES(f.run(write_req(0x2400, 2)), kOk);
-		CHECK_BYTES(f.run(write_req(0x2FFE, 2)), kOk);
-		CHECK_BYTES(f.run(write_req(0x1C00, 2)), kProtected);
-		CHECK_BYTES(f.run(write_req(0x3000, 2)), kProtected);
-
-		/* breakpoint 5 is gone: a stop at its address reports no
-		 * breakpoint (the fake's EEM stops the CPU there anyway) */
-		CHECK_BYTES(f.run({0x90, 0x0C}), kOk);
-		f.tap.eem_control_script = {0x0080, 0x0080};
-		f.tap.captured = {0x0008, 0x0000};
-		f.tap.mab = 0x4604;
-		CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x02, 0xFF, 0x00, 0x46, 0, 0}));
 	}
 }
 
@@ -461,6 +483,24 @@ TEST(session_debug_ops_need_a_debug_session)
 	CHECK_BYTES(f.run({0x90, 0x12, 0xFF}), kBadState);
 	CHECK(f.tap.log.empty());
 	CHECK(f.s.state() == State::Connected);
+
+	f.tap.push_jmb_out(0xABADBABE); /* Flashing: the write funclet waits for data */
+	REQUIRE(f.run(begin_req(0x4400, 2, 0x2400))[1] == 0x00);
+	REQUIRE(f.s.state() == State::Flashing);
+	f.tap.log.clear();
+	f.tap.mem_writes.clear();
+	CHECK_BYTES(f.run({0x90, 0x0A, 0x00}), kBadState);
+	CHECK_BYTES(f.run({0x90, 0x0B}), kBadState);
+	CHECK_BYTES(f.run({0x90, 0x0C}), kBadState);
+	CHECK_BYTES(f.run({0x90, 0x0D}), kBadState);
+	CHECK_BYTES(f.run({0x90, 0x0E}), kBadState);
+	CHECK_BYTES(f.run({0x90, 0x0F}), kBadState);
+	CHECK_BYTES(f.run({0x90, 0x10, 0x04, 0, 0, 0, 0}), kBadState);
+	CHECK_BYTES(f.run(bp_req(0, 0x4400)), kBadState);
+	CHECK_BYTES(f.run({0x90, 0x12, 0xFF}), kBadState);
+	CHECK(f.tap.log.empty());
+	CHECK(f.tap.mem_writes.empty());
+	CHECK(f.s.state() == State::Flashing);
 }
 
 /* The Session's own state checks, not the Debugger's: a wrong size in the
@@ -607,6 +647,73 @@ TEST(session_dbg_registers)
 	CHECK(f.tap.log.empty());
 }
 
+/* DBG_WRITE_REG moves the PC only into the device's main flash (the F5529's
+ * [0x4400, 0x24400)) or leaves it where it is (GDB's G packet writes every
+ * register back); any other PC is PROTECTED and the saved PC keeps its
+ * value. Nothing is sent either way (R0 lives in the saved context). An odd
+ * PC stays BAD_ARG: the form is checked first, as for WRITE_MEM. */
+TEST(session_dbg_write_reg_moves_the_pc_only_into_main_flash)
+{
+	const Bytes at_4520 = {0x90, 0x00, 0x01, 0x01, 0xFF, 0x20, 0x45, 0, 0}; /* DBG_STATUS */
+	{
+		Fx f;
+		f.attach();
+		/* the BSL, information memory, USB RAM, RAM, past main flash, the
+		 * peripherals, vacant memory, above 20 bits */
+		for (const uint32_t pc : {0x1000u, 0x1800u, 0x1C00u, 0x2400u, 0x43FEu, 0x24400u,
+					  0x0004u, 0x0000u, 0x0FFEu, 0xFFFFEu, 0x100000u, 0xFFFFFFFEu}) {
+			CHECK_BYTES(f.run(reg_req(0, pc)), kProtected);
+		}
+		CHECK_BYTES(f.run(reg_req(0, 0x2401)), kBadArg);
+		CHECK_BYTES(f.run(reg_req(0, 0x4401)), kBadArg);
+		CHECK_BYTES(f.run({0x90, 0x0D}), at_4520);
+		CHECK_BYTES(f.run(reg_req(0, 0x4520)), kOk); /* unchanged */
+		CHECK_BYTES(f.run(reg_req(0, 0x4400)), kOk);
+		CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x44, 0, 0}));
+		CHECK_BYTES(f.run(reg_req(0, 0x243FE)), kOk);
+		CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x01, 0xFF, 0xFE, 0x43, 0x02, 0}));
+		CHECK(f.tap.log.empty());
+		CHECK_BYTES(f.run(reg_req(0, 0x4520)), kOk); /* back: main flash */
+		CHECK_BYTES(f.run(reg_req(4, 0x2400)), kOk); /* other registers: any value */
+		CHECK(f.s.state() == State::DebugHalted);
+	}
+	{
+		Fx f; /* halted in code the firmware runs from RAM */
+		f.tap.mab = 0x2404;
+		f.attach();
+		CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x24, 0, 0}));
+		CHECK_BYTES(f.run(reg_req(0, 0x2400)), kOk); /* unchanged */
+		CHECK_BYTES(f.run(reg_req(0, 0x2402)), kProtected);
+		CHECK_BYTES(f.run(reg_req(0, 0x4400)), kOk);        /* out into main flash */
+		CHECK_BYTES(f.run(reg_req(0, 0x2400)), kProtected); /* not back */
+		CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x44, 0, 0}));
+		CHECK(f.tap.log.empty());
+	}
+	{
+		Fx f; /* an unknown device: the PC stays where it is */
+		f.tap.memory[0x1A04] = 0x1234;
+		f.attach();
+		CHECK_BYTES(f.run(reg_req(0, 0x4520)), kOk);
+		for (const uint32_t pc : {0x4400u, 0x4522u, 0x243FEu, 0x2400u, 0x1000u}) {
+			CHECK_BYTES(f.run(reg_req(0, pc)), kProtected);
+		}
+		CHECK_BYTES(f.run({0x90, 0x0D}), at_4520);
+		CHECK(f.tap.log.empty());
+	}
+	{
+		Fx f; /* the main flash is set anew by every attach */
+		f.attach();
+		CHECK_BYTES(f.run(reg_req(0, 0x4400)), kOk);
+		f.cpu_runs();
+		f.tap.memory[0x1A04] = 0x1234;
+		REQUIRE(f.run(attach_req())[1] == 0x00); /* re-attach: an unknown device */
+		f.tap.log.clear();
+		CHECK_BYTES(f.run(reg_req(0, 0x4400)), kProtected);
+		CHECK_BYTES(f.run({0x90, 0x0D}), at_4520);
+		CHECK(f.tap.log.empty());
+	}
+}
+
 TEST(session_dbg_step_returns_the_new_pc)
 {
 	Fx f;
@@ -709,7 +816,8 @@ TEST(session_dbg_write_mem_whitelist)
 {
 	Fx f;
 	f.attach();
-	/* allowed: RAM, USB RAM, peripherals outside the flash controller */
+	/* allowed: RAM, USB RAM, peripherals outside the flash and DMA
+	 * controllers */
 	CHECK_BYTES(f.run(write_req(0x2400, 4)), kOk);
 	CHECK_BYTES(f.run(write_req(0x1C00, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x43FE, 2)), kOk);
@@ -718,17 +826,21 @@ TEST(session_dbg_write_mem_whitelist)
 	CHECK_BYTES(f.run(write_req(0x0150, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x0000, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x0FFE, 2)), kOk);
+	CHECK_BYTES(f.run(write_req(0x04FE, 2)), kOk);
+	CHECK_BYTES(f.run(write_req(0x0600, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x1C00, 1016)), kOk); /* the largest write */
 	const size_t writes = f.tap.mem_writes.size();
-	CHECK_EQ(writes, 9u + 508u);
+	CHECK_EQ(writes, 11u + 508u);
 	f.tap.log.clear();
 	/* refused: main flash, information memory, BSL, vacant memory, the
-	 * flash controller, the top of the address space, a write that runs
-	 * off the end of RAM, of the peripherals or into the controller */
+	 * flash controller, the DMA controller's 256 bytes, the top of the
+	 * address space, a write that runs off the end of RAM, of the
+	 * peripherals or into a controller */
 	for (uint32_t addr : {0x4400u, 0x4402u, 0xFFFEu, 0x10000u, 0x1FFFEu, 0x243FEu, 0x24400u,
 			      0xFFFFEu, 0x1800u, 0x1980u, 0x19FEu, 0x1A00u, 0x1B00u, 0x1BFEu,
 			      0x1000u, 0x17FEu, 0x1C00u - 2u, 0x1C00u - 0x200u, 0x0140u, 0x0142u,
-			      0x0144u, 0x0146u, 0x0148u, 0x014Eu}) {
+			      0x0144u, 0x0146u, 0x0148u, 0x014Eu, 0x0500u, 0x0510u, 0x053Au,
+			      0x05FEu}) {
 		CHECK_BYTES(f.run(write_req(addr, 2)), kProtected);
 	}
 	CHECK_BYTES(f.run(write_req(0x43FE, 4)), kProtected);   /* RAM into flash */
@@ -736,6 +848,9 @@ TEST(session_dbg_write_mem_whitelist)
 	CHECK_BYTES(f.run(write_req(0x013E, 4)), kProtected);   /* into FCTL1 */
 	CHECK_BYTES(f.run(write_req(0x014E, 4)), kProtected);   /* out of FCTL4 */
 	CHECK_BYTES(f.run(write_req(0x0100, 0x50)), kProtected); /* across the controller */
+	CHECK_BYTES(f.run(write_req(0x04FE, 4)), kProtected);   /* into DMACTL0 */
+	CHECK_BYTES(f.run(write_req(0x05FE, 4)), kProtected);   /* out of the DMA block */
+	CHECK_BYTES(f.run(write_req(0x0400, 0x300)), kProtected); /* across the DMA block */
 	CHECK_BYTES(f.run(write_req(0x0FFE, 4)), kProtected);   /* out of the peripherals */
 	CHECK_BYTES(f.run(write_req(0x0FF0, 0x3F8)), kProtected); /* peripherals into vacant memory */
 	CHECK_BYTES(f.run(write_req(0x1BFE, 4)), kProtected);   /* descriptors into RAM */
@@ -987,9 +1102,9 @@ TEST(session_connect_ends_a_debug_session_first)
 	}
 }
 
-/* A TargetError from poll() or halt() means the Debugger has already ended
- * the session (EEM off, CPU let go, pins released): the Session goes Idle and
- * sends nothing more. */
+/* A TargetError from poll(), halt() or step() means the Debugger has already
+ * ended the session (EEM off, CPU let go, pins released): the Session goes
+ * Idle and sends nothing more. */
 TEST(session_target_error_from_a_lost_running_target_sends_nothing_more)
 {
 	const Log abandon = {"ir:28", "ir:30", "dr16:0006", "ir:a8", "close"};
@@ -1029,6 +1144,25 @@ TEST(session_target_error_from_a_lost_running_target_sends_nothing_more)
 		f.s.abort();
 		CHECK(f.s.state() == State::Idle);
 		CHECK_LOG(f.tap.log, abandon);
+	}
+	{
+		Fx f; /* DBG_STEP whose sync fails after the release */
+		f.attach();
+		f.tap.eem_control_script = {0x0080, 0x0080};
+		f.tap.has_cntrl_sig_after_release = true;
+		f.tap.cntrl_sig_after_release = 0x0101; /* running; the sync bit never comes */
+		CHECK_BYTES(f.run({0x90, 0x0E}), kTargetError);
+		CHECK(f.tap.eem_control_script.empty());
+		CHECK(f.s.state() == State::Idle);
+		/* the Debugger's own release is the last thing sent */
+		const Log tail = {"ir:a8", "close"};
+		REQUIRE(f.tap.log.size() >= tail.size());
+		CHECK_LOG(Log(f.tap.log.end() - 2, f.tap.log.end()), tail);
+		CHECK_EQ(count_log(f.tap, "close"), 1u);
+		CHECK(!log_has(f.tap, "dr16:0c01"));
+		f.tap.log.clear();
+		CHECK_BYTES(f.run({0x90, 0x0D}), kBadState);
+		CHECK(f.tap.log.empty());
 	}
 }
 
@@ -1082,6 +1216,34 @@ TEST(session_target_error_while_halted_ends_the_session)
 		CHECK(f.s.state() == State::Idle);
 		REQUIRE(!f.tap.log.empty());
 		CHECK(f.tap.log.back() == "close");
+	}
+	{
+		Fx f; /* a register written to the CPU */
+		f.attach();
+		f.tap.cntrl_sig = 0x0000;
+		CHECK_BYTES(f.run(reg_req(4, 0x1234)), kTargetError);
+		CHECK(f.s.state() == State::Idle);
+		CHECK(log_has(f.tap, "ir:a8"));
+		CHECK(!log_has(f.tap, "dr16:0c01"));
+		REQUIRE(!f.tap.log.empty());
+		CHECK(f.tap.log.back() == "close");
+		CHECK_EQ(count_log(f.tap, "close"), 1u);
+		CHECK_BYTES(f.run({0x90, 0x0D}), kBadState);
+	}
+	{
+		Fx f;
+		f.attach();
+		REQUIRE(f.run(bp_req(5, 0x4600))[1] == 0x00);
+		f.tap.log.clear();
+		f.tap.cntrl_sig = 0x0000;
+		CHECK_BYTES(f.run({0x90, 0x12, 0x05}), kTargetError);
+		CHECK(f.s.state() == State::Idle);
+		CHECK(log_has(f.tap, "ir:a8"));
+		CHECK(!log_has(f.tap, "dr16:0c01"));
+		REQUIRE(!f.tap.log.empty());
+		CHECK(f.tap.log.back() == "close");
+		CHECK_EQ(count_log(f.tap, "close"), 1u);
+		CHECK_BYTES(f.run({0x90, 0x0D}), kBadState);
 	}
 }
 

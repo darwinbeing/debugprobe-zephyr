@@ -38,20 +38,33 @@ bool range_ok(uint32_t addr, uint64_t nwords)
 }
 
 /* Read-only debug sessions may write the peripheral space except the flash
- * controller, and RAM. */
+ * controller and the DMA controller, and RAM. */
 constexpr uint32_t kPeripheralEnd = 0x1000;
 constexpr uint32_t kFlashCtlStart = 0x0140; /* FCTL1..FCTL4 */
 constexpr uint32_t kFlashCtlEnd = 0x0150;
+/* The DMA controller, whose transfers could write the flash controller. On
+ * the F5529 its registers are 0x0500-0x053F; the 256 bytes refused here also
+ * hold USCI_A0 (0x05C0) and USCI_B0 (0x05E0). */
+constexpr uint32_t kDmaStart = 0x0500;
+constexpr uint32_t kDmaEnd = 0x0600;
 
-/* RAM of the devices the probe knows, by device ID. A read-only session may
- * write only RAM that lies inside both this range and the one the host
- * passes with DBG_ATTACH, so a wrong host table cannot open flash. */
-struct KnownRam {
+/* Does [addr, end) overlap [lo, hi)? */
+bool overlaps(uint64_t addr, uint64_t end, uint32_t lo, uint32_t hi)
+{
+	return addr < hi && end > lo;
+}
+
+/* The devices the probe knows, by device ID. A read-only session may write
+ * only RAM that lies inside both the RAM range here and the one the host
+ * passes with DBG_ATTACH, so a wrong host table cannot open flash; it may
+ * move the PC only into the main flash here (or leave it where it is). */
+struct KnownDevice {
 	uint16_t device_id;
-	uint32_t lo, hi; /* [lo, hi) */
+	uint32_t ram_lo, ram_hi;     /* [lo, hi) */
+	uint32_t flash_lo, flash_hi; /* main flash, [lo, hi) */
 };
-constexpr KnownRam kKnownRam[] = {
-	{0x2955, 0x1C00, 0x4400}, /* MSP430F5529: USB RAM + RAM */
+constexpr KnownDevice kKnownDevices[] = {
+	{0x2955, 0x1C00, 0x4400, 0x4400, 0x24400}, /* MSP430F5529: USB RAM + RAM; 128 KB */
 };
 
 } // namespace
@@ -141,7 +154,7 @@ size_t Session::handle(std::span<const uint8_t> request, std::span<uint8_t> resp
 	if (debugging()) {
 		if (!dbg_.attached()) {
 			state_ = State::Idle;
-			ram_lo_ = ram_hi_ = 0;
+			clear_windows();
 		} else {
 			state_ = dbg_.running() ? State::DebugRunning : State::DebugHalted;
 		}
@@ -171,16 +184,26 @@ void Session::abort()
 	}
 	state_ = State::Idle;
 	flash_remaining_ = 0;
-	ram_lo_ = ram_hi_ = 0;
+	clear_windows();
 }
 
 bool Session::writable(uint32_t addr, uint32_t nbytes) const
 {
+	if (nbytes == 0) {
+		return false;
+	}
 	const uint64_t end = static_cast<uint64_t>(addr) + nbytes;
 	const bool peripheral = end <= kPeripheralEnd &&
-				(end <= kFlashCtlStart || addr >= kFlashCtlEnd);
+				!overlaps(addr, end, kFlashCtlStart, kFlashCtlEnd) &&
+				!overlaps(addr, end, kDmaStart, kDmaEnd);
 	const bool ram = addr >= ram_lo_ && end <= ram_hi_;
 	return peripheral || ram;
+}
+
+void Session::clear_windows()
+{
+	ram_lo_ = ram_hi_ = 0;
+	flash_lo_ = flash_hi_ = 0;
 }
 
 Status Session::op_info(In args, Out out, size_t &n)
@@ -418,17 +441,20 @@ Status Session::op_dbg_attach(In args, Out out, size_t &n)
 	}
 	if (st != Status::Ok) {
 		state_ = State::Idle; /* the debugger has released the pins */
-		ram_lo_ = ram_hi_ = 0;
+		clear_windows();
 		return st;
 	}
 	state_ = State::DebugHalted;
 	/* The writable RAM: the intersection of the host's range and the RAM
-	 * the probe knows for the device; empty for a device it does not know. */
-	ram_lo_ = ram_hi_ = 0;
-	for (const KnownRam &k : kKnownRam) {
+	 * the probe knows for the device; the main flash the PC may be moved
+	 * into. Both empty for a device the probe does not know. */
+	clear_windows();
+	for (const KnownDevice &k : kKnownDevices) {
 		if (k.device_id == id.device_id) {
-			ram_lo_ = ram_lo > k.lo ? ram_lo : k.lo;
-			ram_hi_ = ram_hi < k.hi ? ram_hi : k.hi;
+			ram_lo_ = ram_lo > k.ram_lo ? ram_lo : k.ram_lo;
+			ram_hi_ = ram_hi < k.ram_hi ? ram_hi : k.ram_hi;
+			flash_lo_ = k.flash_lo;
+			flash_hi_ = k.flash_hi;
 		}
 	}
 	if (ram_lo_ >= ram_hi_) {
@@ -455,7 +481,7 @@ Status Session::op_dbg_detach(In args)
 	}
 	dbg_.detach(static_cast<DetachAction>(args[0]));
 	state_ = State::Idle;
-	ram_lo_ = ram_hi_ = 0;
+	clear_windows();
 	return Status::Ok;
 }
 
@@ -562,7 +588,17 @@ Status Session::op_dbg_write_reg(In args)
 	if (args.size() != 5) {
 		return Status::BadArg;
 	}
-	return dbg_.write_reg(args[0], get32(args, 1));
+	const uint8_t index = args[0];
+	const uint32_t value = get32(args, 1);
+	/* The PC moves only into the device's main flash, or stays where it is
+	 * (GDB's G packet writes every register back, and the CPU may be halted
+	 * in code the firmware runs from RAM). An odd PC is left to the
+	 * Debugger's BAD_ARG: the form is checked first, as for WRITE_MEM. */
+	if (index == 0 && (value & 1u) == 0 && value != dbg_.pc() &&
+	    (value < flash_lo_ || value >= flash_hi_)) {
+		return Status::Protected;
+	}
+	return dbg_.write_reg(index, value);
 }
 
 Status Session::op_dbg_bp_set(In args)
