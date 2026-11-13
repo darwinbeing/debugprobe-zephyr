@@ -21,6 +21,7 @@ add_executable(dap_tests
   test_sbw_tap.cpp
   test_cpuxv2.cpp
   test_msp430_session.cpp
+  test_msp430_protocol.cpp
   test_sbw_pack.cpp
   test_pin_owner.cpp
   # The autobaud estimator is pure C++ (zero Zephyr deps), so it compiles

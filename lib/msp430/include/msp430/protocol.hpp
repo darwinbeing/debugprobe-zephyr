@@ -10,6 +10,7 @@ namespace msp430 {
 inline constexpr uint8_t kVendorCmd = 0x90;
 inline constexpr uint8_t kProtocolVersion = 1;
 inline constexpr uint32_t kFeatureCpuxv2Flash = 1u << 0;
+inline constexpr uint32_t kFeatureDebug = 1u << 1;
 
 enum class Op : uint8_t {
 	Info = 0x00,
@@ -21,6 +22,16 @@ enum class Op : uint8_t {
 	FlashBegin = 0x06,
 	FlashData = 0x07,
 	FlashEnd = 0x08,
+	DbgAttach = 0x09,
+	DbgDetach = 0x0A,
+	DbgHalt = 0x0B,
+	DbgResume = 0x0C,
+	DbgStatus = 0x0D,
+	DbgStep = 0x0E,
+	DbgReadRegs = 0x0F,
+	DbgWriteReg = 0x10,
+	DbgBpSet = 0x11,
+	DbgBpClear = 0x12,
 };
 
 enum class Status : uint8_t {
@@ -33,11 +44,29 @@ enum class Status : uint8_t {
 	TargetError = 0x06,
 	Timeout = 0x07,
 	UnknownOp = 0x08,
+	Protected = 0x09, /* read-only debug session: the address may not be written */
+	Running = 0x0A,   /* the operation needs a halted CPU */
 };
 
-enum class State : uint8_t { Idle = 0, Connected = 1, Flashing = 2 };
+enum class State : uint8_t {
+	Idle = 0,
+	Connected = 1,
+	Flashing = 2,
+	DebugHalted = 3,
+	DebugRunning = 4,
+};
 enum class EntryMode : uint8_t { Normal = 0, MagicPattern = 1 };
 enum class EraseMode : uint8_t { Segment = 0, Bank = 1, Main = 2 };
+
+/* Debugging (protocol version 2). */
+enum class AttachMode : uint8_t { Running = 0, Reset = 1 };
+enum class DetachAction : uint8_t { Run = 0, Reset = 1 };
+enum class StopReason : uint8_t { None = 0, Request = 1, Breakpoint = 2, Step = 3, Reset = 4 };
+/* EEM memory-bus triggers used as breakpoints. The MSP430F5529 has the
+ * "large" EEM: 8 memory-bus triggers (MSPDS 3.3.1.3 TemplateDeviceDb,
+ * MSP430Defaults.h: LargeTrigger; MSP430F55xx.cpp: LargeEemMode). */
+inline constexpr unsigned kHwBreakpoints = 8;
+inline constexpr uint8_t kNoBreakpoint = 0xFF;
 
 inline constexpr uint16_t kMinSpeedKhz = 100;
 inline constexpr uint16_t kMaxSpeedKhz = 1000;
@@ -59,6 +88,10 @@ inline constexpr uint8_t kIrDeviceId = 0xE1;
 inline constexpr uint8_t kIrJmbExchange = 0x86;
 inline constexpr uint8_t kIrTestReg = 0x54;
 inline constexpr uint8_t kIrTest3vReg = 0xF4;
+/* EEM access (MSPDS Bios/src/hal/JTAG_defs.h, same bit order). */
+inline constexpr uint8_t kIrEmexDataExchange32 = 0xB0;
+inline constexpr uint8_t kIrEmexReadControl = 0xD0;
+inline constexpr uint8_t kIrEmexWriteControl = 0x30;
 
 inline constexpr uint8_t kJtagId91 = 0x91;
 
