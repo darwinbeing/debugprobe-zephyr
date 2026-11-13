@@ -91,13 +91,41 @@ public:
 	/* A memory access out of step with TCLK and the control signal's R/W bit
 	 * (ReadMemWordXv2, WriteMemWordXv2): a read with no TCLK rise since the
 	 * address load, with TCLK high at the capture, or with the CPU set to
-	 * write; a write with TCLK low or with the CPU set to read. */
+	 * write; a write with TCLK low or with the CPU set to read. Also a 20-
+	 * or 32-bit shift under IR_DATA_TO_ADDR, whose data register is 16 bits
+	 * (not recorded as a write). */
 	bool mem_protocol_error = false;
 	/* Defence in depth: a memory write (IR_DATA_TO_ADDR) to the F5529's BSL,
 	 * information memory and device descriptors (0x1000-0x1BFF), main flash
 	 * (from 0x4400) or the flash controller (0x0140-0x014F). Recorded and
 	 * carried out as any other write. */
 	bool flash_write_attempt = false;
+	/* Words fed to the CPU, in order: every DR shift under IR_DATA_16BIT
+	 * drives the data bus for the CPU's next read (MSPDS shifts under it
+	 * only to feed the CPU; its captures use IR_DATA_CAPTURE). They are
+	 * decoded as the instruction stream they form, each instruction
+	 * followed by its extension word. Allowed, as debug.cpp feeds them
+	 * through the MSPDS helpers (MSPDS 3.15.1.1 Bios/src/hil/edt.h) and as
+	 * Phase A's Cpuxv2::set_pc feeds SLAU320's SetPC_430Xv2:
+	 *  - MOVA #imm20, Rn: (w & 0xF0F0) == 0x0080, then imm15:0, any value:
+	 *    WriteCpuRegXv2 (edt.h:651-675), SetPcXv2 (edt.h:728-749);
+	 *  - MOVA Rn, &0x0FF6: (w & 0xF0FF) == 0x0060 (abs19:16 = 0), then
+	 *    0x0FF6 only: ReadCpuRegXv2 with altRomAddressForCpuRead
+	 *    (edt.h:541-589), the register captured from the data bus;
+	 *  - JMP $-4, 0x3FFD: after those MOVAs (edt.h:565, 663);
+	 *  - NOP (MOV #0, R3), 0x4303: SetPcXv2 (edt.h:745);
+	 *  - SAFE_PC_ADDRESS 0x0004 (Bios/src/hal/JTAG_defs.h:118) as the first
+	 *    word after a power-on reset through the control signal (POR bit
+	 *    0x0800), which the CPU takes for its PC
+	 *    (SyncJtag_AssertPor_SaveContextXv2.c:114-119); there any other
+	 *    word is decoded as an instruction.
+	 * Anything else, a 20- or 32-bit shift under IR_DATA_16BIT, or a
+	 * release (IR_CNTRL_SIG_RELEASE) while an extension word is still due
+	 * (the CPU would fetch it from memory) sets unexpected_instruction: the
+	 * CPU would execute something the debugger never feeds, such as a store
+	 * to flash or to the flash controller. */
+	std::vector<uint16_t> cpu_words;
+	bool unexpected_instruction = false;
 
 	/* Post a 32-bit value in the target's mailbox output. */
 	void push_jmb_out(uint32_t value) { jmb_out.push_back(value); }
@@ -164,6 +192,12 @@ private:
 		if (ir == msp430::kIrCntrlSigRelease && has_cntrl_sig_after_release) {
 			cntrl_sig = cntrl_sig_after_release;
 		}
+		if (ir == msp430::kIrCntrlSigRelease) {
+			if (feed_ == Feed::ImmWord || feed_ == Feed::AbsWord) {
+				unexpected_instruction = true; /* fetched from memory instead */
+			}
+			feed_ = Feed::Instruction;
+		}
 		log.push_back(fmt("ir:%02x", ir));
 		return pop(jtag_id_script, jtag_id);
 	}
@@ -186,6 +220,13 @@ private:
 			return jmb_shift(value);
 		case msp430::kIrCntrlSig16Bit:
 			cntrl_read_ = (value & 0x0001u) != 0; /* R/W: 1 = read */
+			if ((value & 0x0800u) != 0) {         /* POR */
+				feed_ = Feed::AfterPor;
+			}
+			return 0;
+		case msp430::kIrData16Bit:
+			cpu_words.push_back(value);
+			feed_cpu(value);
 			return 0;
 		case msp430::kIrDataToAddr:
 			mem_writes.push_back({addr_, value});
@@ -227,9 +268,7 @@ private:
 	uint32_t dr_shift20_(uint32_t value)
 	{
 		log.push_back(fmt("dr20:%05x", value));
-		if (ir_ == msp430::kIrEmexDataExchange32) {
-			eem_protocol_error = true;
-		}
+		wrong_width();
 		if (ir_ == msp430::kIrAddr16Bit) {
 			addr_ = value;
 			addr_pending_ = true;
@@ -248,6 +287,7 @@ private:
 	{
 		log.push_back(fmt("dr32:%08x", value));
 		if (ir_ != msp430::kIrEmexDataExchange32) {
+			wrong_width();
 			return 0;
 		}
 		if (!eem_addr_pending_) {
@@ -321,6 +361,58 @@ private:
 			return true;
 		}
 	}
+	/* A 20- or 32-bit shift where the debugger shifts 16 bits: under the
+	 * EEM exchange (32 bits; dr_shift32 does not call this for it), memory
+	 * write data, a word fed to the CPU. */
+	void wrong_width()
+	{
+		switch (ir_) {
+		case msp430::kIrEmexDataExchange32:
+			eem_protocol_error = true;
+			break;
+		case msp430::kIrDataToAddr:
+			mem_protocol_error = true;
+			break;
+		case msp430::kIrData16Bit:
+			unexpected_instruction = true; /* a word the decoder cannot see */
+			break;
+		default:
+			break;
+		}
+	}
+
+	/* What the next word fed to the CPU is (see cpu_words). */
+	enum class Feed { Instruction, ImmWord, AbsWord, AfterPor };
+
+	void feed_cpu(uint16_t w)
+	{
+		const Feed at = feed_;
+		feed_ = Feed::Instruction;
+		switch (at) {
+		case Feed::ImmWord: /* imm15:0 of MOVA #imm20, Rn */
+			return;
+		case Feed::AbsWord: /* abs15:0 of MOVA Rn, &abs20 */
+			if (w != 0x0FF6) {
+				unexpected_instruction = true;
+			}
+			return;
+		case Feed::AfterPor:
+			if (w == 0x0004) { /* SAFE_PC_ADDRESS */
+				return;
+			}
+			break;
+		case Feed::Instruction:
+			break;
+		}
+		if ((w & 0xF0F0u) == 0x0080u) { /* MOVA #imm20, Rn */
+			feed_ = Feed::ImmWord;
+		} else if ((w & 0xF0FFu) == 0x0060u) { /* MOVA Rn, &abs20, abs19:16 = 0 */
+			feed_ = Feed::AbsWord;
+		} else if (w != 0x3FFD && w != 0x4303) { /* JMP $-4, NOP */
+			unexpected_instruction = true;
+		}
+	}
+
 	template <typename T>
 	static T pop(std::deque<T> &q, std::type_identity_t<T> fallback)
 	{
@@ -385,4 +477,5 @@ private:
 	bool tclk_ = false;         /* TCLK level */
 	bool addr_clocked_ = false; /* set_tclk since the address load (even if TCLK was high) */
 	bool cntrl_read_ = true;    /* R/W bit of the last IR_CNTRL_SIG_16BIT word */
+	Feed feed_ = Feed::Instruction;
 };

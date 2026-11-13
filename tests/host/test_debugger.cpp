@@ -25,27 +25,32 @@ struct Fx {
 
 	/* No test here provokes a protocol error on purpose: whatever the
 	 * Debugger does, the fake's mailbox, EEM exchange, password and
-	 * memory-access rules must hold, and nothing is written to flash or the
-	 * flash controller. A test that passes write_mem a flash address on
-	 * purpose checks the flag false right before that write, so that no
-	 * earlier flash write goes unnoticed, then checks it set and clears
-	 * it. */
-	~Fx()
-	{
-		CHECK(!t.jmb_protocol_error);
-		CHECK(!t.eem_protocol_error);
-		CHECK(!t.password_violation);
-		CHECK(!t.mem_protocol_error);
-		CHECK(!t.flash_write_attempt);
-	}
+	 * memory-access rules must hold, nothing is written to flash or the
+	 * flash controller, and the CPU is fed only the instructions FakeTap
+	 * allows. A test that passes write_mem a flash address on purpose
+	 * checks the flag false right before that write, so that no earlier
+	 * flash write goes unnoticed, then checks it set and clears it. */
+	~Fx() { CHECK_LOG(faults(), Log{}); }
 
-	/* None of the five flags the destructor checks is set. Checked after
-	 * each operation of a sequence, a failure names the operation that set
-	 * one. */
-	bool no_fault() const
+	/* The names of the fault flags that are set. Checked after each
+	 * operation of a sequence, a failure names the operation that set one. */
+	Log faults() const
 	{
-		return !t.jmb_protocol_error && !t.eem_protocol_error && !t.password_violation &&
-		       !t.mem_protocol_error && !t.flash_write_attempt;
+		const std::pair<bool, const char *> flags[] = {
+			{t.jmb_protocol_error, "jmb_protocol_error"},
+			{t.eem_protocol_error, "eem_protocol_error"},
+			{t.password_violation, "password_violation"},
+			{t.mem_protocol_error, "mem_protocol_error"},
+			{t.flash_write_attempt, "flash_write_attempt"},
+			{t.unexpected_instruction, "unexpected_instruction"},
+		};
+		Log set;
+		for (const auto &flag : flags) {
+			if (flag.first) {
+				set.push_back(flag.second);
+			}
+		}
+		return set;
 	}
 
 	/* The CPU runs and is not in a low-power mode: the first EEM control
@@ -241,24 +246,12 @@ TEST(debugger_attach_waits_for_the_flash_controller)
 	f.t.memory[0x0144] = 0x9659; /* BUSY */
 	f.t.millis_step = 30;
 	REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
-	/* polled until the 100 ms limit, never written */
-	size_t reads = 0;
-	for (size_t i = 0; i + 2 < f.t.log.size(); ++i) {
-		if (f.t.log[i] == "dr20:00144") {
-			++reads;
-		}
-	}
-	CHECK(reads >= 3u);
-	for (const auto &w : f.t.mem_writes) {
-		CHECK(w.first != 0x0144u);
-	}
-	/* the watchdog is held first, so it cannot reset the device during
-	 * the wait */
-	const Log hold = write_word(0x015C, 0x5A84);
-	const auto hold_at = std::search(f.t.log.begin(), f.t.log.end(), hold.begin(), hold.end());
-	const auto first_poll = std::find(f.t.log.begin(), f.t.log.end(), "dr20:00144");
-	REQUIRE(hold_at != f.t.log.end());
-	CHECK(hold_at < first_poll);
+	CHECK(f.scripts_consumed());
+	/* The watchdog held first, so it cannot reset the device during the
+	 * wait; then FCTL3 read until the 100 ms limit: busy at 0, 30, 60 and
+	 * 90 ms, given up at 120 ms. Never written. */
+	CHECK_LOG(f.t.log, identify_log() + eem_stop(1, kTb0Zero) + sync_tail(0x6904, 0x0008, 4) +
+				   read_word(0x1A04) + clear_triggers() + Log{"ir:28", "dr16:0000"});
 }
 
 TEST(debugger_attach_refuses_a_watchdog_without_its_password)
@@ -515,9 +508,12 @@ TEST(debugger_reset_and_halt_clears_the_vacant_memory_flag)
 	Fx f;
 	f.t.memory[0x0102] = 0x000C; /* VMAIFG and another flag */
 	REQUIRE(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::Ok);
-	CHECK(contains(f.t.log, read_word(0x0102) + set_pc(0x0004) +
-					Log{ir(0xC8), d16(0x0501), "tclk:1", ir(0x21)} +
-					write_word(0x0102, 0x0004)));
+	/* SyncJtag_AssertPor_SaveContextXv2.c:203-218: the PC to a safe
+	 * address, then the flag cleared, the other one kept */
+	CHECK_LOG(f.t.log, identify_log() + assert_por_log(0x6904) + set_pc(0x0004) +
+				   Log{ir(0xC8), d16(0x0501), "tclk:1", ir(0x21)} +
+				   write_word(0x0102, 0x0004) + read_word(0x1A04) + clear_triggers() +
+				   Log{"ir:28", "dr16:0000"});
 	/* the CPU's PC was moved for the write; the saved one is still the
 	 * reset vector's target */
 	CHECK_EQ(f.d.pc(), 0x441Au);
@@ -630,6 +626,27 @@ TEST(debugger_reset_and_halt_with_a_late_init_state_failure_releases_at_the_rese
 	CHECK_EQ(f.t.eem[0x88], 0x000Eu);
 }
 
+namespace {
+
+/* ReadAllCpuRegsXv2.c:58-91, JTAG ID 0x91, then i_ReadJmbOut (edt.c:44-57),
+ * which takes a 32-bit message off the mailbox if one is waiting, and the
+ * init-state check */
+Log read_regs_log(bool mailbox_full)
+{
+	Log l = {"ir:28"};
+	for (unsigned r : {1u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u}) {
+		l = l + read_reg(0x0060u | (r << 8)) + set_pc(0x0004) +
+		    Log{ir(0xC8), d16(0x0501), "tclk:1", ir(0x21)};
+	}
+	l = l + Log{ir(0x86), d16(0)};
+	if (mailbox_full) {
+		l = l + Log{d16(0x0014), d16(0), d16(0)};
+	}
+	return l + Log{ir(0x28), d16(0)};
+}
+
+} // namespace
+
 TEST(debugger_read_regs_follows_mspds_read_all_cpu_regs)
 {
 	Fx f;
@@ -638,13 +655,7 @@ TEST(debugger_read_regs_follows_mspds_read_all_cpu_regs)
 	f.t.captured = {0x43F0, 0x0000, 0x0004, 0x0000, 0x1234, 0x000F};
 	uint32_t regs[16] = {};
 	REQUIRE(f.d.read_regs(regs) == Status::Ok);
-	Log want = {"ir:28"};
-	for (unsigned r : {1u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u}) {
-		want = want + read_reg(0x0060u | (r << 8)) + set_pc(0x0004) +
-		       Log{ir(0xC8), d16(0x0501), "tclk:1", ir(0x21)};
-	}
-	want = want + Log{ir(0x86), d16(0), ir(0x28), d16(0)};
-	CHECK_LOG(f.t.log, want);
+	CHECK_LOG(f.t.log, read_regs_log(false));
 	CHECK_EQ(regs[0], 0x4520u);
 	CHECK_EQ(regs[1], 0x43F0u);
 	CHECK_EQ(regs[2], 0x0008u);
@@ -662,7 +673,7 @@ TEST(debugger_read_regs_clears_a_full_mailbox)
 	uint32_t regs[16] = {};
 	REQUIRE(f.d.read_regs(regs) == Status::Ok);
 	CHECK(f.t.jmb_out.empty());
-	CHECK(contains(f.t.log, Log{ir(0x86), d16(0), d16(0x0014), d16(0), d16(0)}));
+	CHECK_LOG(f.t.log, read_regs_log(true));
 }
 
 TEST(debugger_write_reg)
@@ -764,10 +775,11 @@ TEST(debugger_register_access_detects_a_dead_link)
 	}
 }
 
-/* Registers, as the memory, breakpoint and run-control tests of this kind
- * (together Task 12's debugger_operations_need_an_attached_cpu). PC and SR
- * live in the saved context (no TAP traffic even when attached): only their
- * status shows the check. */
+/* Registers, as debugger_memory_access_needs_an_attached_cpu,
+ * debugger_breakpoints_need_an_attached_cpu and
+ * debugger_run_control_needs_an_attached_cpu check the other operations. PC
+ * and SR live in the saved context (no TAP traffic even when attached): only
+ * their status shows the check. */
 TEST(debugger_register_access_needs_an_attached_cpu)
 {
 	Fx f;
@@ -1642,8 +1654,7 @@ TEST(debugger_detach_of_a_lost_running_target_only_lets_go)
 	}
 }
 
-/* With Task 12's debugger_operations_need_an_attached_cpu: detach does
- * nothing either, before any attach and a second time */
+/* detach does nothing either, before any attach and a second time */
 TEST(debugger_run_control_needs_an_attached_cpu)
 {
 	Fx f;
@@ -2263,8 +2274,8 @@ TEST(debugger_step_after_an_sr_write_clearing_cpuoff_uses_the_trigger)
 }
 
 /* attach() on an open session ends it as detach(Run) does, a running CPU
- * halted first; the new session then starts from the identify step, with
- * no breakpoint of the old one left. */
+ * halted first (its trigger blocks cleared, its context restored, the pins
+ * released); the new session then starts from the identify step. */
 TEST(debugger_attach_detaches_an_open_session_first)
 {
 	const Log detach_halted = clear_triggers() +
@@ -2296,19 +2307,20 @@ TEST(debugger_attach_detaches_an_open_session_first)
 		CHECK(f.d.attached());
 		CHECK(!f.d.running());
 		CHECK(f.d.stop_reason() == StopReason::Request);
-		CHECK_EQ(f.t.eem[0x1E], 0u);
-		REQUIRE(f.d.set_breakpoint(1, 0x4400) == Status::Ok);
-		CHECK_EQ(f.t.eem[0x80], 0x0002u); /* breakpoint 3 no longer counts */
 	}
 }
 
-/* The debugger never starts a funclet and never writes the flash
- * controller or flash: every operation, run against the fake, writes
- * memory only at WDTCTL, SFRIFG1 and the RAM address the test asks for.
- * The five fault flags are checked after each operation (the fixture
- * checks them, flash writes included, at the end of every test). */
+/* The debugger never starts a funclet and never writes flash or the flash
+ * controller. Every operation, on each of the branches below, run against
+ * the fake: writes memory only at WDTCTL, SFRIFG1 and the RAM the test asks
+ * for; feeds the CPU only the instructions FakeTap allows (cpu_words: the
+ * only store is MOVA Rn, &0x0FF6); uses only the JTAG instructions listed
+ * at the end; feeds nothing to the mailbox. The fault flags are checked
+ * after each operation (the fixture checks them at the end of every
+ * test). */
 TEST(debugger_never_writes_flash)
 {
+	using Write = std::pair<uint32_t, uint16_t>;
 	Fx f;
 	f.t.memory[0x0102] = 0x0008; /* SFRIFG1.VMAIFG: reset and halt clears it */
 	/* firmware words in main flash, copied to RAM below */
@@ -2316,72 +2328,159 @@ TEST(debugger_never_writes_flash)
 	f.t.memory[0x4402] = 0x4400;
 	f.t.memory[0x4404] = 0x40B2;
 	f.t.memory[0x4406] = 0x5A80;
+
+	/* reset and halt, detach */
 	REQUIRE(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
 	f.d.detach(DetachAction::Run);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
+
+	/* attach to a running CPU while the flash controller is busy: the wait
+	 * gives up after four reads */
+	f.t.memory[0x0144] = 0x9659; /* FCTL3.BUSY */
+	f.t.millis_step = 30;
 	REQUIRE(f.attach() == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
+	f.t.memory[0x0144] = 0x9658;
+	f.t.millis_step = 1;
+	/* registers, with a message waiting in the mailbox */
+	f.t.push_jmb_out(0x12345678);
 	uint32_t regs[16] = {};
-	uint8_t buf[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-	bool halted = true;
 	CHECK(f.d.read_regs(regs) == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK(f.t.jmb_out.empty());
+	CHECK_LOG(f.faults(), Log{});
 	CHECK(f.d.write_reg(5, 0x1234) == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
 	CHECK(f.d.write_reg(0, 0x4600) == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
+	/* memory: flash copied to RAM; the watchdog written through the
+	 * saved context */
+	uint8_t buf[8] = {1, 2, 3, 4, 5, 6, 7, 8};
 	CHECK(f.d.read_mem(0x4400, 4, buf) == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
 	CHECK(f.d.write_mem(0x2400, 4, buf) == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
+	const uint8_t wdt[] = {0x36, 0x5A};
+	CHECK(f.d.write_mem(0x015C, 1, wdt) == Status::Ok);
+	REQUIRE(!f.t.mem_writes.empty());
+	CHECK(f.t.mem_writes.back() == (Write{0x015C, 0x5AB6})); /* kept held */
+	CHECK_LOG(f.faults(), Log{});
+	/* breakpoints */
 	CHECK(f.d.set_breakpoint(1, 0x4600) == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
+	CHECK(f.d.set_breakpoint(2, 0x4800) == Status::Ok);
+	CHECK_LOG(f.faults(), Log{});
+	/* a step through trigger block 0 */
 	f.t.eem_control_script = {0x0000, 0x0080, 0x0080};
 	f.t.captured = {0x0008, 0x0000};
 	CHECK(f.d.step() == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
+	/* a step that does not stop: halted through the EEM */
+	f.t.eem_control_script.assign(496 + 1, 0x0000);
+	f.t.eem_control_script.push_back(0x0080);
+	f.t.captured = {0x0008, 0x0000};
+	CHECK(f.d.step() == Status::Timeout);
+	CHECK_LOG(f.faults(), Log{});
+	/* run; a poll while running, one that finds a breakpoint stop */
 	CHECK(f.d.resume() == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
+	bool halted = true;
 	CHECK(f.d.poll(halted) == Status::Ok);
 	CHECK(!halted);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
 	f.t.eem_control_script = {0x0080, 0x0080};
 	f.t.captured = {0x0008, 0x0000};
+	f.t.mab = 0x4804;
+	CHECK(f.d.poll(halted) == Status::Ok);
+	CHECK(halted);
+	CHECK(f.d.stop_reason() == StopReason::Breakpoint);
+	CHECK_EQ(f.d.breakpoint_hit(), 2);
+	CHECK_LOG(f.faults(), Log{});
+	/* run; a halt that stops the CPU through the EEM */
+	CHECK(f.d.resume() == Status::Ok);
+	CHECK_LOG(f.faults(), Log{});
+	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
 	CHECK(f.d.halt() == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK(f.d.stop_reason() == StopReason::Request);
+	CHECK_LOG(f.faults(), Log{});
+	CHECK(f.d.clear_breakpoint(1) == Status::Ok);
+	CHECK_LOG(f.faults(), Log{});
 	CHECK(f.d.clear_breakpoint(msp430::kAllBreakpoints) == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
+	/* run; detach, which halts it first */
+	CHECK(f.d.resume() == Status::Ok);
+	CHECK_LOG(f.faults(), Log{});
+	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
 	f.d.detach(DetachAction::Run);
-	CHECK(f.no_fault());
-	f.running_cpu();
+	CHECK(!f.d.attached());
+	CHECK_LOG(f.faults(), Log{});
+
+	/* attach to a CPU in LPM3; a step without a trigger; run; detach with a
+	 * reset, which halts it first (in the low-power mode) */
+	f.t.cntrl_sig = 0x0321; /* CPUOFF */
+	f.t.eem_control_script = {0x0000};
+	f.t.captured = {0x00D8, 0x0000};
 	REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
-	CHECK(f.no_fault());
+	CHECK_LOG(f.faults(), Log{});
+	const size_t eem_writes = f.t.eem_writes.size();
+	f.t.eem_control_script = {0x0000};
+	f.t.captured = {0x00D8, 0x0000};
+	CHECK(f.d.step() == Status::Ok);
+	CHECK_EQ(f.t.eem_writes.size(), eem_writes); /* no trigger: the CPU is off */
+	CHECK_LOG(f.faults(), Log{});
+	CHECK(f.d.resume() == Status::Ok);
+	CHECK_LOG(f.faults(), Log{});
+	f.t.eem_control_script = {0x0000, 0x0000};
+	f.t.captured = {0x00D8, 0x0000};
 	f.d.detach(DetachAction::Reset);
-	CHECK(f.no_fault());
+	CHECK(!f.d.attached());
+	CHECK_LOG(f.faults(), Log{});
 	/* every scripted answer used: captured, eem_control_script, mab_script
 	 * and cntrl_sig_script */
 	CHECK(f.scripts_consumed());
 
-	using Write = std::pair<uint32_t, uint16_t>;
+	/* memory written only at WDTCTL, SFRIFG1 and the RAM asked for */
+	Log rejected;
 	std::vector<Write> ram;
 	std::vector<Write> sfr;
 	for (const Write &w : f.t.mem_writes) {
-		const bool ram_word = w.first >= 0x2400u && w.first < 0x2408u;
-		CHECK(w.first == 0x015Cu || w.first == 0x0102u || ram_word);
-		CHECK(!(w.first >= 0x0140u && w.first < 0x0150u)); /* FCTL1..FCTL4 */
-		if (ram_word) {
+		if (w.first >= 0x2400u && w.first < 0x2408u) {
 			ram.push_back(w);
-		}
-		if (w.first == 0x0102u) {
+		} else if (w.first == 0x0102u) {
 			sfr.push_back(w);
+		} else if (w.first != 0x015Cu) {
+			rejected.push_back(dbglog::f("%05x=", w.first) + dbglog::f("%04x", w.second));
 		}
 	}
-	/* the writes the operations are meant to make did reach the fake: the
-	 * words read from flash into RAM, VMAIFG cleared */
+	CHECK_LOG(rejected, Log{});
+	/* and those writes did reach the fake: the words read from flash into
+	 * RAM, VMAIFG cleared */
 	CHECK(ram == (std::vector<Write>{{0x2400, 0x4031}, {0x2402, 0x4400},
 					 {0x2404, 0x40B2}, {0x2406, 0x5A80}}));
 	CHECK(sfr == (std::vector<Write>{{0x0102, 0x0000}}));
+
+	/* Only the JTAG instructions of debug.cpp and of Cpuxv2::identify,
+	 * in_full_emulation and disconnect: none of IR_DATA_QUICK (Phase A's
+	 * quick memory access), IR_TEST_REG, IR_TEST_3V_REG or any other. */
+	Log allowed;
+	for (const uint8_t code :
+	     {msp430::kIrAddrCapture, msp430::kIrCntrlSigCapture, msp430::kIrEmexWriteControl,
+	      msp430::kIrDataCapture, msp430::kIrData16Bit, msp430::kIrJmbExchange,
+	      msp430::kIrDataToAddr, msp430::kIrCntrlSigRelease, msp430::kIrEmexDataExchange32,
+	      msp430::kIrAddr16Bit, msp430::kIrCntrlSig16Bit, msp430::kIrEmexReadControl,
+	      msp430::kIrDeviceId, msp430::kIrCoreipId}) {
+		allowed.push_back(ir(code));
+	}
+	Log other_irs;
+	for (const std::string &e : f.t.log) {
+		if (e.compare(0, 3, "ir:") == 0 &&
+		    std::find(allowed.begin(), allowed.end(), e) == allowed.end() &&
+		    std::find(other_irs.begin(), other_irs.end(), e) == other_irs.end()) {
+			other_irs.push_back(e);
+		}
+	}
+	CHECK_LOG(other_irs, Log{});
 	CHECK(f.t.jmb_in.empty()); /* nothing fed to a funclet */
-	CHECK(!f.t.jmb_protocol_error);
 }

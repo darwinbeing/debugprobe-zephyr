@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <utility>
+#include <vector>
 
 /* The fake's EEM exchange under IR_EMEX_DATA_EXCHANGE32: a one-byte address
  * shift, then the data shift (MSPDS EemDataExchangeXv2.c). Anything else is
@@ -293,4 +294,125 @@ TEST(fake_tap_captures_the_mab)
 	t.ir_shift(msp430::kIrAddrCapture);
 	CHECK_EQ(t.dr_shift20(0), 0x14A2Cu);
 	CHECK_EQ(t.dr_shift20(0), 0x04524u);
+}
+
+TEST(fake_tap_flags_a_20_or_32_bit_shift_under_data_to_addr)
+{
+	/* write mode, an address loaded, TCLK high: a 16-bit shift would be a
+	 * proper write */
+	for (const bool wide32 : {false, true}) {
+		FakeTap t;
+		t.clr_tclk();
+		t.ir_shift(msp430::kIrCntrlSig16Bit);
+		t.dr_shift16(0x0500);
+		t.ir_shift(msp430::kIrAddr16Bit);
+		t.dr_shift20(0x2400);
+		t.set_tclk();
+		t.ir_shift(msp430::kIrDataToAddr);
+		if (wide32) {
+			t.dr_shift32(0x00001234);
+		} else {
+			t.dr_shift20(0x01234);
+		}
+		CHECK(t.mem_protocol_error);
+		CHECK(t.mem_writes.empty());
+	}
+}
+
+/* The words fed to the CPU under IR_DATA_16BIT, decoded as the instruction
+ * stream the debugger feeds (FakeTap::cpu_words). */
+
+namespace {
+
+/* `words` under IR_DATA_16BIT, a TCLK cycle before each, as the MSPDS
+ * helpers feed them */
+void feed(FakeTap &t, const std::vector<uint16_t> &words)
+{
+	t.ir_shift(msp430::kIrData16Bit);
+	for (const uint16_t w : words) {
+		t.clr_tclk();
+		t.set_tclk();
+		t.dr_shift16(w);
+	}
+}
+
+/* a power-on reset through the control signal, as
+ * SyncJtag_AssertPor_SaveContextXv2 and Cpuxv2::disconnect apply it */
+void por(FakeTap &t)
+{
+	t.ir_shift(msp430::kIrCntrlSig16Bit);
+	t.dr_shift16(0x0C01);
+	t.dr_shift16(0x0401);
+}
+
+} // namespace
+
+TEST(fake_tap_accepts_the_instructions_the_debugger_feeds)
+{
+	FakeTap t;
+	/* WriteCpuRegXv2: MOVA #0xFFFFF, R15; JMP $-4 */
+	feed(t, {0x0F8F, 0xFFFF, 0x3FFD});
+	/* ReadCpuRegXv2: MOVA SR, &0x0FF6, its extension word after an IR
+	 * change (the control signal 0x1401); JMP $-4 */
+	feed(t, {0x0260});
+	t.ir_shift(msp430::kIrCntrlSig16Bit);
+	t.dr_shift16(0x1401);
+	feed(t, {0x0FF6, 0x3FFD});
+	/* SetPcXv2: MOVA #0x14A2C, PC; NOP. An extension word takes any value. */
+	feed(t, {0x0180, 0x4A2C, 0x4303});
+	feed(t, {0x0080, 0x40B2, 0x4303});
+	/* SAFE_PC_ADDRESS after a POR, or an instruction there (Phase A's
+	 * SetPC after its POR) */
+	por(t);
+	feed(t, {0x0004});
+	por(t);
+	feed(t, {0x0080, 0x0004, 0x4303});
+	t.ir_shift(msp430::kIrCntrlSigRelease); /* nothing due */
+	CHECK(!t.unexpected_instruction);
+	CHECK(t.cpu_words == (std::vector<uint16_t>{0x0F8F, 0xFFFF, 0x3FFD, 0x0260, 0x0FF6, 0x3FFD,
+						    0x0180, 0x4A2C, 0x4303, 0x0080, 0x40B2, 0x4303,
+						    0x0004, 0x0080, 0x0004, 0x4303}));
+}
+
+TEST(fake_tap_flags_any_other_word_fed_to_the_cpu)
+{
+	const struct {
+		bool after_por;
+		std::vector<uint16_t> words;
+	} cases[] = {
+		{false, {0x40B2, 0xA500, 0x0144}}, /* MOV #0xA500, &FCTL3 */
+		{true, {0x40B2, 0xA500, 0x0144}},  /* the same after a POR */
+		{false, {0x0560, 0x0FF8}},         /* MOVA R5, &0x00FF8 */
+		{false, {0x0561, 0x0FF6}},         /* MOVA R5, &0x10FF6 */
+		{false, {0x0560, 0x4400}},         /* MOVA R5, &0x04400 */
+		{false, {0x0004}},                 /* SAFE_PC_ADDRESS without a POR */
+		{false, {0x3FFF}},                 /* JMP $ */
+		{false, {0x0080, 0x0000, 0x40B2}}, /* after an extension word: an instruction */
+	};
+	for (const auto &c : cases) {
+		FakeTap t;
+		if (c.after_por) {
+			por(t);
+		}
+		feed(t, c.words);
+		CHECK(t.unexpected_instruction);
+		CHECK(t.cpu_words == c.words);
+	}
+	/* released with an extension word due: the CPU fetches it from memory */
+	for (const uint16_t mova : {0x0080, 0x0560}) {
+		FakeTap t;
+		feed(t, {mova});
+		t.ir_shift(msp430::kIrCntrlSigRelease);
+		CHECK(t.unexpected_instruction);
+	}
+	/* a 20- or 32-bit shift under IR_DATA_16BIT: a word the decoder cannot
+	 * see */
+	FakeTap a;
+	a.ir_shift(msp430::kIrData16Bit);
+	a.dr_shift20(0x040B2);
+	CHECK(a.unexpected_instruction);
+	FakeTap b;
+	b.ir_shift(msp430::kIrData16Bit);
+	b.dr_shift32(0x000040B2);
+	CHECK(b.unexpected_instruction);
 }
