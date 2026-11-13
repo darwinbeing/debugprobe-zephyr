@@ -23,8 +23,9 @@
  *  - WDTCTL is checked for its read password 0x69 before it is written, not
  *    afterwards as the DLL does (WatchdogControl::checkRead);
  *  - "check for Init State" after a sync is Cpuxv2::in_full_emulation(),
- *    which also checks the JTAG ID; read_mem, write_mem, read_regs and
- *    write_reg end with the same check. write_mem also makes it before its
+ *    which also checks the JTAG ID; read_mem, write_mem, read_regs,
+ *    write_reg, set_breakpoint and clear_breakpoint end with the same check
+ *    (EemDataExchangeXv2 checks nothing). write_mem also makes it before its
  *    first write, as Phase A's Cpuxv2::write_word does, and writes nothing
  *    if it fails. ReadMemWordsXv2 and WriteMemWordsXv2 check nothing;
  *  - read_mem sets the CPU to read (control signal 0x0501) before the
@@ -101,7 +102,8 @@
  *    Trigger430::setMask). Combination i holds trigger i alone; the DLL
  *    assigns combinations from 0 up (TriggerConfigurator430). The value
  *    register is read back to confirm that the trigger block exists; if it
- *    does not read back, the block is disarmed and TargetError returned.
+ *    does not read back, an attempt is made to disarm the block and
+ *    TargetError is returned.
  *    Clearing writes the combination register and BREAKREACT only; the DLL
  *    also zeroes value, control and mask (Trigger430::reset). The DLL
  *    writes EEM registers through a cache (EemRegisterAccess430.cpp):
@@ -941,10 +943,13 @@ Status Debugger::set_breakpoint(unsigned index, uint32_t addr)
 	bp_addr_[index] = addr;
 	bp_used_ |= 1u << index;
 	eem_write(kBreakReact, bp_used_);
-	return Status::Ok;
+	/* not in MSPDS (see the header); on failure the breakpoint still counts
+	 * as set: it is armed, and detach clears every trigger block */
+	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
 
-/* The combination register and BREAKREACT only (see the header). */
+/* The combination register and BREAKREACT only, then the init-state check
+ * (see the header). */
 Status Debugger::clear_breakpoint(unsigned index)
 {
 	if (!attached_) {
@@ -955,16 +960,15 @@ Status Debugger::clear_breakpoint(unsigned index)
 	}
 	if (index == kAllBreakpoints) {
 		clear_triggers();
-		return Status::Ok;
-	}
-	if (index >= kHwBreakpoints) {
+	} else if (index < kHwBreakpoints) {
+		bp_used_ &= ~(1u << index);
+		tap_.ir_shift(kIrEmexDataExchange32);
+		eem_write(static_cast<uint8_t>(index * kTriggerBlockSize + kMbTrigCmb), 0);
+		eem_write(kBreakReact, bp_used_);
+	} else {
 		return Status::BadArg;
 	}
-	bp_used_ &= ~(1u << index);
-	tap_.ir_shift(kIrEmexDataExchange32);
-	eem_write(static_cast<uint8_t>(index * kTriggerBlockSize + kMbTrigCmb), 0);
-	eem_write(kBreakReact, bp_used_);
-	return Status::Ok;
+	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
 
 } // namespace msp430

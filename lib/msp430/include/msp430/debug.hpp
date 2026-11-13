@@ -104,14 +104,19 @@ public:
 	 * BadState when not attached, Running while the CPU runs, BadArg (no
 	 * TAP traffic) for an index of kHwBreakpoints or more, an odd address
 	 * or one above 20 bits. TargetError if the trigger block's value does
-	 * not read back (no such trigger block, or a dead link): the block is
-	 * then disarmed, so a breakpoint this index held before is gone too. */
+	 * not read back (no such trigger block, or a dead link): an attempt is
+	 * made to disarm it, and a breakpoint this index held before no longer
+	 * counts as set; or if the CPU is no longer under JTAG control
+	 * afterwards: the breakpoint is armed and counts as set (detach clears
+	 * every trigger block). */
 	Status set_breakpoint(unsigned index, uint32_t addr);
 	/* Disarm breakpoint `index` (its combination register and BREAKREACT
 	 * bit cleared), Ok also when it was not set; kAllBreakpoints disarms
-	 * every trigger block. BadState and Running as set_breakpoint; BadArg
-	 * (no TAP traffic) for any other index of kHwBreakpoints or more. Reads
-	 * nothing back: a dead link goes unnoticed here. */
+	 * every trigger block and turns the EEM sequencer off. BadState and
+	 * Running as set_breakpoint; BadArg (no TAP traffic) for any other
+	 * index of kHwBreakpoints or more. TargetError if the CPU is no longer
+	 * under JTAG control afterwards: the writes have been sent, and the
+	 * breakpoint no longer counts as set. */
 	Status clear_breakpoint(unsigned index);
 
 private:

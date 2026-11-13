@@ -994,22 +994,24 @@ TEST(debugger_set_breakpoint_programs_one_trigger_block)
 	f.attached();
 	REQUIRE(f.d.set_breakpoint(2, 0x14A2C) == Status::Ok);
 	/* value = address, control = CMP_EQUAL + TRIG_0 + MAB, mask none,
-	 * combination 2 = trigger 2 alone; the value read back; BREAKREACT */
+	 * combination 2 = trigger 2 alone; the value read back; BREAKREACT;
+	 * the init-state check */
 	const Log want = Log{ir(0xB0)} + eem_write(0x10, 0x14A2C) + eem_write(0x12, 0) +
 			 eem_write(0x14, 0) + eem_write(0x16, 0x0004) + eem_read(0x10) +
-			 eem_write(0x80, 0x0004);
+			 eem_write(0x80, 0x0004) + Log{"ir:28", "dr16:0000"};
 	CHECK_LOG(f.t.log, want);
 	REQUIRE(f.d.set_breakpoint(0, 0x4400) == Status::Ok);
 	CHECK_EQ(f.t.eem[0x80], 0x0005u);
 	f.t.log.clear();
 	REQUIRE(f.d.clear_breakpoint(2) == Status::Ok);
-	/* only the combination register and BREAKREACT */
-	CHECK_LOG(f.t.log, Log{ir(0xB0)} + eem_write(0x16, 0) + eem_write(0x80, 0x0001));
+	/* only the combination register and BREAKREACT, then the check */
+	CHECK_LOG(f.t.log, Log{ir(0xB0)} + eem_write(0x16, 0) + eem_write(0x80, 0x0001) +
+				   Log{"ir:28", "dr16:0000"});
 	CHECK_EQ(f.t.eem[0x16], 0u);
 	CHECK_EQ(f.t.eem[0x80], 0x0001u);
 	f.t.log.clear();
 	REQUIRE(f.d.clear_breakpoint(msp430::kAllBreakpoints) == Status::Ok);
-	CHECK_LOG(f.t.log, clear_triggers());
+	CHECK_LOG(f.t.log, clear_triggers() + Log{"ir:28", "dr16:0000"});
 	CHECK_EQ(f.t.eem[0x06], 0u);
 	CHECK_EQ(f.t.eem[0x80], 0u);
 }
@@ -1095,7 +1097,8 @@ TEST(debugger_set_breakpoint_uses_all_eight_trigger_blocks)
 	/* the first and the last */
 	f.t.log.clear();
 	REQUIRE(f.d.clear_breakpoint(0) == Status::Ok);
-	CHECK_LOG(f.t.log, Log{ir(0xB0)} + eem_write(0x06, 0) + eem_write(0x80, 0x00FE));
+	CHECK_LOG(f.t.log, Log{ir(0xB0)} + eem_write(0x06, 0) + eem_write(0x80, 0x00FE) +
+				   Log{"ir:28", "dr16:0000"});
 	REQUIRE(f.d.clear_breakpoint(7) == Status::Ok);
 	CHECK_EQ(f.t.eem[0x3E], 0u);
 	CHECK_EQ(f.t.eem[0x80], 0x007Eu);
@@ -1124,7 +1127,33 @@ TEST(debugger_clear_breakpoint_of_an_unset_index)
 	REQUIRE(f.d.set_breakpoint(4, 0x4400) == Status::Ok);
 	f.t.log.clear();
 	REQUIRE(f.d.clear_breakpoint(6) == Status::Ok);
-	CHECK_LOG(f.t.log, Log{ir(0xB0)} + eem_write(0x36, 0) + eem_write(0x80, 0x0010));
+	CHECK_LOG(f.t.log, Log{ir(0xB0)} + eem_write(0x36, 0) + eem_write(0x80, 0x0010) +
+				   Log{"ir:28", "dr16:0000"});
+}
+
+TEST(debugger_breakpoints_detect_a_dead_link)
+{
+	for (const bool bad_id : {true, false}) {
+		Fx f;
+		f.attached();
+		if (bad_id) {
+			f.t.jtag_id = 0xFF; /* the final check also tests the JTAG ID */
+		} else {
+			f.t.cntrl_sig = 0x0000; /* the CPU has left full emulation */
+		}
+		CHECK(f.d.set_breakpoint(1, 0x4400) == Status::TargetError);
+		CHECK_EQ(f.t.eem[0x80], 0x0002u); /* armed before the check */
+		/* the breakpoint still counts as set: the next one keeps it in
+		 * BREAKREACT */
+		CHECK(f.d.set_breakpoint(0, 0x4600) == Status::TargetError);
+		CHECK_EQ(f.t.eem[0x80], 0x0003u);
+		CHECK(f.d.clear_breakpoint(1) == Status::TargetError);
+		CHECK_EQ(f.t.eem[0x0E], 0u);
+		CHECK_EQ(f.t.eem[0x80], 0x0001u);
+		CHECK(f.d.clear_breakpoint(msp430::kAllBreakpoints) == Status::TargetError);
+		CHECK_EQ(f.t.eem[0x06], 0u);
+		CHECK_EQ(f.t.eem[0x80], 0u);
+	}
 }
 
 TEST(debugger_breakpoints_are_cleared_on_detach_and_attach)
