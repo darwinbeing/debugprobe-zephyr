@@ -34,8 +34,8 @@ public:
 	 * detach(Run) does. */
 	Status attach(AttachMode mode, uint32_t slot_hz, Identity &id);
 	/* Clear the triggers, then Run: restore the context and let the program
-	 * continue where it stopped; Reset: power-on reset and run. Halts a
-	 * running CPU first. Releases the pins. Does nothing when not attached. */
+	 * continue where it stopped; Reset: power-on reset and run. Releases
+	 * the pins. Does nothing when not attached. Expects a halted CPU. */
 	void detach(DetachAction action);
 
 	bool attached() const { return attached_; }

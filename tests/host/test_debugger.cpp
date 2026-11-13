@@ -299,8 +299,56 @@ TEST(debugger_attach_when_the_pipe_never_empties)
 	f.t.cntrl_sig = 0x0201; /* synchronized, CPUSUSP never set */
 	CHECK(f.d.attach(AttachMode::Running, 250000, f.id) == Status::TargetError);
 	CHECK(f.t.mem_writes.empty());
-	REQUIRE(!f.t.log.empty());
-	CHECK(f.t.log.back() == "close");
+	CHECK(!f.d.attached());
+	CHECK_LOG(last(f.t.log, 4), (Log{"ir:30", "dr16:0006", "ir:a8", "close"}));
+}
+
+TEST(debugger_attach_refuses_a_wrong_jtag_id_in_the_sync)
+{
+	Fx f;
+	f.t.eem_control_script = {0x0080}; /* already stopped: no EEM stop */
+	/* The tenth IR shift is the capture in SyncJtagXv2 (identify 6, EEM
+	 * control read, clock control write, IR_CNTRL_SIG_16BIT). */
+	f.t.jtag_id_script = {0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0xFF};
+	CHECK(f.d.attach(AttachMode::Running, 250000, f.id) == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(f.t.jtag_id_script.empty());
+	CHECK(f.t.mem_writes.empty());
+	CHECK(!f.d.attached());
+	/* no sync poll after the wrong ID: released with nothing written */
+	CHECK_LOG(last(f.t.log, 7), (Log{"ir:c8", "dr16:1501", "ir:28", "ir:30", "dr16:0006",
+					 "ir:a8", "close"}));
+}
+
+TEST(debugger_attach_proceeds_when_the_eem_stop_never_comes)
+{
+	Fx f;
+	f.t.captured = {0x0008, 0x0000}; /* the EEM control register reads 0 throughout */
+	REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
+	CHECK(f.scripts_consumed());
+	/* MSPDS polls 3000 times, restores trigger block 0 and syncs anyway */
+	const Log want = identify_log() + eem_stop(3000, kTb0Zero) + sync_tail(0x6904, 0x0008);
+	CHECK_LOG(first(f.t.log, want.size()), want);
+}
+
+TEST(debugger_attach_when_the_cpu_enters_a_low_power_mode_before_the_save)
+{
+	Fx f;
+	f.running_cpu(0x0018); /* the SR read finds CPUOFF + GIE */
+	/* running at the CPUOFF check (read 4), off from the context save on
+	 * (read 8) */
+	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301, 0x0301, 0x0301};
+	f.t.cntrl_sig = 0x0321;
+	f.t.mab = 0x0453E;
+	REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(contains(f.t.log, eem_stop(1, kTb0Zero)));
+	CHECK_EQ(f.d.pc(), 0x0453Cu); /* MAB - 2 */
+	f.t.log.clear();
+	f.d.detach(DetachAction::Run);
+	/* released 2 lower again (Note 1411) */
+	CHECK_LOG(f.t.log, clear_triggers() + restore_release(0x453C, 0x0018, 0x6904, 0x0006) +
+				   Log{"close"});
 }
 
 TEST(debugger_attach_passes_on_identify_failures)
@@ -331,6 +379,35 @@ TEST(debugger_detach_restores_the_context_and_lets_the_program_run)
 	/* the watchdog gets its original bits back, without HOLD */
 	REQUIRE(!f.t.mem_writes.empty());
 	CHECK_EQ(f.t.mem_writes.back().second, 0x5A04);
+}
+
+TEST(debugger_detach_keeps_a_watchdog_the_firmware_holds_held)
+{
+	Fx f;
+	f.t.memory[0x015C] = 0x6984; /* WDTHOLD set by the firmware */
+	REQUIRE(f.attach() == Status::Ok);
+	f.d.detach(DetachAction::Run);
+	/* held on attach, given back on detach with HOLD still set */
+	REQUIRE(f.t.mem_writes.size() == 2u);
+	for (const auto &w : f.t.mem_writes) {
+		CHECK_EQ(w.first, 0x015Cu);
+		CHECK_EQ(w.second, 0x5A84);
+	}
+	CHECK_EQ(f.t.memory[0x015C], 0x6984);
+}
+
+TEST(debugger_detach_clocks_a_cpu_in_halt_with_0403)
+{
+	Fx f;
+	f.attached();
+	/* the control-signal reads of SetPcXv2 and of the release clock; the
+	 * second shows HALT (0x0002) */
+	f.t.cntrl_sig_script = {0x0301, 0x0303};
+	f.d.detach(DetachAction::Run);
+	CHECK(f.t.cntrl_sig_script.empty());
+	CHECK_LOG(f.t.log, clear_triggers() +
+				   restore_release(0x4520, 0x0008, 0x6904, 0x0006, true) +
+				   Log{"close"});
 }
 
 TEST(debugger_detach_with_reset)

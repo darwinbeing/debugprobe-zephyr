@@ -66,6 +66,12 @@ inline bool contains(const Log &log, const Log &sub)
 	return false;
 }
 
+/* The first `n` entries (all of them if there are fewer). */
+inline Log first(const Log &log, size_t n)
+{
+	return Log(log.begin(), log.begin() + static_cast<long>(std::min(n, log.size())));
+}
+
 /* The last `n` entries (all of them if there are fewer). */
 inline Log last(const Log &log, size_t n)
 {
@@ -187,21 +193,26 @@ inline Log clear_triggers()
 }
 
 /* RestoreContext_ReleaseJtagXv2.c:98-189 (Note 1411 to the release), mdb = 0,
- * ulpDebug = 0, CPU not in the HALT state at the release clock: the PC is
- * set, 2 lower if the CPU is off, and the CPU released. */
-inline Log release_at(unsigned pc, bool cpuoff, unsigned eem_control)
+ * ulpDebug = 0: the PC is set, 2 lower if the CPU is off, and the CPU
+ * released. `halt`: the control signal shows HALT at the release clock, so
+ * 0x0403 is written (lines 151-155). */
+inline Log release_at(unsigned pc, bool cpuoff, unsigned eem_control, bool halt = false)
 {
-	return set_pc(cpuoff ? pc - 2 : pc) +
-	       Log{"tclk:1", ir(0xC8), d16(0x0401), ir(0x21), ir(0x28), "tclk:0", d16(0),
-		   "tclk:1", ir(0x30), d16(eem_control), ir(0x28), ir(0xA8)};
+	Log l = set_pc(cpuoff ? pc - 2 : pc) +
+		Log{"tclk:1", ir(0xC8), d16(0x0401), ir(0x21), ir(0x28), "tclk:0", d16(0)};
+	if (halt) {
+		l = l + Log{ir(0xC8), d16(0x0403)};
+	}
+	return l + Log{"tclk:1", ir(0x30), d16(eem_control), ir(0x28), ir(0xA8)};
 }
 
-/* RestoreContext_ReleaseJtagXv2.c:69-196, mdb = 0, ulpDebug = 0, CPU not
- * in the HALT state at the release clock. */
-inline Log restore_release(unsigned pc, unsigned sr, unsigned wdt, unsigned eem_control)
+/* RestoreContext_ReleaseJtagXv2.c:69-196, mdb = 0, ulpDebug = 0; `halt` as
+ * for release_at. */
+inline Log restore_release(unsigned pc, unsigned sr, unsigned wdt, unsigned eem_control,
+			   bool halt = false)
 {
 	return write_reg(0x0082, sr) + write_word(0x015C, 0x5A00u | (wdt & 0xFFu)) +
-	       release_at(pc, (sr & 0x0010u) != 0, eem_control);
+	       release_at(pc, (sr & 0x0010u) != 0, eem_control, halt);
 }
 
 } // namespace dbglog
