@@ -13,6 +13,19 @@ F5529 = devices.MSP430F5529
 SESSION_CPP = os.path.join(os.path.dirname(__file__), "..", "..", "..",
                            "lib", "msp430", "src", "session.cpp")
 
+# The registers of read_side_effects as TI's msp430f5529.h defines them
+# ("#define UCA0RXBUF_ (0x05CCu)"); copied by hand, the header is not in the
+# repository.
+HEADER_ADDRESSES = {
+    "SYSJMBI0": 0x0188, "SYSJMBI1": 0x018A, "SYSBERRIV": 0x0198, "SYSUNIV": 0x019A,
+    "SYSSNIV": 0x019C, "SYSRSTIV": 0x019E, "P1IV": 0x020E, "P2IV": 0x021E,
+    "TA0IV": 0x036E, "TA1IV": 0x03AE, "TB0IV": 0x03EE, "TA2IV": 0x042E, "RTCIV": 0x04AE,
+    "DMAIV": 0x050E, "UCA0RXBUF": 0x05CC, "UCA0IV": 0x05DE, "UCB0RXBUF": 0x05EC,
+    "UCB0IV": 0x05FE, "UCA1RXBUF": 0x060C, "UCA1IV": 0x061E, "UCB1RXBUF": 0x062C,
+    "UCB1IV": 0x063E, "ADC12IV": 0x070E, "ADC12MEM0": 0x0720, "ADC12MEM15": 0x073E,
+    "CBIV": 0x08CE, "USBVECINT": 0x0932,
+}
+
 
 def probe_tables():
     """kPeripheralEnd and kKnownDevices from the probe's session.cpp:
@@ -94,10 +107,45 @@ class DeviceTableTest(unittest.TestCase):
         ranges = [(s, e) for s, e, _ in F5529.memory_map()]
         ranges += [(s, e) for s, e, _ in F5529.peripheral_holes]
         ranges += list(F5529.vacant)
+        ranges += [(s, e) for s, e, _, _ in F5529.read_side_effects]
         ranges += [F5529.peripherals, F5529.bsl, F5529.info, F5529.tlv, F5529.ram,
                    (F5529.main_start, F5529.main_end)]
         for start, end in ranges:
             self.assertEqual((start % 2, end % 2), (0, 0), (hex(start), hex(end)))
+
+    def test_read_side_effects_are_the_header_registers(self):
+        mem = ("ADC12MEM0", "ADC12MEM15")
+        expected = [(a, a + 2, n) for n, a in HEADER_ADDRESSES.items() if n not in mem]
+        expected.append((HEADER_ADDRESSES[mem[0]], HEADER_ADDRESSES[mem[1]] + 2,
+                         "ADC12MEM0-ADC12MEM15"))
+        self.assertEqual(sorted((s, e, n) for s, e, n, _ in F5529.read_side_effects),
+                         sorted(expected))
+
+    def test_read_side_effects_are_sorted_readable_and_say_what_they_do(self):
+        entries = F5529.read_side_effects
+        self.assertEqual(list(entries), sorted(entries))
+        for (_, end, _, _), (start, _, name, _) in zip(entries, entries[1:]):
+            self.assertLessEqual(end, start, name)
+        for start, end, name, effect in entries:
+            self.assertTrue(F5529.debug_readable(start, end - start), name)
+            self.assertTrue(effect.startswith("clears "), name)
+
+    def test_debug_read_side_effect(self):
+        def hit(addr, n):
+            entry = F5529.debug_read_side_effect(addr, n)
+            return entry and entry[2]
+        self.assertEqual(hit(0x05CD, 1), "UCA0RXBUF")  # odd byte of UCA0RXBUF's word
+        self.assertEqual(hit(0x05CC, 2), "UCA0RXBUF")
+        self.assertEqual(hit(0x05C0, 0x40), "UCA0RXBUF")  # USCI_A0 and B0: the first hit
+        self.assertEqual(hit(0x05DD, 2), "UCA0IV")  # widened to 0x05DC-0x05DF
+        self.assertEqual(hit(0x0200, 0x0F), "P1IV")  # widened to 0x0200-0x020F
+        self.assertEqual(hit(0x073F, 1), "ADC12MEM0-ADC12MEM15")
+        self.assertEqual(hit(0x019E, 2), "SYSRSTIV")
+        self.assertEqual(F5529.debug_read_side_effect(0x0932, 2)[3],
+                         "clears the highest pending flag")
+        for addr, n in ((0x05CA, 2), (0x05CB, 1), (0x05CE, 0x10), (0x05DD, 1), (0x0200, 0x0E),
+                        (0x0740, 2), (0x2400, 0x100), (0x4400, 0x20000), (0x05CC, 0)):
+            self.assertIsNone(F5529.debug_read_side_effect(addr, n), (hex(addr), n))
 
     def test_debug_writable(self):
         for addr, n in ((0x2400, 2), (0x1C00, 0x2800), (0x0200, 2), (0x011E, 2), (0x0150, 2)):

@@ -23,6 +23,9 @@ class Device:
     info: tuple  # information memory A-D
     tlv: tuple  # device descriptor (TLV), read-only
     ram: tuple  # all RAM, USB RAM included
+    # ((start, end, name, effect), ...), whole words, sorted: registers whose
+    # read changes the device. Reads there are allowed; the host can warn.
+    read_side_effects: tuple
 
     def region(self, addr: int):
         """(start, end) of the programmable region that holds addr, or None."""
@@ -70,6 +73,15 @@ class Device:
             addr = region[1]
         return True
 
+    def debug_read_side_effect(self, addr: int, length: int):
+        """The first read_side_effects entry that a read of [addr, addr +
+        length) touches, or None. The probe reads whole words, so the range is
+        widened to words first."""
+        if length <= 0:
+            return None
+        start, end = addr & ~1, (addr + length + 1) & ~1
+        return next((e for e in self.read_side_effects if start < e[1] and end > e[0]), None)
+
     def debug_writable(self, addr: int, length: int) -> bool:
         """Read-only debug sessions write RAM, and peripheral registers outside
         the peripheral holes (flash controller, SYS, DMA). Nothing else."""
@@ -111,6 +123,36 @@ MSP430F5529 = Device(
     info=(0x1800, 0x1A00),
     tlv=(0x1A00, 0x1B00),
     ram=(0x1C00, 0x4400),
+    # Addresses from TI's msp430f5529.h; reading an interrupt vector register
+    # clears the flag it reports (SLAU208).
+    read_side_effects=(
+        (0x0188, 0x018A, "SYSJMBI0", "clears JMBINxFG"),
+        (0x018A, 0x018C, "SYSJMBI1", "clears JMBINxFG"),
+        (0x0198, 0x019A, "SYSBERRIV", "clears the highest pending flag"),
+        (0x019A, 0x019C, "SYSUNIV", "clears the highest pending flag"),
+        (0x019C, 0x019E, "SYSSNIV", "clears the highest pending flag"),
+        (0x019E, 0x01A0, "SYSRSTIV", "clears the highest pending flag"),
+        (0x020E, 0x0210, "P1IV", "clears the highest pending flag"),
+        (0x021E, 0x0220, "P2IV", "clears the highest pending flag"),
+        (0x036E, 0x0370, "TA0IV", "clears the highest pending flag"),
+        (0x03AE, 0x03B0, "TA1IV", "clears the highest pending flag"),
+        (0x03EE, 0x03F0, "TB0IV", "clears the highest pending flag"),
+        (0x042E, 0x0430, "TA2IV", "clears the highest pending flag"),
+        (0x04AE, 0x04B0, "RTCIV", "clears the highest pending flag"),
+        (0x050E, 0x0510, "DMAIV", "clears the highest pending flag"),
+        (0x05CC, 0x05CE, "UCA0RXBUF", "clears UCRXIFG and the receive error flags"),
+        (0x05DE, 0x05E0, "UCA0IV", "clears the highest pending flag"),
+        (0x05EC, 0x05EE, "UCB0RXBUF", "clears UCRXIFG and the receive error flags"),
+        (0x05FE, 0x0600, "UCB0IV", "clears the highest pending flag"),
+        (0x060C, 0x060E, "UCA1RXBUF", "clears UCRXIFG and the receive error flags"),
+        (0x061E, 0x0620, "UCA1IV", "clears the highest pending flag"),
+        (0x062C, 0x062E, "UCB1RXBUF", "clears UCRXIFG and the receive error flags"),
+        (0x063E, 0x0640, "UCB1IV", "clears the highest pending flag"),
+        (0x070E, 0x0710, "ADC12IV", "clears ADC12OV or ADC12TOV when highest pending"),
+        (0x0720, 0x0740, "ADC12MEM0-ADC12MEM15", "clears ADC12IFGx"),
+        (0x08CE, 0x08D0, "CBIV", "clears the highest pending flag"),
+        (0x0932, 0x0934, "USBVECINT", "clears the highest pending flag"),
+    ),
 )
 
 DEVICES = {d.device_id: d for d in (MSP430F5529,)}
