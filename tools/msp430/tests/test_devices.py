@@ -1,4 +1,5 @@
 import ast
+import dataclasses
 import os
 import re
 import sys
@@ -45,23 +46,58 @@ class ProbeMirrorTest(unittest.TestCase):
 
 class DeviceTableTest(unittest.TestCase):
     def test_memory_map_leaves_out_the_bsl_and_vacant_memory(self):
+        """Peripherals SFRIE1 (0x0100) to USBFUNADR (0x093F), the lowest and
+        highest register in TI's msp430f5529.h."""
         self.assertEqual(F5529.memory_map(), [
-            (0x0000, 0x1000, "ram"), (0x1800, 0x1A00, "rom"), (0x1A00, 0x1B00, "rom"),
+            (0x0100, 0x0940, "ram"), (0x1800, 0x1A00, "rom"), (0x1A00, 0x1B00, "rom"),
             (0x1C00, 0x4400, "ram"), (0x4400, 0x24400, "rom")])
+
+    def test_no_map_region_overlaps_the_bsl(self):
+        lo, hi = F5529.bsl
+        for start, end, _ in F5529.memory_map():
+            self.assertTrue(end <= lo or start >= hi, hex(start))
 
     def test_debug_readable(self):
         self.assertTrue(F5529.debug_readable(0x4400, 0x20000))
-        self.assertTrue(F5529.debug_readable(0x0000, 0x1000))  # every peripheral
+        self.assertTrue(F5529.debug_readable(0x0100, 0x0840))  # every peripheral register
+        self.assertTrue(F5529.debug_readable(0x093E, 2))  # USBIFG, USBFUNADR
         self.assertTrue(F5529.debug_readable(0x19FE, 4))  # info memory into the TLV
         self.assertTrue(F5529.debug_readable(0x43FE, 4))  # RAM into flash
+        self.assertFalse(F5529.debug_readable(0x0000, 2))  # vacant
+        self.assertFalse(F5529.debug_readable(0x00FE, 4))  # vacant into the SFRs
+        self.assertFalse(F5529.debug_readable(0x093E, 4))  # USB into vacant
+        self.assertFalse(F5529.debug_readable(0x0940, 2))  # vacant
+        self.assertFalse(F5529.debug_readable(0x0FFE, 2))  # vacant
         self.assertFalse(F5529.debug_readable(0x1000, 2))  # BSL
         self.assertFalse(F5529.debug_readable(0x17FE, 2))  # BSL, last word
-        self.assertFalse(F5529.debug_readable(0x0FFE, 4))  # peripherals into the BSL
+        self.assertFalse(F5529.debug_readable(0x0FFE, 4))  # vacant into the BSL
         self.assertFalse(F5529.debug_readable(0x17FE, 4))  # BSL into info memory
         self.assertFalse(F5529.debug_readable(0x1B00, 2))  # vacant
         self.assertFalse(F5529.debug_readable(0x1AFE, 4))  # TLV into vacant
         self.assertFalse(F5529.debug_readable(0x1BFE, 4))  # vacant into RAM
         self.assertFalse(F5529.debug_readable(0x243FE, 4))  # past the end of flash
+
+    def test_debug_readable_refuses_empty_and_negative_lengths(self):
+        self.assertFalse(F5529.debug_readable(0x2400, 0))
+        self.assertFalse(F5529.debug_readable(0x2400, -2))
+
+    def test_the_bsl_is_never_readable_even_if_the_map_covered_it(self):
+        wrong = dataclasses.replace(F5529, info=(0x1000, 0x1A00))
+        self.assertIn((0x1000, 0x1A00, "rom"), wrong.memory_map())
+        self.assertFalse(wrong.debug_readable(0x1000, 2))
+        self.assertFalse(wrong.debug_readable(0x17FE, 4))
+        self.assertTrue(wrong.debug_readable(0x1800, 2))
+
+    def test_every_boundary_is_even(self):
+        """gdbserver widens odd byte accesses to words; with even boundaries a
+        widened access stays on the same side of each one."""
+        ranges = [(s, e) for s, e, _ in F5529.memory_map()]
+        ranges += [(s, e) for s, e, _ in F5529.peripheral_holes]
+        ranges += list(F5529.vacant)
+        ranges += [F5529.peripherals, F5529.bsl, F5529.info, F5529.tlv, F5529.ram,
+                   (F5529.main_start, F5529.main_end)]
+        for start, end in ranges:
+            self.assertEqual((start % 2, end % 2), (0, 0), (hex(start), hex(end)))
 
     def test_debug_writable(self):
         for addr, n in ((0x2400, 2), (0x1C00, 0x2800), (0x0200, 2), (0x011E, 2), (0x0150, 2)):

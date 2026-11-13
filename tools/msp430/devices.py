@@ -16,8 +16,9 @@ class Device:
     # Debugging (phase B). (start, end) pairs, end exclusive. The write rules
     # and the PC rule mirror the probe's kKnownDevices
     # (lib/msp430/src/session.cpp), which enforces them.
-    peripherals: tuple  # peripheral registers
+    peripherals: tuple  # peripheral space: the probe's write window for registers
     peripheral_holes: tuple  # ((start, end, name), ...): peripherals a debug session never writes
+    vacant: tuple  # ((start, end), ...): no registers there; left out of the memory map
     bsl: tuple  # bootloader area: a debug session neither reads nor writes it
     info: tuple  # information memory A-D
     tlv: tuple  # device descriptor (TLV), read-only
@@ -45,12 +46,23 @@ class Device:
         """The regions a read-only debug session may access, as GDB's memory map
         lists them: [(start, end, "ram" | "rom")], sorted. The BSL area and
         vacant memory are absent, so GDB does not access them."""
-        return sorted([(*self.peripherals, "ram"), (*self.info, "rom"), (*self.tlv, "rom"),
-                       (*self.ram, "ram"), (self.main_start, self.main_end, "rom")])
+        regions = []
+        for start, end, kind in ((*self.peripherals, "ram"), (*self.info, "rom"),
+                                 (*self.tlv, "rom"), (*self.ram, "ram"),
+                                 (self.main_start, self.main_end, "rom")):
+            pieces = [(start, end)]
+            for v_lo, v_hi in self.vacant:
+                pieces = [p for lo, hi in pieces
+                          for p in ((lo, min(hi, v_lo)), (max(lo, v_hi), hi)) if p[0] < p[1]]
+            regions += [(lo, hi, kind) for lo, hi in pieces]
+        return sorted(regions)
 
     def debug_readable(self, addr: int, length: int) -> bool:
-        """Every byte of [addr, addr + length) lies in a memory-map region."""
+        """Every byte of [addr, addr + length) lies in a memory-map region, and
+        none in the BSL area, whatever the map says. An empty range is not."""
         end = addr + length
+        if length <= 0 or (addr < self.bsl[1] and end > self.bsl[0]):
+            return False
         while addr < end:
             region = next((r for r in self.memory_map() if r[0] <= addr < r[1]), None)
             if region is None:
@@ -93,6 +105,8 @@ MSP430F5529 = Device(
         (0x0180, 0x01A0, "SYS"),  # SYSCTL (SYSRIVECT), SYSBSLC, ...: vectors, BSL protection
         (0x0500, 0x0540, "DMA"),  # DMACTL0..DMA2SZ: a transfer could write FCTL
     ),
+    # below SFRIE1 (0x0100) and above USBFUNADR (0x093F), TI's msp430f5529.h
+    vacant=((0x0000, 0x0100), (0x0940, 0x1000)),
     bsl=(0x1000, 0x1800),
     info=(0x1800, 0x1A00),
     tlv=(0x1A00, 0x1B00),
