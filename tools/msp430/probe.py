@@ -14,16 +14,29 @@ from dataclasses import dataclass
 
 VID, PID = 0x2E8A, 0x000C
 VENDOR_CMD = 0x90
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+FLASH_PROTOCOL_VERSIONS = (1, 2)  # the flash commands are the same in both
 USB_PACKET = 64
 
 OP_INFO, OP_CONNECT, OP_DISCONNECT, OP_READ_MEM, OP_WRITE_MEM = 0, 1, 2, 3, 4
 OP_ERASE, OP_FLASH_BEGIN, OP_FLASH_DATA, OP_FLASH_END = 5, 6, 7, 8
+OP_DBG_ATTACH, OP_DBG_DETACH, OP_DBG_HALT, OP_DBG_RESUME, OP_DBG_STATUS = 9, 10, 11, 12, 13
+OP_DBG_STEP, OP_DBG_READ_REGS, OP_DBG_WRITE_REG, OP_DBG_BP_SET, OP_DBG_BP_CLEAR = 14, 15, 16, 17, 18
 
 OP_NAMES = {0: "INFO", 1: "CONNECT", 2: "DISCONNECT", 3: "READ_MEM", 4: "WRITE_MEM",
-            5: "ERASE", 6: "FLASH_BEGIN", 7: "FLASH_DATA", 8: "FLASH_END"}
+            5: "ERASE", 6: "FLASH_BEGIN", 7: "FLASH_DATA", 8: "FLASH_END",
+            9: "DBG_ATTACH", 10: "DBG_DETACH", 11: "DBG_HALT", 12: "DBG_RESUME",
+            13: "DBG_STATUS", 14: "DBG_STEP", 15: "DBG_READ_REGS", 16: "DBG_WRITE_REG",
+            17: "DBG_BP_SET", 18: "DBG_BP_CLEAR"}
 
 FEATURE_CPUXV2_FLASH = 1
+FEATURE_DEBUG = 2
+
+STATE_IDLE, STATE_CONNECTED, STATE_FLASHING, STATE_DEBUG_HALTED, STATE_DEBUG_RUNNING = range(5)
+ATTACH_RUNNING, ATTACH_RESET = 0, 1  # attach without reset / reset and halt
+DETACH_RUN, DETACH_RESET = 0, 1      # restore the context and run / reset and run
+STOP_NONE, STOP_REQUEST, STOP_BREAKPOINT, STOP_STEP, STOP_RESET = range(5)
+NO_BREAKPOINT = 0xFF  # DBG_STATUS: no breakpoint at the stop address; DBG_BP_CLEAR: all
 
 ENTRY_NORMAL, ENTRY_MAGIC_PATTERN = 0, 1
 ERASE_SEGMENT, ERASE_BANK, ERASE_MAIN = 0, 1, 2
@@ -31,9 +44,16 @@ ERASE_SEGMENT, ERASE_BANK, ERASE_MAIN = 0, 1, 2
 READ_SIZE = 4096  # bytes asked of the IN endpoint per read
 
 STATUS_OK = 0
+STATUS_BAD_ARG = 1
+STATUS_BAD_STATE = 2
 STATUS_BUSY = 3
 STATUS_NO_TARGET = 4
 STATUS_LOCKED = 5
+STATUS_TARGET_ERROR = 6
+STATUS_TIMEOUT = 7
+STATUS_UNKNOWN_OP = 8
+STATUS_PROTECTED = 9
+STATUS_RUNNING = 10
 STATUS_NAMES = {
     0: "OK",
     1: "BAD_ARG",
@@ -44,6 +64,8 @@ STATUS_NAMES = {
     6: "TARGET_ERROR (lost synchronization with the CPU)",
     7: "TIMEOUT (no answer from the target)",
     8: "UNKNOWN_OP",
+    9: "PROTECTED (read-only debug session: the probe does not write there)",
+    10: "RUNNING (the CPU must be halted first)",
 }
 
 
@@ -73,6 +95,7 @@ class Info:
     state: int
     max_data_bytes: int
     features: int
+    hw_breakpoints: int = 0  # protocol version 2
 
 
 @dataclass(frozen=True)
@@ -81,6 +104,22 @@ class Identity:
     core_id: int
     device_id_ptr: int
     device_id: int
+
+
+@dataclass(frozen=True)
+class Attached:
+    identity: Identity
+    pc: int
+    stop_reason: int
+    hw_breakpoints: int
+
+
+@dataclass(frozen=True)
+class DebugStatus:
+    halted: bool
+    stop_reason: int
+    breakpoint: int  # index of the breakpoint at the stop address, or NO_BREAKPOINT
+    pc: int          # 0 while running
 
 
 def chunks(nwords: int, header_bytes: int, limit_words: int):
@@ -179,6 +218,7 @@ class SbwProbe:
 
     def __init__(self, transport):
         self._t = transport
+        self.last_info = None
         self.max_words = 16
         self.read_words = 16
         self.write_words = 16
@@ -209,8 +249,9 @@ class SbwProbe:
         data = self._cmd(OP_INFO)
         if len(data) < 8:
             raise ProbeError(f"INFO: expected 8 bytes, got {len(data)}")
-        info = Info(*struct.unpack("<BBHI", data[:8]))
+        info = Info(*struct.unpack("<BBHI", data[:8]), hw_breakpoints=data[8] if len(data) > 8 else 0)
         self.max_words = info.max_data_bytes // 2
+        self.last_info = info
         return info
 
     def configure(self, speed_khz: int) -> None:
@@ -259,3 +300,61 @@ class SbwProbe:
 
     def flash_end(self) -> None:
         self._cmd(OP_FLASH_END)
+
+    # --- debugging (protocol version 2) ---
+
+    def dbg_attach(self, mode: int, speed_khz: int, ram_lo: int, ram_hi: int) -> Attached:
+        """Attach without reset (ATTACH_RUNNING) or reset and halt (ATTACH_RESET).
+        ram_lo/ram_hi: the RAM a read-only session may write (the probe narrows
+        it to the RAM it knows for the device)."""
+        data = self._cmd(OP_DBG_ATTACH, struct.pack("<BBHII", mode, 0, speed_khz, ram_lo, ram_hi))
+        if len(data) < 15:
+            raise ProbeError(OUT_OF_STEP)
+        identity = Identity(*struct.unpack("<BHIH", data[:9]))
+        pc, reason, nbp = struct.unpack("<IBB", data[9:15])
+        return Attached(identity, pc, reason, nbp)
+
+    def dbg_detach(self, action: int = DETACH_RUN) -> None:
+        self._cmd(OP_DBG_DETACH, bytes([action]))
+
+    def dbg_halt(self) -> int:
+        """Stop a running CPU (OK when halted already); returns the PC."""
+        return self._u32(self._cmd(OP_DBG_HALT))
+
+    def dbg_resume(self) -> None:
+        self._cmd(OP_DBG_RESUME)
+
+    def dbg_status(self) -> DebugStatus:
+        data = self._cmd(OP_DBG_STATUS)
+        if len(data) < 7:
+            raise ProbeError(OUT_OF_STEP)
+        state, reason, bp, pc = struct.unpack("<BBBI", data[:7])
+        return DebugStatus(state == 1, reason, bp, pc)
+
+    def dbg_step(self) -> int:
+        """One instruction; returns the new PC. A StatusError with TIMEOUT
+        means the CPU did not stop by itself: the probe halted it (stop
+        reason STOP_REQUEST)."""
+        return self._u32(self._cmd(OP_DBG_STEP))
+
+    def dbg_read_regs(self) -> list:
+        data = self._cmd(OP_DBG_READ_REGS)
+        if len(data) < 64:
+            raise ProbeError(OUT_OF_STEP)
+        return list(struct.unpack("<16I", data[:64]))
+
+    def dbg_write_reg(self, index: int, value: int) -> None:
+        self._cmd(OP_DBG_WRITE_REG, struct.pack("<BI", index, value))
+
+    def dbg_bp_set(self, index: int, addr: int) -> None:
+        self._cmd(OP_DBG_BP_SET, struct.pack("<BI", index, addr))
+
+    def dbg_bp_clear(self, index: int = NO_BREAKPOINT) -> None:
+        """Clear breakpoint `index`; NO_BREAKPOINT (the default) clears all."""
+        self._cmd(OP_DBG_BP_CLEAR, bytes([index]))
+
+    @staticmethod
+    def _u32(data: bytes) -> int:
+        if len(data) < 4:
+            raise ProbeError(OUT_OF_STEP)
+        return struct.unpack("<I", data[:4])[0]

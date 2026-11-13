@@ -19,10 +19,10 @@ def open_session(probe, speed_khz: int):
     magic-pattern entry. Returns (Identity, Device)."""
     probe.dap_disconnect()
     info = probe.info()
-    if info.version != probe_mod.PROTOCOL_VERSION:
+    if info.version not in probe_mod.FLASH_PROTOCOL_VERSIONS:
         raise FlashError(
             f"probe speaks SBW protocol version {info.version}, this tool needs "
-            f"version {probe_mod.PROTOCOL_VERSION}"
+            "version 1 or 2"
         )
     if not info.features & probe_mod.FEATURE_CPUXV2_FLASH:
         raise FlashError("the probe firmware does not support MSP430 CPUXv2 flash devices")

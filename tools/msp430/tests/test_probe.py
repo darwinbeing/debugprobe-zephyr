@@ -36,9 +36,13 @@ class SbwProbeTest(unittest.TestCase):
 
     def test_info(self):
         info = self.probe.info()
-        self.assertEqual((info.version, info.state, info.max_data_bytes, info.features),
-                         (1, 0, 1016, 1))
+        self.assertEqual((info.version, info.state, info.max_data_bytes, info.features,
+                          info.hw_breakpoints), (2, 0, 1016, 3, 8))
         self.assertEqual(self.probe.max_words, 508)
+
+    def test_info_of_a_version_1_probe(self):
+        info = SbwProbe(FakeFirmware(version=1, features=1)).info()
+        self.assertEqual((info.version, info.features, info.hw_breakpoints), (1, 1, 0))
 
     def test_configure_scales_chunks_with_speed(self):
         self.probe.info()

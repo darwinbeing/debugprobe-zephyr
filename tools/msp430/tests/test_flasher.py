@@ -98,11 +98,16 @@ class OpenSessionRefusalTest(unittest.TestCase):
             flasher.open_session(SbwProbe(fw), 250)
         self.assertEqual(len(fw.connects), 1)
 
-    def test_protocol_version_2(self):
-        fw = FakeFirmware(version=2)
-        with self.assertRaisesRegex(FlashError, "version 2"):
+    def test_protocol_version_3(self):
+        fw = FakeFirmware(version=3)
+        with self.assertRaisesRegex(FlashError, "version 3"):
             flasher.open_session(SbwProbe(fw), 250)
         self.assertEqual(fw.connects, [])
+
+    def test_protocol_version_1_still_flashes(self):
+        fw = FakeFirmware(version=1, features=1)
+        identity, device = flasher.open_session(SbwProbe(fw), 250)
+        self.assertEqual(device.name, "MSP430F5529")
 
     def test_firmware_without_cpuxv2_flash(self):
         fw = FakeFirmware(features=0)
