@@ -119,7 +119,7 @@ are 20-bit numbers in 32-bit fields.
 
 | op | Name | Request args | Response data |
 |---|---|---|---|
-| 0x00 | INFO | – | as before; `version` = 2, new `state` values 3 DebugHalted, 4 DebugRunning; `features` bit 1: debugging |
+| 0x00 | INFO | – | as before; `version` = 2, new `state` values 3 DebugHalted, 4 DebugRunning; `features` bit 1: debugging; ninth byte `u8 hw_breakpoints` (0 until a debug session identified the device) |
 | 0x09 | DBG_ATTACH | `u8 mode` (0 attach without reset, 1 reset and halt at the reset vector), `u8 flags` (bit 0: full mode, B2 only), `u16 speed_khz`, `u32 ram_lo`, `u32 ram_hi` (the device's RAM range from the host's device table) | the CONNECT identity block, then `u32 pc`, `u8 stop_reason`, `u8 hw_breakpoints` |
 | 0x0A | DBG_DETACH | `u8 action` (0 restore context and run, 1 reset and run) | – |
 | 0x0B | DBG_HALT | – | `u32 pc` |
@@ -135,11 +135,14 @@ are 20-bit numbers in 32-bit fields.
   debug layer, which preserves the halted context. In DebugRunning they
   return `BAD_STATE`.
 - New status `PROTECTED` (0x09): in read-only mode `WRITE_MEM` may only
-  touch the peripheral space 0x0000–0x0FFF and the RAM range given with
-  `DBG_ATTACH` (for the F5529 0x1C00–0x43FF, USB RAM included); any other
-  address — main flash, information memory, BSL, vacant memory — is refused
-  with `PROTECTED`. The rule is a whitelist, so a wrong or missing device
-  entry can only make the probe refuse more, never write flash.
+  touch the peripheral space below 0x1000 **without the flash controller
+  registers (0x0140–0x014F)**, and RAM. The RAM window is the **intersection**
+  of the range given with `DBG_ATTACH` and the RAM the probe itself knows for
+  the device it identified (F5529, device ID bytes 55h 29h: 0x1C00–0x43FF, USB RAM
+  included); for a device the probe does not know, the window is empty. Any
+  other address — main flash, information memory, BSL, vacant memory — is
+  refused with `PROTECTED`. A wrong host table can therefore only narrow the
+  window, never open flash.
 - New status `RUNNING` (0x0A): an operation that needs a halted CPU while it
   runs.
 
@@ -195,9 +198,10 @@ takes over the pins, so a lost host never leaves the target halted.
 - **Target description**: the MSP430X register set as `msp430-elf-gdb`
   expects it (register count, sizes and order verified against the installed
   GDB during implementation).
-- **Memory map**: RAM and peripherals as `ram`; main flash, information
-  memory and BSL as `rom` in read-only mode, `flash` with their segment size
-  in full mode. With flash marked `rom`, GDB's automatic hardware-breakpoint
+- **Memory map**: RAM and peripherals as `ram`; main flash and information
+  memory as `rom` in read-only mode, `flash` with their segment size in full
+  mode. The BSL area (0x1000–0x17FF) is left out of the map and reads there
+  are refused (reading it reset the CPU of the user's board in Phase A). With flash marked `rom`, GDB's automatic hardware-breakpoint
   rule makes an ordinary `break` use `Z1`, so users need not type `hbreak`.
 - **Read-only enforcement on the host**: `M`/`X` into a flash range,
   `Z0`, `vFlash*` and `load` answer with an error in read-only mode, before
@@ -296,3 +300,42 @@ breakpoints, `load`) and its acceptance.
 | Timers keep running while halted and the firmware sees time jump | follow MSPDS's clock-control default; document; it does not endanger flash |
 | A halt during the firmware's own flash write (information memory) | the CPU is stalled during a flash write from flash; document; check `FCTL3.BUSY` before saving context and wait |
 | Licence of ported files | check each file's notice against TI's official MSPDS package; use only BSD-3-Clause files |
+
+## Corrections made while planning B1 (2026-11-13)
+
+The B1 plan (`docs/superpowers/plans/2026-11-13-msp430-debug-b1.md`, section
+"Spec corrections needed") found the following; items 3, 4, 5 and 7 are
+already worked into the text above, the others take precedence over it:
+
+1. No target description is sent: `msp430-elf-gdb` fixes the remote register
+   layout itself (16 registers R0–R15, 4 bytes each).
+2. GDB selects MSP430X with 20-bit addresses only from the ELF's
+   `.MSP430.attributes` section; `symelf.py` writes it.
+3. The RAM window is the intersection of the host's range and the probe's own
+   device table (see `PROTECTED`).
+4. The flash controller registers are excluded from the writable peripherals.
+5. The BSL area is left out of the memory map and never read.
+6. `READ_MEM` / `WRITE_MEM` while running return `RUNNING`.
+7. `INFO` has a ninth byte with the breakpoint count.
+8. `DBG_STATUS`: state 0 running / 1 halted; stop reason 0 while running;
+   breakpoint index 0xFF for none; PC 0 while running.
+9. After Ctrl-C (0x03) the server replies `T02`; breakpoints and steps reply
+   `T05` (`hwbreak:;` for breakpoints).
+10. `symelf.py` accepts name tables without a size column and skips type and
+    member rows; with `--image` only main flash goes into `.text`.
+11. The F5529's EEM size (8 triggers) and device parameters come from the
+    MSPDS 3.3.1.3 device database (BSD-3-Clause); the 3.15.1.1 package has
+    none.
+12. `PollJStateReg` is not ported (the F5529 is polled with `WaitForEem`).
+13. Clocks while halted: EEM general clock control 0x000E (MCLK, SMCLK, ACLK
+    stopped); per-module clock control stays at the device's defaults; the
+    acceptance measures Timer0_B while halted.
+14. `FCTL3.BUSY` is checked after the sync (up to 100 ms) before the watchdog
+    is held.
+15. A single step that does not stop in time halts the CPU, restores trigger
+    block 0 and returns `TIMEOUT`.
+16. `DBG_ATTACH` uses only the normal SBW entry; its full-mode flag is
+    `BAD_ARG` in B1; `DISCONNECT` in a debug state is `BAD_STATE`; `ERASE`
+    and `FLASH_BEGIN` are `PROTECTED`; GDB's `k` detaches instead of killing;
+    `monitor speed` takes effect at the next attach; `--allow-flash-write` is
+    refused in B1; the server listens on 127.0.0.1 only.
