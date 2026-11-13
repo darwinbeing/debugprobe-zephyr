@@ -758,7 +758,9 @@ TEST(debugger_read_mem_follows_mspds_read_mem_words)
 	f.t.memory[0x2402] = 0xABCD;
 	uint8_t out[4] = {};
 	REQUIRE(f.d.read_mem(0x2400, 2, out) == Status::Ok);
-	const Log want = Log{"tclk:0", ir(0xC1), d20(0x2400), "tclk:1", "tclk:0", ir(0x42), d16(0),
+	/* read mode first (not in ReadMemWordsXv2), then the macro */
+	const Log want = Log{"tclk:0", ir(0xC8), d16(0x0501),
+			     ir(0xC1), d20(0x2400), "tclk:1", "tclk:0", ir(0x42), d16(0),
 			     ir(0xC1), d20(0x2402), "tclk:1", "tclk:0", ir(0x42), d16(0),
 			     "tclk:1", "tclk:0", "tclk:1", "ir:28", "dr16:0000"};
 	CHECK_LOG(f.t.log, want);
@@ -828,5 +830,23 @@ TEST(debugger_memory_access_needs_an_attached_cpu)
 	CHECK(f.d.read_mem(0x2400, 1, buf) == Status::BadState);
 	CHECK(f.d.write_mem(0x2400, 1, buf) == Status::BadState);
 	CHECK(f.t.log.empty());
+	CHECK(f.t.mem_writes.empty());
+}
+
+TEST(debugger_read_mem_sets_read_mode_first)
+{
+	Fx f;
+	f.attached();
+	/* The CPU left in write mode (R/W = 0): a bus cycle on the address
+	 * would be a write. The fixture checks mem_protocol_error. */
+	f.t.ir_shift(msp430::kIrCntrlSig16Bit);
+	f.t.dr_shift16(0x0500);
+	f.t.log.clear();
+	f.t.memory[0x2400] = 0x1234;
+	uint8_t out[2] = {};
+	REQUIRE(f.d.read_mem(0x2400, 1, out) == Status::Ok);
+	CHECK_LOG(first(f.t.log, 3), (Log{"tclk:0", ir(0xC8), d16(0x0501)}));
+	const uint8_t want[] = {0x34, 0x12};
+	CHECK_BYTES(out, want);
 	CHECK(f.t.mem_writes.empty());
 }

@@ -27,6 +27,11 @@
  *    write_reg end with the same check. write_mem also makes it before its
  *    first write, as Phase A's Cpuxv2::write_word does, and writes nothing
  *    if it fails. ReadMemWordsXv2 and WriteMemWordsXv2 check nothing;
+ *  - read_mem sets the CPU to read (control signal 0x0501) before the
+ *    first address, as SLAU320's ReadMem_430Xv2 and Phase A's
+ *    Cpuxv2::read_mem do; ReadMemWordsXv2 relies on the operation before
+ *    it having left the CPU in read mode, and in write mode its bus cycles
+ *    could be writes;
  *  - when the init-state check or the WDTCTL password check fails during a
  *    sync (MSPDS checks neither, in both sync macros), the CPU is already in
  *    full emulation and the operation ends with TargetError. After
@@ -798,6 +803,8 @@ Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
 		return Status::Running;
 	}
 	tap_.clr_tclk();
+	tap_.ir_shift(kIrCntrlSig16Bit); /* read mode; not in MSPDS, see the header */
+	tap_.dr_shift16(0x0501);
 	for (size_t i = 0; i < nwords; ++i) {
 		tap_.ir_shift(kIrAddr16Bit);
 		tap_.dr_shift20(addr + 2u * static_cast<uint32_t>(i));
