@@ -1,0 +1,298 @@
+# MSP430F5529 Spy-Bi-Wire Support — Design (Phase B: Debugging)
+
+Status: design, 2026-11-13. Extends `2026-11-11-msp430-sbw-design.md` (Phase A,
+flash programming over SBW), whose transport, TAP and device layers are reused
+unchanged.
+
+## Background and Goal
+
+Phase A made the probe erase, program, verify and read an MSP430F5529 over
+Spy-Bi-Wire through a CMSIS-DAP vendor command (`0x90`) driven by
+`tools/msp430/sbw.py`. Phase B adds source-less and source-level debugging
+with GDB: halt, resume, single-step, CPU registers, memory, hardware
+breakpoints.
+
+The first target is the user's own F5529 board, which runs a commercial
+firmware that exists nowhere else except in the backups made in Phase A. It
+must be possible to debug that firmware without any risk of changing its
+flash. A second target class, boards whose flash may be rewritten freely, gets
+the full feature set afterwards.
+
+### Requirement Decisions (confirmed with the user)
+
+| Decision | Choice |
+|---|---|
+| Use | Both: first B1, a read-only mode for the existing firmware on the user's board; then B2, a full mode for boards whose flash may be rewritten. |
+| Front end | GDB command line: `msp430-elf-gdb` from TI's MSP430-GCC package (to be installed on the Mac with the user's consent). VS Code can later use the same server. |
+| Architecture | GDB remote-protocol server in the host tool (`sbw.py gdbserver`), new debug operations under the existing vendor command in the probe firmware. No USB descriptor change. |
+| Symbols for the existing firmware | A symbol-only ELF generated from a name table (address, name, size, kind), outside the repository for third-party firmware. |
+
+### Scope
+
+| | B1: read-only (first) | B2: full (second) |
+|---|---|---|
+| Connect | attach to the running program without reset; or reset and halt at the reset vector | same, plus loading a program |
+| Halt, resume, single-step | yes | yes |
+| CPU registers | read and write | read and write |
+| Memory | read everything; write RAM and peripheral registers; **never write flash** (main, information, BSL) | read and write everything; flash writes go through the Phase A erase/program path |
+| Breakpoints | EEM hardware breakpoints only | hardware first, then software breakpoints in flash |
+| GDB `load` | refused | allowed |
+| Disconnect | restore the context and let the program continue from where it stopped, no reset | continue or reset |
+
+### Non-goals
+
+- 4-wire JTAG; other MSP430 families (the code stays CPUXv2-generic as in
+  Phase A, only the F5529 is verified).
+- Data watchpoints, trace, state storage, energy measurement, real-time
+  variable watch. Watchpoints may follow B2 if the EEM supports them.
+- Source-level stepping in the existing firmware: its reconstructed source
+  does not have the firmware's code addresses. Instruction-level stepping
+  with symbols works.
+- A GDB server inside the probe firmware.
+
+## Reference Material
+
+- **TI MSP Debug Stack** (MSPDS, "MSPDS-OPEN-SOURCE", slac460; current release
+  3.15.1.1). The firmware part (`Bios/src/hal/macros/`) holds the CPUXv2
+  debug sequences this design ports:
+  `SyncJtag_Conditional_SaveContextXv2` (take over a running CPU without reset
+  and save its context), `SyncJtag_AssertPor_SaveContextXv2` (reset and halt),
+  `RestoreContext_ReleaseJtagXv2` (restore and run), `SingleStepXv2`,
+  `ReadAllCpuRegsXv2` / `WriteAllCpuRegsXv2`, `ReadMemWordsXv2` /
+  `WriteMemWordsXv2` (memory access that preserves the halted context),
+  `EemDataExchangeXv2` (EEM register access, breakpoint triggers),
+  `WaitForEem` / `PollJStateReg` (stop detection). The files carry TI's
+  BSD-3-Clause notice; the implementation checks the notice of every ported
+  file against TI's official package and records it in
+  `THIRD_PARTY_NOTICES.md`, as Phase A did for SLAU320. Some later parts of
+  the MSPDS package are under TI's TSPA licence; nothing from those is used.
+- TI SLAU320 (Phase A reference) for the shared JTAG primitives.
+- MSP430F5529 datasheet (EEM size: number of breakpoint comparators), TI
+  device database in MSPDS (same information, machine-readable).
+- GDB Remote Serial Protocol documentation (packets, target description,
+  memory map) and `msp430-elf-gdb`'s MSP430X register layout.
+- Behaviour reference only, no code taken: `grumat/glossy-msp430` (GPL-2.0,
+  an embedded GDB server for MSP430).
+
+## Architecture
+
+```
+msp430-elf-gdb ⇄ TCP, GDB remote protocol ⇄ sbw.py gdbserver (tools/msp430/gdbserver.py)
+               ⇄ USB, CMSIS-DAP vendor command 0x90 ⇄ msp430::Session
+               ⇄ msp430::Debugger ⇄ msp430::Cpuxv2 ⇄ SbwTap ⇄ PIO SBW ⇄ MSP430F5529
+```
+
+- **Transport, TAP, PIO** (`drivers/sbw_pio`, `SbwTap`): unchanged.
+- **`Cpuxv2`**: unchanged in behaviour; a few primitives it already has
+  (`set_pc`, instruction fetch, `in_full_emulation`, word read/write) are made
+  usable from the new layer.
+- **`msp430::Debugger`** (new, `lib/msp430/src/debug.cpp`,
+  `include/msp430/debug.hpp`): the ported MSPDS sequences: attach with or
+  without reset, saved context (PC, SR, watchdog control, the registers the
+  sequences clobber), register access, memory access while halted, single
+  step, release with breakpoints armed, stop detection, EEM breakpoint
+  triggers. It never calls a flash erase or write path.
+- **`msp430::Session`**: new operations under `0x90`, the debug states, and
+  the flash lock (below).
+- **Host**: `probe.py` gets client methods; `gdbserver.py` implements the GDB
+  remote protocol; `symelf.py` makes symbol-only ELF files; `sbw.py` gets a
+  `gdbserver` subcommand.
+
+### Session states
+
+```
+Idle ──CONNECT──▶ Connected ──FLASH_BEGIN──▶ Flashing          (Phase A)
+Idle ──DBG_ATTACH──▶ DebugHalted ⇄ DebugRunning                 (Phase B)
+DebugHalted / DebugRunning ──DBG_DETACH──▶ Idle
+```
+
+`CONNECT` (Phase A) keeps its power-on reset. Debugging starts from Idle with
+`DBG_ATTACH`, so the attach-without-reset path never passes through Phase A's
+reset. Phase A's `ERASE`, `FLASH_*` and `WRITE_MEM` to flash return
+`BAD_STATE` or `PROTECTED` in the debug states unless the session was opened
+in full mode (B2).
+
+## Vendor Command Extension
+
+Protocol version 2. All fields little-endian; addresses and register values
+are 20-bit numbers in 32-bit fields.
+
+| op | Name | Request args | Response data |
+|---|---|---|---|
+| 0x00 | INFO | – | as before; `version` = 2, new `state` values 3 DebugHalted, 4 DebugRunning; `features` bit 1: debugging |
+| 0x09 | DBG_ATTACH | `u8 mode` (0 attach without reset, 1 reset and halt at the reset vector), `u8 flags` (bit 0: full mode, B2 only), `u16 speed_khz`, `u32 ram_lo`, `u32 ram_hi` (the device's RAM range from the host's device table) | the CONNECT identity block, then `u32 pc`, `u8 stop_reason`, `u8 hw_breakpoints` |
+| 0x0A | DBG_DETACH | `u8 action` (0 restore context and run, 1 reset and run) | – |
+| 0x0B | DBG_HALT | – | `u32 pc` |
+| 0x0C | DBG_RESUME | – | – (breakpoints armed, CPU runs) |
+| 0x0D | DBG_STATUS | – | `u8 state` (running / halted), `u8 stop_reason` (request, breakpoint, step, reset), `u8 breakpoint_index`, `u32 pc` (0 while running) |
+| 0x0E | DBG_STEP | – | `u32 pc` |
+| 0x0F | DBG_READ_REGS | – | 16 × `u32` (R0 PC, R1 SP, R2 SR, R3 CG, R4–R15) |
+| 0x10 | DBG_WRITE_REG | `u8 index`, `u32 value` | – |
+| 0x11 | DBG_BP_SET | `u8 index`, `u32 address` | – |
+| 0x12 | DBG_BP_CLEAR | `u8 index` (0xFF: all) | – |
+
+- `READ_MEM` / `WRITE_MEM` (Phase A ops) work in DebugHalted through the
+  debug layer, which preserves the halted context. In DebugRunning they
+  return `BAD_STATE`.
+- New status `PROTECTED` (0x09): in read-only mode `WRITE_MEM` may only
+  touch the peripheral space 0x0000–0x0FFF and the RAM range given with
+  `DBG_ATTACH` (for the F5529 0x1C00–0x43FF, USB RAM included); any other
+  address — main flash, information memory, BSL, vacant memory — is refused
+  with `PROTECTED`. The rule is a whitelist, so a wrong or missing device
+  entry can only make the probe refuse more, never write flash.
+- New status `RUNNING` (0x0A): an operation that needs a halted CPU while it
+  runs.
+
+## Component Design
+
+### Probe firmware: `msp430::Debugger`
+
+- **Attach without reset**: entry sequence and JTAG ID as Phase A, lock check
+  (a locked device ends the attach with `LOCKED`), then
+  `SyncJtag_Conditional_SaveContextXv2`: synchronises with the running CPU,
+  handles a CPU in a low-power mode, stops the watchdog and saves `WDTCTL`,
+  and saves PC and SR. Stop reason "request".
+- **Reset and halt**: `SyncJtag_AssertPor_SaveContextXv2`; PC is the reset
+  vector's target.
+- **Registers**: `ReadAllCpuRegsXv2` / `WriteAllCpuRegsXv2` on the saved
+  context; PC and SR live in the saved context and are written back on
+  release.
+- **Memory while halted**: the MSPDS word read/write sequences, which keep the
+  halted state; byte-granular writes are read-modify-write of words.
+- **Single step**: `SingleStepXv2` with the EEM's single-step trigger;
+  interrupts pending at the step are handled as MSPDS does.
+- **Run and stop detection**: `RestoreContext_ReleaseJtagXv2` with the EEM
+  breakpoints armed; `DBG_STATUS` polls the EEM / JTAG state register as
+  `WaitForEem` / `PollJStateReg` do, and on a stop re-saves the context.
+  `DBG_HALT` stops a running CPU through the EEM.
+- **Breakpoints**: EEM trigger blocks programmed through
+  `EemDataExchangeXv2`, one instruction-fetch trigger per breakpoint. The
+  number of triggers comes from the device (EEM size of the F5529 from its
+  datasheet / the MSPDS device database, confirmed on the board).
+- **Clocks while halted**: the EEM clock-control setting follows MSPDS's
+  default for the device; the chosen value is documented after porting
+  (whether timers keep running while halted matters for firmware that keeps
+  time with a timer; the acceptance measures Timer0_B).
+- **Detach**: clear the triggers, restore the context (including `WDTCTL`) and
+  release; with action 1 a POR instead.
+- **No flash paths**: `Debugger` contains no call to the funclet, erase or
+  flash-write code of `Cpuxv2`. A host test asserts it (below).
+
+### Probe firmware: `msp430::Session`
+
+New handlers, the states above, the `PROTECTED` check on `WRITE_MEM`, the
+lock of Phase A's flash ops in debug states, `abort()` extended: an open debug
+session is detached with action 0 (restore and run) when USB goes away or SWD
+takes over the pins, so a lost host never leaves the target halted.
+
+### Host: `gdbserver.py`
+
+- Listens on a TCP port (default 3333), one GDB client at a time.
+- Packets: `qSupported` (`PacketSize`, `qXfer:features:read+`,
+  `qXfer:memory-map:read+`), `?`, `g`/`G`, `p`/`P`, `m`/`M`, `X`, `c`, `s`,
+  `vCont?`/`vCont;c;s`, `Z1`/`z1`, `Z0`/`z0`, `D`, `k`, `qRcmd` (monitor), the
+  interrupt byte `0x03`, and the `qXfer` objects.
+- **Target description**: the MSP430X register set as `msp430-elf-gdb`
+  expects it (register count, sizes and order verified against the installed
+  GDB during implementation).
+- **Memory map**: RAM and peripherals as `ram`; main flash, information
+  memory and BSL as `rom` in read-only mode, `flash` with their segment size
+  in full mode. With flash marked `rom`, GDB's automatic hardware-breakpoint
+  rule makes an ordinary `break` use `Z1`, so users need not type `hbreak`.
+- **Read-only enforcement on the host**: `M`/`X` into a flash range,
+  `Z0`, `vFlash*` and `load` answer with an error in read-only mode, before
+  anything is sent to the probe.
+- **Running**: after `c`, poll `DBG_STATUS` every 50 ms; on a stop send
+  `T05` (with the PC); `0x03` sends `DBG_HALT`.
+- **Monitor commands**: `monitor reset` (reset and halt), `monitor mode
+  readonly|full` (full needs `--allow-flash-write` on the command line, B2),
+  `monitor speed <kHz>`, `monitor status`.
+- **Disconnect**: `D` and a dropped TCP connection detach with action 0.
+
+### Host: `symelf.py`
+
+`symelf.py names.tsv -o symbols.elf [--image backup.hex]` writes an ELF32
+(`EM_MSP430`) with a symbol table only (functions as `STT_FUNC`, objects as
+`STT_OBJECT`, with sizes). With `--image` it adds the image as section
+contents so GDB disassembles without reading the target. The tool is
+generic; tables and images of third-party firmware stay outside the
+repository (for the user's board: `~/msp430-backup/fw-rebuild/notes/names.tsv`
+and `objnames.tsv`).
+
+### Host: `sbw.py gdbserver`
+
+`sbw.py gdbserver [--port 3333] [--attach | --reset] [--speed kHz]
+[--allow-flash-write]`. Default: attach without reset, read-only.
+`--allow-flash-write` is B2 and is refused for a target whose device ID and
+first flash words match a backup marked "do not write" (a list kept by the
+user outside the repository, holding the user's board), so the existing
+board cannot be put into full mode by mistake.
+
+## Error Handling Principles
+
+- A failed attach leaves the target as it was: before the context is saved
+  nothing is changed; after it, a failure releases with the saved context.
+- Every operation that can leave the CPU halted has a release path: detach on
+  `D`, on a dropped TCP connection, on Ctrl-C of the server, on USB loss
+  (`Session::abort`).
+- A target that stops answering (power loss, reset by the user) ends the
+  debug session with `TargetError` as in Phase A; GDB is told the target
+  exited.
+- The firmware's watchdog is stopped while halted and restored on release, so
+  a halt never ends in a watchdog reset; single-stepping keeps it stopped.
+
+## Testing and Acceptance
+
+1. **Host C++ tests** (`scripts/run_host_tests.sh`, also under ASan/UBSan):
+   - `Debugger` sequences against the scripted fake `Tap`, compared with
+     vectors derived from the MSPDS macros, as Phase A did with SLAU320:
+     attach without reset (CPU active and in each low-power mode), reset and
+     halt, register read/write, step, release, stop detection, breakpoint
+     programming, detach.
+   - A "no flash write" test: every debug operation run against the fake
+     records no write to the flash controller registers (`FCTL1`–`FCTL4`) and
+     no funclet start.
+   - `Session`: new ops, framing and bounds, every state transition, the
+     `PROTECTED` and `RUNNING` statuses, the flash lock, `abort()` detaching.
+2. **Python tests**: the fake firmware gets a debug model (halted/running
+   state, registers, breakpoints, stop events); `gdbserver.py` packet tests,
+   read-only enforcement, polling and interrupt, detach on disconnect;
+   `symelf.py` output checked with `readelf`-equivalent parsing; an end-to-end
+   test with a scripted `msp430-elf-gdb --batch` session against the fake when
+   GDB is installed.
+3. **Build**: all three boards with the feature; rpi_pico without it.
+4. **On-target acceptance, B1, on the user's board** — read-only throughout;
+   the flash is compared with the Phase A backup before and after:
+   1. `sbw.py info` shows protocol 2 with the debug feature and the
+      breakpoint count.
+   2. Attach without reset, read registers, detach: the target keeps running
+      (display and keys respond).
+   3. Halt and resume 50 times while the target runs; it keeps working.
+   4. A hardware breakpoint on a key handler (by symbol from the symbol ELF),
+      press the key, GDB stops there; step, inspect variables, continue.
+   5. Reset and halt at the reset vector, step through the start-up, continue.
+   6. Read-only refusals: `load`, a write into flash, a software breakpoint
+      request are refused with a message.
+   7. The full flash and information memory read back equal the backup.
+5. **B2 acceptance**: on a board whose flash may be rewritten (not the user's
+   board): load a test program, software and hardware breakpoints, flash
+   write through GDB. Needs such a board; deferred until one is available.
+
+## Delivery
+
+B1 and B2 are separate plans. B1 contains the probe-side debug layer, the
+vendor ops, the host server in read-only mode, `symelf.py`, and the B1
+acceptance. B2 adds full mode (flash writes through Phase A's path, software
+breakpoints, `load`) and its acceptance.
+
+## Risks and Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Attaching changes the running firmware's state (watchdog, low-power mode, peripherals) | port MSPDS's conditional sync exactly, test each LPM on the fake, first try on the board with the display visibly running, compare flash afterwards |
+| The register layout does not match `msp430-elf-gdb` | verify against the installed GDB before writing the server's register code |
+| GDB sends software-breakpoint or flash-write requests anyway | memory map marks flash `rom`; the server refuses `Z0`/`M`/`X`/`vFlash` in read-only mode; the probe refuses flash writes in debug states |
+| Too few hardware breakpoints for GDB's internal breakpoints (e.g. on `step` over calls) | report the count to GDB; use `DBG_STEP` for stepping; document the limit |
+| Timers keep running while halted and the firmware sees time jump | follow MSPDS's clock-control default; document; it does not endanger flash |
+| A halt during the firmware's own flash write (information memory) | the CPU is stalled during a flash write from flash; document; check `FCTL3.BUSY` before saving context and wait |
+| Licence of ported files | check each file's notice against TI's official MSPDS package; use only BSD-3-Clause files |
