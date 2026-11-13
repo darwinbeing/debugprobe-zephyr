@@ -15,8 +15,10 @@ from dataclasses import dataclass
 VID, PID = 0x2E8A, 0x000C
 VENDOR_CMD = 0x90
 PROTOCOL_VERSION = 2
-FLASH_PROTOCOL_VERSIONS = (1, 2)  # the flash commands are the same in both
+# The flash commands have not changed since version 1.
+FLASH_PROTOCOL_VERSIONS = tuple(range(1, PROTOCOL_VERSION + 1))
 USB_PACKET = 64
+ADDRESS_LIMIT = 1 << 20  # 20-bit addresses and register values
 
 OP_INFO, OP_CONNECT, OP_DISCONNECT, OP_READ_MEM, OP_WRITE_MEM = 0, 1, 2, 3, 4
 OP_ERASE, OP_FLASH_BEGIN, OP_FLASH_DATA, OP_FLASH_END = 5, 6, 7, 8
@@ -36,7 +38,9 @@ STATE_IDLE, STATE_CONNECTED, STATE_FLASHING, STATE_DEBUG_HALTED, STATE_DEBUG_RUN
 ATTACH_RUNNING, ATTACH_RESET = 0, 1  # attach without reset / reset and halt
 DETACH_RUN, DETACH_RESET = 0, 1      # restore the context and run / reset and run
 STOP_NONE, STOP_REQUEST, STOP_BREAKPOINT, STOP_STEP, STOP_RESET = range(5)
-NO_BREAKPOINT = 0xFF  # DBG_STATUS: no breakpoint at the stop address; DBG_BP_CLEAR: all
+NO_BREAKPOINT = 0xFF    # DBG_STATUS: no breakpoint at the stop address
+ALL_BREAKPOINTS = 0xFF  # DBG_BP_CLEAR: every breakpoint
+MAX_HW_BREAKPOINTS = 8  # breakpoint indexes 0-7: the F5529's EEM triggers (B1's only device)
 
 ENTRY_NORMAL, ENTRY_MAGIC_PATTERN = 0, 1
 ERASE_SEGMENT, ERASE_BANK, ERASE_MAIN = 0, 1, 2
@@ -67,6 +71,13 @@ STATUS_NAMES = {
     9: "PROTECTED (read-only debug session: the probe does not write there)",
     10: "RUNNING (the CPU must be halted first)",
 }
+# Statuses that mean something particular for one operation.
+OP_STATUS_NAMES = {
+    (OP_DBG_STEP, STATUS_TIMEOUT):
+        "TIMEOUT (the step did not complete in time; the probe stopped the CPU)",
+    (OP_DBG_WRITE_REG, STATUS_PROTECTED):
+        "PROTECTED (read-only mode: the PC may only be set inside main flash)",
+}
 
 
 OUT_OF_STEP = ("the probe's replies are out of step with the requests (an earlier run was "
@@ -82,7 +93,8 @@ class StatusError(ProbeError):
     """The probe answered a command with a non-zero status."""
 
     def __init__(self, op: int, status: int, data: bytes = b""):
-        name = STATUS_NAMES.get(status, f"status 0x{status:02X}")
+        name = (OP_STATUS_NAMES.get((op, status))
+                or STATUS_NAMES.get(status, f"status 0x{status:02X}"))
         super().__init__(f"{OP_NAMES.get(op, f'command 0x{op:02X}')} failed: {name}")
         self.op = op
         self.status = status
@@ -120,6 +132,12 @@ class DebugStatus:
     stop_reason: int
     breakpoint: int  # index of the breakpoint at the stop address, or NO_BREAKPOINT
     pc: int          # 0 while running
+
+
+def _check(op: int, ok: bool, problem: str) -> None:
+    """Refuse an out-of-range request argument before anything is sent."""
+    if not ok:
+        raise ProbeError(f"{OP_NAMES[op]}: {problem}")
 
 
 def chunks(nwords: int, header_bytes: int, limit_words: int):
@@ -249,7 +267,12 @@ class SbwProbe:
         data = self._cmd(OP_INFO)
         if len(data) < 8:
             raise ProbeError(f"INFO: expected 8 bytes, got {len(data)}")
-        info = Info(*struct.unpack("<BBHI", data[:8]), hw_breakpoints=data[8] if len(data) > 8 else 0)
+        version = data[0]
+        if version >= 2 and len(data) < 9:  # version 2 added hw_breakpoints
+            raise ProbeError(
+                f"INFO: expected 9 bytes from a version {version} probe, got {len(data)}")
+        info = Info(*struct.unpack("<BBHI", data[:8]),
+                    hw_breakpoints=data[8] if version >= 2 else 0)
         self.max_words = info.max_data_bytes // 2
         self.last_info = info
         return info
@@ -344,13 +367,21 @@ class SbwProbe:
         return list(struct.unpack("<16I", data[:64]))
 
     def dbg_write_reg(self, index: int, value: int) -> None:
+        _check(OP_DBG_WRITE_REG, 0 <= index <= 15, f"register index {index} is not 0-15")
+        _check(OP_DBG_WRITE_REG, 0 <= value < ADDRESS_LIMIT, f"value {value:#x} is not 20 bits")
         self._cmd(OP_DBG_WRITE_REG, struct.pack("<BI", index, value))
 
     def dbg_bp_set(self, index: int, addr: int) -> None:
+        _check(OP_DBG_BP_SET, 0 <= index < MAX_HW_BREAKPOINTS,
+               f"breakpoint index {index} is not 0-{MAX_HW_BREAKPOINTS - 1}")
+        _check(OP_DBG_BP_SET, 0 <= addr < ADDRESS_LIMIT, f"address {addr:#x} is not 20 bits")
         self._cmd(OP_DBG_BP_SET, struct.pack("<BI", index, addr))
 
-    def dbg_bp_clear(self, index: int = NO_BREAKPOINT) -> None:
-        """Clear breakpoint `index`; NO_BREAKPOINT (the default) clears all."""
+    def dbg_bp_clear(self, index: int = ALL_BREAKPOINTS) -> None:
+        """Clear breakpoint `index`; ALL_BREAKPOINTS (the default) clears all."""
+        _check(OP_DBG_BP_CLEAR, 0 <= index < MAX_HW_BREAKPOINTS or index == ALL_BREAKPOINTS,
+               f"breakpoint index {index} is not 0-{MAX_HW_BREAKPOINTS - 1} "
+               f"or 0x{ALL_BREAKPOINTS:02X}")
         self._cmd(OP_DBG_BP_CLEAR, bytes([index]))
 
     @staticmethod

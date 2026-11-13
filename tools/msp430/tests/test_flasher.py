@@ -100,7 +100,7 @@ class OpenSessionRefusalTest(unittest.TestCase):
 
     def test_protocol_version_3(self):
         fw = FakeFirmware(version=3)
-        with self.assertRaisesRegex(FlashError, "version 3"):
+        with self.assertRaisesRegex(FlashError, "version 3, this tool needs version 1 or 2$"):
             flasher.open_session(SbwProbe(fw), 250)
         self.assertEqual(fw.connects, [])
 

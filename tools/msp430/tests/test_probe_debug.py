@@ -11,7 +11,8 @@ import probe as probe_mod  # noqa: E402
 from fake_firmware import FakeFirmware  # noqa: E402
 from probe import ProbeError, SbwProbe, StatusError  # noqa: E402
 
-OK, BAD_ARG, BAD_STATE, NO_TARGET, TARGET_ERROR, TIMEOUT, PROTECTED, RUNNING = 0, 1, 2, 4, 6, 7, 9, 10
+OK, BAD_ARG, BAD_STATE, NO_TARGET, TARGET_ERROR, TIMEOUT, UNKNOWN_OP = 0, 1, 2, 4, 6, 7, 8
+PROTECTED, RUNNING = 9, 10
 HALTED, RUNNING_STATE = 3, 4
 
 
@@ -21,6 +22,60 @@ def reply(status):
 
 def attach_args(mode=0, flags=0, lo=0x1C00, hi=0x4400, speed=250):
     return struct.pack("<BBHII", mode, flags, speed, lo, hi)
+
+
+class Stub:
+    """A transport that answers every request with `reply` and keeps the requests."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.sent = []
+
+    def transfer(self, request, timeout_ms=3000):
+        self.sent.append(bytes(request))
+        return self.reply
+
+
+class ReplyDecodingTest(unittest.TestCase):
+    """Replies written out byte by byte from the layout in session.cpp."""
+
+    def test_status(self):
+        st = SbwProbe(Stub(bytes.fromhex("9000" "01" "02" "05" "3C430200"))).dbg_status()
+        self.assertEqual(st, probe_mod.DebugStatus(True, 2, 5, 0x2433C))
+        st = SbwProbe(Stub(bytes.fromhex("9000" "00" "00" "FF" "00000000"))).dbg_status()
+        self.assertEqual(st, probe_mod.DebugStatus(False, 0, 0xFF, 0))
+
+    def test_attach(self):
+        identity = "91" "0601" "001A0000" "5529"
+        a = SbwProbe(Stub(bytes.fromhex("9000" + identity + "B4A20100" "01" "08"))).dbg_attach(
+            probe_mod.ATTACH_RUNNING, 250, 0x1C00, 0x4400)
+        self.assertEqual(a, probe_mod.Attached(probe_mod.Identity(0x91, 0x0106, 0x1A00, 0x2955),
+                                               0x1A2B4, probe_mod.STOP_REQUEST, 8))
+
+    def test_halt_step_and_registers(self):
+        self.assertEqual(SbwProbe(Stub(bytes.fromhex("9000" "FEFF0100"))).dbg_halt(), 0x1FFFE)
+        self.assertEqual(SbwProbe(Stub(bytes.fromhex("9000" "B6A20100"))).dbg_step(), 0x1A2B6)
+        regs = [0x10000 * (i % 16) + 0x1234 + i for i in range(16)]
+        data = b"\x90\x00" + b"".join(r.to_bytes(4, "little") for r in regs)
+        self.assertEqual(SbwProbe(Stub(data)).dbg_read_regs(), regs)
+
+    def test_every_short_reply_is_out_of_step(self):
+        """Each fixed-size reply one byte short; the full size decodes."""
+        calls = (("dbg_attach", (0, 250, 0x1C00, 0x4400), 15), ("dbg_halt", (), 4),
+                 ("dbg_status", (), 7), ("dbg_step", (), 4), ("dbg_read_regs", (), 64),
+                 ("connect", (250, 0), 9))
+        for name, args, n in calls:
+            with self.assertRaisesRegex(ProbeError, "out of step", msg=name):
+                getattr(SbwProbe(Stub(b"\x90\x00" + bytes(n - 1))), name)(*args)
+            getattr(SbwProbe(Stub(b"\x90\x00" + bytes(n))), name)(*args)
+
+    def test_info_of_a_version_2_probe_needs_nine_bytes(self):
+        eight = b"\x90\x00" + struct.pack("<BBHI", 2, 0, 1016, 3)
+        with self.assertRaisesRegex(ProbeError, "INFO: expected 9 bytes"):
+            SbwProbe(Stub(eight)).info()
+        self.assertEqual(SbwProbe(Stub(eight + b"\x08")).info().hw_breakpoints, 8)
+        version_1 = b"\x90\x00" + struct.pack("<BBHI", 1, 0, 1016, 1)
+        self.assertEqual(SbwProbe(Stub(version_1)).info().hw_breakpoints, 0)
 
 
 class DebugClientTest(unittest.TestCase):
@@ -143,6 +198,60 @@ class DebugClientTest(unittest.TestCase):
             self.probe.dbg_step()
         self.assertEqual(cm.exception.status, probe_mod.STATUS_TIMEOUT)
 
+    def test_pcs_above_16_bits(self):
+        self.fw.regs[0] = 0x1A2B4
+        self.assertEqual(self.attach().pc, 0x1A2B4)
+        self.assertEqual(self.probe.dbg_step(), 0x1A2B6)
+        self.fw.halt_pc = 0x1FFFE
+        self.probe.dbg_resume()
+        self.assertEqual(self.probe.dbg_halt(), 0x1FFFE)
+        self.fw.stop_at, self.fw.run_polls = 0x2433C, 1
+        self.probe.dbg_resume()
+        self.assertEqual(self.probe.dbg_status().pc, 0x2433C)
+        self.assertEqual(self.probe.dbg_read_regs()[0], 0x2433C)
+
+    def test_arguments_are_checked_before_anything_is_sent(self):
+        self.attach()
+        sent = []
+        transfer = self.fw.transfer
+        self.fw.transfer = lambda req, timeout_ms=3000: sent.append(bytes(req)) or transfer(req)
+        bad = ((self.probe.dbg_write_reg, (16, 0)), (self.probe.dbg_write_reg, (-1, 0)),
+               (self.probe.dbg_write_reg, (4, 1 << 20)), (self.probe.dbg_write_reg, (4, -1)),
+               (self.probe.dbg_bp_set, (8, 0x4400)), (self.probe.dbg_bp_set, (0xFF, 0x4400)),
+               (self.probe.dbg_bp_set, (-1, 0x4400)), (self.probe.dbg_bp_set, (0, 1 << 20)),
+               (self.probe.dbg_bp_set, (0, -2)), (self.probe.dbg_bp_clear, (8,)),
+               (self.probe.dbg_bp_clear, (0xFE,)), (self.probe.dbg_bp_clear, (-1,)),
+               (self.probe.dbg_bp_clear, (0x100,)))
+        for call, args in bad:
+            with self.assertRaises(ProbeError, msg=(call.__name__, args)) as cm:
+                call(*args)
+            self.assertIs(type(cm.exception), ProbeError)
+            self.assertIn(call.__name__.upper(), str(cm.exception))
+        self.assertEqual(sent, [])
+        self.probe.dbg_write_reg(15, 0xFFFFF)
+        self.probe.dbg_bp_set(7, 0xFFFFE)
+        self.probe.dbg_bp_clear(7)
+        self.probe.dbg_bp_set(0, 0x4400)
+        self.probe.dbg_bp_clear(probe_mod.ALL_BREAKPOINTS)
+        self.assertEqual(len(sent), 5)
+        self.assertEqual(self.fw.breakpoints, {})
+
+    def test_status_errors_that_mean_something_particular(self):
+        self.attach()
+        self.fw.fail_op = {14: TIMEOUT, 15: TIMEOUT}
+        with self.assertRaisesRegex(StatusError, r"^DBG_STEP failed: TIMEOUT \(the step did not "
+                                                 r"complete in time; the probe stopped the CPU\)$"):
+            self.probe.dbg_step()
+        with self.assertRaisesRegex(StatusError, r"^DBG_WRITE_REG failed: PROTECTED \(read-only "
+                                                 r"mode: the PC may only be set inside main "
+                                                 r"flash\)$"):
+            self.probe.dbg_write_reg(0, 0x2400)
+        # the same statuses elsewhere keep their general wording
+        with self.assertRaisesRegex(StatusError, r"^DBG_READ_REGS failed: TIMEOUT \(no answer"):
+            self.probe.dbg_read_regs()
+        with self.assertRaisesRegex(StatusError, r"^WRITE_MEM failed: PROTECTED \(read-only debug"):
+            self.probe.write_mem(0x4400, b"\x00\x00")
+
     def test_info_is_kept(self):
         self.assertIsNone(self.probe.last_info)
         info = self.probe.info()
@@ -173,9 +282,12 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
     def test_attach_argument_rules(self):
         fw = FakeFirmware()
         pk = struct.pack
-        for args in (pk("<BBHII", 2, 0, 250, 0x1C00, 0x4400), pk("<BBHII", 0, 1, 250, 0x1C00, 0x4400),
-                     pk("<BBHII", 0, 0, 99, 0x1C00, 0x4400), pk("<BBHII", 0, 0, 250, 0x1C01, 0x4400),
-                     pk("<BBHII", 0, 0, 250, 0x4400, 0x1C00), pk("<BBHII", 0, 0, 250, 0, 0x100002),
+        for args in (pk("<BBHII", 2, 0, 250, 0x1C00, 0x4400),
+                     pk("<BBHII", 0, 1, 250, 0x1C00, 0x4400),
+                     pk("<BBHII", 0, 0, 99, 0x1C00, 0x4400),
+                     pk("<BBHII", 0, 0, 250, 0x1C01, 0x4400),
+                     pk("<BBHII", 0, 0, 250, 0x4400, 0x1C00),
+                     pk("<BBHII", 0, 0, 250, 0, 0x100002),
                      pk("<BBHII", 0, 0, 250, 0x1C00, 0x4400)[:-1]):
             self.assertEqual(self.cmd(fw, 9, args), bytes([0x90, 1]), args)
         self.assertEqual(fw.attaches, [])
@@ -238,7 +350,8 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
                 self.assertEqual(r[11:], struct.pack("<IBB", pc, reason, 8))
                 self.assertEqual((fw.detaches, fw.state, fw.breakpoints), ([0], HALTED, {}))
                 self.assertEqual(fw.attaches[1:], [(mode, 0, 250, 0x2400, 0x3000)])
-                self.assertEqual(self.status(fw), reply(OK) + struct.pack("<BBBI", 1, reason, 0xFF, pc))
+                self.assertEqual(self.status(fw),
+                                 reply(OK) + struct.pack("<BBBI", 1, reason, 0xFF, pc))
                 self.assertEqual(self.write(fw, 0x2400), reply(OK))
                 self.assertEqual(self.write(fw, 0x2FFE), reply(OK))
                 self.assertEqual(self.write(fw, 0x1C00), reply(PROTECTED))
@@ -299,8 +412,10 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
             self.assertEqual(self.cmd(fw, op, args), reply(BAD_STATE), op)
         fw = self.attached()
         self.cmd(fw, 12)
-        for op, args in wrong_size:  # running: the operations allowed while running check their size
-            self.assertEqual(self.cmd(fw, op, args), reply(BAD_ARG if op in (10, 11, 13) else RUNNING), op)
+        # running: the operations allowed while running check their size
+        for op, args in wrong_size:
+            want = BAD_ARG if op in (10, 11, 13) else RUNNING
+            self.assertEqual(self.cmd(fw, op, args), reply(want), op)
         self.assertEqual(fw.state, RUNNING_STATE)
 
     def test_halted_only_ops_answer_running(self):
@@ -387,7 +502,8 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
     def test_unknown_device_writes_nothing(self):
         fw = FakeFirmware(device_id=0x1234)
         SbwProbe(fw).dbg_attach(0, 250, 0x1C00, 0x4400)
-        for addr in (0x2400, 0x1C00, 0x43FE, 0x4400, 0x0000, 0x0200, 0x013E, 0x0140, 0x0600, 0x0FFE):
+        for addr in (0x2400, 0x1C00, 0x43FE, 0x4400, 0x0000, 0x0200, 0x013E, 0x0140, 0x0600,
+                     0x0FFE):
             self.assertEqual(self.write(fw, addr), reply(PROTECTED), hex(addr))
         self.assertEqual(fw.write_chunks, [])
 
@@ -503,6 +619,58 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
         self.assertEqual([self.status(fw) for _ in range(2)], [running, running])
         self.assertEqual(self.status(fw), reply(OK) + struct.pack("<BBBI", 1, 2, 0xFF, 0x5000))
         self.assertEqual(fw.resumes, 2)
+
+    def test_halt_finds_a_breakpoint_stop_first(self):
+        """Debugger::halt looks as poll() does before it stops the CPU itself."""
+        fw = self.attached()
+        self.cmd(fw, 17, struct.pack("<BI", 3, 0x4600))
+        self.cmd(fw, 12)
+        running = reply(OK) + struct.pack("<BBBI", 0, 0, 0xFF, 0)
+        self.assertEqual(self.status(fw), running)  # the first look; the stop is due at the second
+        self.assertEqual(self.cmd(fw, 11), reply(OK) + struct.pack("<I", 0x4600))
+        self.assertEqual(self.status(fw), reply(OK) + struct.pack("<BBBI", 1, 2, 3, 0x4600))
+        self.cmd(fw, 12)  # not due yet: the halt stops the CPU itself
+        self.assertEqual(self.cmd(fw, 11), reply(OK) + struct.pack("<I", 0x4ABC))
+        self.assertEqual(self.status(fw), reply(OK) + struct.pack("<BBBI", 1, 1, 0xFF, 0x4ABC))
+
+    def test_reads_and_writes_are_recorded(self):
+        fw = self.attached()
+        SbwProbe(fw).read_mem(0x2400, 2)
+        self.assertEqual(self.write(fw, 0x0200, 4), reply(OK))
+        self.assertEqual(self.write(fw, 0x4400), reply(PROTECTED))
+        self.assertEqual(self.write(fw, 0x2401), reply(BAD_ARG))
+        self.assertEqual(self.cmd(fw, 3, struct.pack("<IH", 0x2401, 1)), reply(BAD_ARG))
+        self.assertEqual((fw.reads, fw.writes), ([(0x2400, 2)], [(0x0200, b"\x5A" * 4)]))
+        self.assertEqual((fw.read_chunks, fw.write_chunks), ([2], [2]))
+
+    def test_a_version_1_probe_knows_no_debug_ops(self):
+        fw = FakeFirmware(version=1, features=1)
+        self.assertEqual(self.cmd(fw, 9, attach_args()), reply(UNKNOWN_OP))
+        for op in range(10, 19):
+            self.assertEqual(self.cmd(fw, op), reply(UNKNOWN_OP), op)
+            self.assertEqual(self.cmd(fw, op, b"\x00"), reply(UNKNOWN_OP), op)
+        self.assertEqual((fw.state, fw.attaches), (0, []))
+        with self.assertRaisesRegex(StatusError, "DBG_ATTACH failed: UNKNOWN_OP"):
+            SbwProbe(fw).dbg_attach(0, 250, 0x1C00, 0x4400)
+
+    def test_step_timeout_pc(self):
+        fw = self.attached()
+        fw.fail_op = {14: TIMEOUT}
+        fw.step_timeout_pc = 0x4C00
+        self.assertEqual(self.cmd(fw, 14), reply(TIMEOUT))
+        self.assertEqual(fw.state, HALTED)
+        self.assertEqual(self.status(fw), reply(OK) + struct.pack("<BBBI", 1, 1, 0xFF, 0x4C00))
+        self.assertEqual(self.write_reg(fw, 0, 0x4C00), reply(OK))  # the current PC
+
+    def test_step_with_the_cpu_off_executes_nothing(self):
+        fw = FakeFirmware()
+        fw.regs[2] = 0x0018  # LPM0: CPUOFF and GIE
+        SbwProbe(fw).dbg_attach(0, 250, 0x1C00, 0x4400)
+        self.assertEqual(self.cmd(fw, 14), reply(OK) + struct.pack("<I", 0x4520))
+        self.assertEqual(self.status(fw), reply(OK) + struct.pack("<BBBI", 1, 3, 0xFF, 0x4520))
+        self.assertEqual(self.write_reg(fw, 2, 0x0008), reply(OK))  # CPUOFF cleared
+        self.assertEqual(self.cmd(fw, 14), reply(OK) + struct.pack("<I", 0x4522))
+        self.assertEqual(fw.steps, 2)
 
     def test_step_timeout_leaves_the_cpu_halted(self):
         fw = self.attached()

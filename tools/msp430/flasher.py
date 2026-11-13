@@ -21,8 +21,8 @@ def open_session(probe, speed_khz: int):
     info = probe.info()
     if info.version not in probe_mod.FLASH_PROTOCOL_VERSIONS:
         raise FlashError(
-            f"probe speaks SBW protocol version {info.version}, this tool needs "
-            "version 1 or 2"
+            f"probe speaks SBW protocol version {info.version}, this tool needs version "
+            + " or ".join(str(v) for v in probe_mod.FLASH_PROTOCOL_VERSIONS)
         )
     if not info.features & probe_mod.FEATURE_CPUXV2_FLASH:
         raise FlashError("the probe firmware does not support MSP430 CPUXv2 flash devices")

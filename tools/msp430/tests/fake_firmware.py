@@ -8,14 +8,17 @@ addressed to flash or anywhere else.
 Fault injection knobs: version, features, connect_status, fail_op,
 interrupt_on_op, fail_flash_after, stuck, no_target, has_handler, also_erase,
 skip_segment_erases, read_shift; for debugging: attach_status, run_polls,
-stop_at, halt_pc, step_size, lost_on_poll.
+stop_at, halt_pc, step_size, step_timeout_pc, lost_on_poll.
 
-Debug model (ops 9-18, states 3 DebugHalted / 4 DebugRunning), after
-msp430::Session in lib/msp430/src/session.cpp, which is the authority:
-sixteen registers, eight hardware breakpoints, and a CPU that, once resumed,
-is found stopped by the `run_polls`-th DBG_STATUS poll: at `stop_at`, or at
-the breakpoint with the lowest index if `stop_at` is None; with neither it
-runs until DBG_HALT. Checks in the firmware's order: state, then RUNNING,
+Debug model (ops 9-18, states 3 DebugHalted / 4 DebugRunning; a probe of
+version 1 answers them UNKNOWN_OP), after msp430::Session in
+lib/msp430/src/session.cpp, which is the authority: sixteen registers, eight
+hardware breakpoints, and a CPU that, once resumed, is found stopped by the
+`run_polls`-th look after DBG_RESUME (each DBG_STATUS looks, and DBG_HALT
+looks before it stops the CPU itself, as Debugger::halt does): at `stop_at`,
+or at the breakpoint with the lowest index if `stop_at` is None; with neither
+it runs until DBG_HALT. DBG_STEP advances the PC by `step_size`, not at all
+while SR has CPUOFF. Checks in the firmware's order: state, then RUNNING,
 then size, then arguments. In a debug session WRITE_MEM writes only the RAM
 the host passed with DBG_ATTACH narrowed to the device's, and the
 peripherals minus the device's holes (PMM, flash controller, SYS, DMA), both
@@ -33,13 +36,16 @@ MAIN = (0x4400, 0x24400)
 RAM = (0x2400, 0x4400)
 HALTED, RUNNING_STATE = 3, 4  # session states DebugHalted, DebugRunning
 STOP_NONE, STOP_REQUEST, STOP_BREAKPOINT, STOP_STEP, STOP_RESET = range(5)
-NO_BREAKPOINT = 0xFF
+NO_BREAKPOINT = 0xFF    # DBG_STATUS: no breakpoint at the stop address
+ALL_BREAKPOINTS = 0xFF  # DBG_BP_CLEAR: every breakpoint
 HW_BREAKPOINTS = 8
+SR_CPUOFF = 0x0010
 
 # Argument bytes of the fixed-size requests; the firmware rejects any other length.
 FIXED_ARGS = {0: 0, 1: 3, 2: 0, 3: 6, 5: 9, 6: 12, 8: 0,
               9: 12, 10: 1, 11: 0, 12: 0, 13: 0, 14: 0, 15: 0, 16: 5, 17: 5, 18: 1}
-RUNNING_OPS = (10, 11, 13)  # the debug ops a running CPU allows: DBG_DETACH, DBG_HALT, DBG_STATUS
+# The debug ops a running CPU allows: DBG_DETACH, DBG_HALT, DBG_STATUS.
+RUNNING_OPS = (10, 11, 13)
 # A TARGET_ERROR from these leaves the Debugger attached and the Session
 # detaches it with Run; from DBG_HALT, DBG_STATUS and DBG_STEP the Debugger
 # has already let the CPU go.
@@ -70,6 +76,8 @@ class FakeFirmware:
         self.data_chunks = []        # word count of every accepted FLASH_DATA
         self.read_chunks = []        # word count of every accepted READ_MEM
         self.write_chunks = []       # word count of every accepted WRITE_MEM
+        self.reads = []              # (addr, nwords) of every accepted READ_MEM
+        self.writes = []             # (addr, data) of every accepted WRITE_MEM
         self.ops = []                # ("erase", mode, addr, ram), ("begin", addr, nwords, ram), ...
         self.fail_flash_after = None # words accepted before FLASH_DATA answers TIMEOUT
         self.stuck = {}              # address -> byte that reads back regardless
@@ -87,17 +95,19 @@ class FakeFirmware:
         self.reset_pc = 0x441A
         self.breakpoints = {}        # index -> address
         self.attach_status = None    # if set: DBG_ATTACH answers this status, ends idle
-        self.run_polls = 2           # the DBG_STATUS poll after DBG_RESUME that finds the CPU stopped
+        self.run_polls = 2           # the look after DBG_RESUME that finds the CPU stopped
         self.stop_at = None          # where a resumed CPU stops (None: lowest-index breakpoint)
         self.halt_pc = 0x4ABC        # PC after DBG_HALT stops a running CPU
         self.step_size = 2           # bytes DBG_STEP advances the PC
+        self.step_timeout_pc = None  # PC after a DBG_STEP that answers TIMEOUT
+                                     # (fail_op {14: TIMEOUT}); None: unchanged
         self.lost_on_poll = False    # the target is lost while running: DBG_STATUS and
                                      # DBG_HALT answer TARGET_ERROR, the session ends
         self.stop_reason = STOP_NONE
         self.bp_hit = NO_BREAKPOINT
         self.ram_range = (0, 0)      # RAM a debug session may write, [lo, hi)
         self.debug_device = None     # the devices.Device identified by DBG_ATTACH
-        self.attaches = []           # (mode, flags, speed, ram_lo, ram_hi) of every valid DBG_ATTACH
+        self.attaches = []           # (mode, flags, speed, ram_lo, ram_hi), every valid DBG_ATTACH
         self.detaches = []           # action of every detach, also the implicit ones
         self.resumes = 0
         self.steps = 0
@@ -141,6 +151,8 @@ class FakeFirmware:
             self.state = 1
         elif op == 14 and status == TIMEOUT:
             # the step did not stop by itself: the probe halted the CPU
+            if self.step_timeout_pc is not None:
+                self.regs[0] = self.step_timeout_pc
             self.stop_reason, self.bp_hit = STOP_REQUEST, NO_BREAKPOINT
         return status, b""
 
@@ -201,11 +213,13 @@ class FakeFirmware:
             index, addr = struct.unpack("<BI", a)
             if index >= HW_BREAKPOINTS or addr & 1 or addr >= ADDR_LIMIT:
                 return BAD_ARG
-        if op == 18 and a[0] != NO_BREAKPOINT and a[0] >= HW_BREAKPOINTS:
+        if op == 18 and a[0] != ALL_BREAKPOINTS and a[0] >= HW_BREAKPOINTS:
             return BAD_ARG
         return None
 
     def _op(self, op, a):
+        if 9 <= op <= 18 and self.version < 2:
+            return UNKNOWN_OP, b""  # the debug ops came with protocol version 2
         bad_len = op in FIXED_ARGS and len(a) != FIXED_ARGS[op]
         if op == 0:
             if bad_len:
@@ -253,6 +267,7 @@ class FakeFirmware:
             if op in self.fail_op:
                 return self._fail(op)
             self.read_chunks.append(n)
+            self.reads.append((addr, n))
             return OK, bytes(self.stuck.get(x, self.mem.get(x, 0xFF))
                              for x in range(addr + self.read_shift, addr + self.read_shift + 2 * n))
         if op == 4:
@@ -275,6 +290,7 @@ class FakeFirmware:
             if op in self.fail_op:
                 return self._fail(op)
             self.write_chunks.append(len(data) // 2)
+            self.writes.append((addr, bytes(data)))
             for i, b in enumerate(data):
                 if self.state == HALTED or RAM[0] <= addr + i < RAM[1]:
                     self.mem[addr + i] = b
@@ -379,12 +395,14 @@ class FakeFirmware:
         if len(a) != FIXED_ARGS[9]:
             return BAD_ARG, b""
         mode, flags, speed, lo, hi = struct.unpack("<BBHII", a)
-        if mode > 1 or flags != 0 or not 100 <= speed <= 1000 or lo & 1 or lo >= hi or hi > ADDR_LIMIT:
+        if (mode > 1 or flags != 0 or not 100 <= speed <= 1000 or lo & 1 or lo >= hi
+                or hi > ADDR_LIMIT):
             return BAD_ARG, b""
         self.attaches.append((mode, flags, speed, lo, hi))
         self._abort()
         if self.attach_status is not None:
-            return self.attach_status, (bytes([self.no_target_id]) if self.attach_status == NO_TARGET else b"")
+            no_target_id = bytes([self.no_target_id]) if self.attach_status == NO_TARGET else b""
+            return self.attach_status, no_target_id
         if 9 in self.fail_op:
             return self._fail(9)
         self.state = HALTED
@@ -411,6 +429,20 @@ class FakeFirmware:
             self.bp_hit = next((i for i, x in sorted(self.breakpoints.items()) if x == pc),
                                NO_BREAKPOINT)
 
+    def _poll(self):
+        """Debugger::poll of a running CPU: TARGET_ERROR when the target is lost
+        (the session ends), else None; the CPU may now be stopped."""
+        if self.lost_on_poll:
+            self._end_debug(None)
+            return TARGET_ERROR
+        self._polls += 1
+        target = self.stop_at
+        if target is None and self.breakpoints:
+            target = self.breakpoints[min(self.breakpoints)]
+        if target is not None and self._polls >= self.run_polls:
+            self._stop(target, STOP_BREAKPOINT)
+        return None
+
     def _dbg_op(self, op, a):
         """Ops 10-18 once _debug_check has passed them."""
         if op == 10:  # DBG_DETACH
@@ -418,9 +450,10 @@ class FakeFirmware:
             return OK, b""
         if op == 11:  # DBG_HALT
             if self.state == RUNNING_STATE:
-                if self.lost_on_poll:  # Debugger::halt looks as poll() does first
-                    self._end_debug(None)
-                    return TARGET_ERROR, b""
+                status = self._poll()  # Debugger::halt looks as poll() does first
+                if status is not None:
+                    return status, b""
+            if self.state == RUNNING_STATE:
                 self._stop(self.halt_pc, STOP_REQUEST)
             return OK, struct.pack("<I", self.regs[0])
         if op == 12:  # DBG_RESUME
@@ -431,27 +464,24 @@ class FakeFirmware:
             return OK, b""
         if op == 13:  # DBG_STATUS
             if self.state == RUNNING_STATE:
-                if self.lost_on_poll:
-                    self._end_debug(None)
-                    return TARGET_ERROR, b""
-                self._polls += 1
-                target = self.stop_at
-                if target is None and self.breakpoints:
-                    target = self.breakpoints[min(self.breakpoints)]
-                if target is not None and self._polls >= self.run_polls:
-                    self._stop(target, STOP_BREAKPOINT)
+                status = self._poll()
+                if status is not None:
+                    return status, b""
             if self.state == RUNNING_STATE:
                 return OK, struct.pack("<BBBI", 0, STOP_NONE, NO_BREAKPOINT, 0)
             return OK, struct.pack("<BBBI", 1, self.stop_reason, self.bp_hit, self.regs[0])
         if op == 14:  # DBG_STEP
             self.steps += 1
-            self._stop(self.regs[0] + self.step_size, STOP_STEP)
+            # a CPU that is off executes nothing (no interrupts in this model)
+            size = 0 if self.regs[2] & SR_CPUOFF else self.step_size
+            self._stop(self.regs[0] + size, STOP_STEP)
             return OK, struct.pack("<I", self.regs[0])
         if op == 15:  # DBG_READ_REGS
             return OK, struct.pack("<16I", *self.regs)
         if op == 16:  # DBG_WRITE_REG
             index, value = struct.unpack("<BI", a)
-            self.regs[index] = value & ~1 if index == 1 else value  # SP: bit 0 cleared, as the DLL does
+            # SP: bit 0 cleared, as the DLL does
+            self.regs[index] = value & ~1 if index == 1 else value
             self.reg_writes.append((index, value))
             return OK, b""
         if op == 17:  # DBG_BP_SET
@@ -459,7 +489,7 @@ class FakeFirmware:
             self.breakpoints[index] = addr
             return OK, b""
         # op == 18, DBG_BP_CLEAR
-        if a[0] == NO_BREAKPOINT:
+        if a[0] == ALL_BREAKPOINTS:
             self.breakpoints = {}
         else:
             self.breakpoints.pop(a[0], None)
