@@ -139,17 +139,21 @@ are 20-bit numbers in 32-bit fields.
   registers (0x0140–0x014F)**, and RAM. The RAM window is the **intersection**
   of the range given with `DBG_ATTACH` and the RAM the probe itself knows for
   the device it identified (F5529, device ID bytes 55h 29h: 0x1C00–0x43FF, USB RAM
-  included); for a device the probe does not know, the window is empty. Any
+  included); for a device the probe does not know, the window is empty, and
+  so is the peripheral window (the refused ranges below are per device). Any
   other address — main flash, information memory, BSL, vacant memory — is
   refused with `PROTECTED`. A wrong host table can therefore only narrow the
-  window, never open flash. The DMA controller registers (0x0500–0x05FF) are
-  also refused, since a DMA transfer could copy into the flash controller.
+  window, never open flash. Two more peripheral ranges are refused: the DMA
+  module (F5529: 0x0500–0x053F), since a DMA transfer could copy into the
+  flash controller, and the SYS module (0x0180–0x019F: `SYSCTL.SYSRIVECT`
+  would move the interrupt vectors into RAM, `SYSBSLC` controls the BSL
+  area's protection).
 - In read-only mode `DBG_WRITE_REG` to the PC is `PROTECTED` unless the new
   PC lies in the identified device's main flash (F5529: 0x4400–0x243FF) or
   equals the current PC (GDB writes all registers back). This keeps jumps
   into the BSL, information memory or host-written RAM out of reach.
 - What read-only mode guarantees: the probe never writes flash, the flash
-  controller or the DMA registers for the host, and never moves the PC
+  controller, the DMA or the SYS registers for the host, and never moves the PC
   outside main flash. It does not stop the firmware's own code from doing
   what it does when it runs (the firmware may write its own information
   memory), nor code the user places by other means, such as a changed return
