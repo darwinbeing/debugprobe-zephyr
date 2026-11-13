@@ -20,12 +20,19 @@ TEST(protocol_debug_values_match_the_spec)
 	CHECK_EQ(static_cast<int>(Status::Running), 0x0A);
 	CHECK_EQ(static_cast<int>(State::DebugHalted), 3);
 	CHECK_EQ(static_cast<int>(State::DebugRunning), 4);
+	CHECK_EQ(static_cast<int>(AttachMode::Running), 0);
+	CHECK_EQ(static_cast<int>(AttachMode::Reset), 1);
+	CHECK_EQ(static_cast<int>(DetachAction::Run), 0);
+	CHECK_EQ(static_cast<int>(DetachAction::Reset), 1);
+	CHECK_EQ(static_cast<int>(StopReason::None), 0);
 	CHECK_EQ(static_cast<int>(StopReason::Request), 1);
 	CHECK_EQ(static_cast<int>(StopReason::Breakpoint), 2);
 	CHECK_EQ(static_cast<int>(StopReason::Step), 3);
 	CHECK_EQ(static_cast<int>(StopReason::Reset), 4);
 	CHECK_EQ(kFeatureDebug, 2u);
 	CHECK_EQ(kHwBreakpoints, 8u);
+	CHECK_EQ(kNoBreakpoint, 0xFF);   /* DBG_STATUS breakpoint_index */
+	CHECK_EQ(kAllBreakpoints, 0xFF); /* DBG_BP_CLEAR index */
 	/* MSPDS JTAG_defs.h, bit-reversed like the other IR constants */
 	CHECK_EQ(kIrEmexDataExchange32, 0xB0);
 	CHECK_EQ(kIrEmexReadControl, 0xD0);

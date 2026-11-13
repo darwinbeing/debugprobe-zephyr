@@ -44,8 +44,10 @@ enum class Status : uint8_t {
 	TargetError = 0x06,
 	Timeout = 0x07,
 	UnknownOp = 0x08,
-	Protected = 0x09, /* read-only debug session: the address may not be written */
-	Running = 0x0A,   /* the operation needs a halted CPU */
+	/* refused in a read-only debug session: a write outside the
+	 * peripheral/RAM window, ERASE, FLASH_BEGIN */
+	Protected = 0x09,
+	Running = 0x0A, /* the operation needs a halted CPU */
 };
 
 enum class State : uint8_t {
@@ -66,7 +68,9 @@ enum class StopReason : uint8_t { None = 0, Request = 1, Breakpoint = 2, Step = 
  * "large" EEM: 8 memory-bus triggers (MSPDS 3.3.1.3 TemplateDeviceDb,
  * MSP430Defaults.h: LargeTrigger; MSP430F55xx.cpp: LargeEemMode). */
 inline constexpr unsigned kHwBreakpoints = 8;
-inline constexpr uint8_t kNoBreakpoint = 0xFF;
+inline constexpr uint8_t kNoBreakpoint = 0xFF; /* DBG_STATUS breakpoint_index: no breakpoint hit */
+inline constexpr uint8_t kAllBreakpoints = 0xFF; /* DBG_BP_CLEAR index: every breakpoint */
+static_assert(kHwBreakpoints < kNoBreakpoint, "a real breakpoint index is never 0xFF");
 
 inline constexpr uint16_t kMinSpeedKhz = 100;
 inline constexpr uint16_t kMaxSpeedKhz = 1000;
