@@ -133,7 +133,7 @@ are 20-bit numbers in 32-bit fields.
 
 - `READ_MEM` / `WRITE_MEM` (Phase A ops) work in DebugHalted through the
   debug layer, which preserves the halted context. In DebugRunning they
-  return `BAD_STATE`.
+  return `RUNNING` (correction 6).
 - New status `PROTECTED` (0x09): in read-only mode `WRITE_MEM` may only
   touch the peripheral space below 0x1000 **without the flash controller
   registers (0x0140–0x014F)**, and RAM. The RAM window is the **intersection**
