@@ -857,7 +857,7 @@ TEST(session_dbg_write_mem_whitelist)
 {
 	Fx f;
 	f.attach();
-	/* allowed: RAM, USB RAM, the peripherals outside the F5529's flash
+	/* allowed: RAM, USB RAM, the peripherals outside the F5529's PMM, flash
 	 * controller, SYS module and DMA controller, each edge included */
 	CHECK_BYTES(f.run(write_req(0x2400, 4)), kOk);
 	CHECK_BYTES(f.run(write_req(0x1C00, 2)), kOk);
@@ -865,7 +865,7 @@ TEST(session_dbg_write_mem_whitelist)
 	CHECK_BYTES(f.run(write_req(0x0200, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x0000, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x0FFE, 2)), kOk);
-	CHECK_BYTES(f.run(write_req(0x013E, 2)), kOk); /* below FCTL1 */
+	CHECK_BYTES(f.run(write_req(0x011E, 2)), kOk); /* below PMMCTL0 */
 	CHECK_BYTES(f.run(write_req(0x0150, 2)), kOk); /* above FCTL4 */
 	CHECK_BYTES(f.run(write_req(0x017E, 2)), kOk); /* below SYSCTL */
 	CHECK_BYTES(f.run(write_req(0x01A0, 2)), kOk); /* above SYSRSTIV */
@@ -878,22 +878,25 @@ TEST(session_dbg_write_mem_whitelist)
 	const size_t writes = f.tap.mem_writes.size();
 	CHECK_EQ(writes, 16u + 508u);
 	f.tap.log.clear();
-	/* refused: main flash, information memory, BSL, vacant memory, the
-	 * flash controller, the SYS module, the DMA controller, the top of the
-	 * address space, a write that runs off the end of RAM, of the
-	 * peripherals or into one of the three */
+	/* refused: main flash, information memory, BSL, vacant memory, the PMM,
+	 * the flash controller, the SYS module, the DMA controller, the top of
+	 * the address space, a write that runs off the end of RAM, of the
+	 * peripherals or into one of the four */
 	for (uint32_t addr : {0x4400u, 0x4402u, 0xFFFEu, 0x10000u, 0x1FFFEu, 0x243FEu, 0x24400u,
 			      0xFFFFEu, 0x1800u, 0x1980u, 0x19FEu, 0x1A00u, 0x1B00u, 0x1BFEu,
-			      0x1000u, 0x17FEu, 0x1C00u - 2u, 0x1C00u - 0x200u, 0x0140u, 0x0142u,
+			      0x1000u, 0x17FEu, 0x1C00u - 2u, 0x1C00u - 0x200u, 0x0120u, 0x0122u,
+			      0x0124u, 0x012Cu, 0x0130u, 0x013Eu, 0x0140u, 0x0142u,
 			      0x0144u, 0x0146u, 0x0148u, 0x014Eu, 0x0180u, 0x0182u, 0x0186u,
 			      0x019Eu, 0x0500u, 0x0510u, 0x053Au, 0x053Eu}) {
 		CHECK_BYTES(f.run(write_req(addr, 2)), kProtected);
 	}
 	CHECK_BYTES(f.run(write_req(0x43FE, 4)), kProtected);    /* RAM into flash */
 	CHECK_BYTES(f.run(write_req(0x4010, 1016)), kProtected); /* RAM into flash */
-	CHECK_BYTES(f.run(write_req(0x013E, 4)), kProtected);    /* into FCTL1 */
+	CHECK_BYTES(f.run(write_req(0x011E, 4)), kProtected);    /* into PMMCTL0 */
+	CHECK_BYTES(f.run(write_req(0x0110, 0x20)), kProtected); /* across PMMCTL0 */
+	CHECK_BYTES(f.run(write_req(0x013E, 4)), kProtected);    /* PMM into FCTL1 */
 	CHECK_BYTES(f.run(write_req(0x014E, 4)), kProtected);    /* out of FCTL4 */
-	CHECK_BYTES(f.run(write_req(0x0100, 0x50)), kProtected); /* across the flash controller */
+	CHECK_BYTES(f.run(write_req(0x0100, 0x50)), kProtected); /* across PMM and FCTL */
 	CHECK_BYTES(f.run(write_req(0x017E, 4)), kProtected);    /* into SYSCTL */
 	CHECK_BYTES(f.run(write_req(0x019E, 4)), kProtected);    /* out of SYSRSTIV */
 	CHECK_BYTES(f.run(write_req(0x0170, 0x40)), kProtected); /* across the SYS module */
@@ -988,7 +991,8 @@ TEST(session_dbg_write_mem_ram_is_the_intersection_with_the_known_device)
 	}
 	{
 		/* an unknown device: no RAM nor peripheral writes at all (where its
-		 * flash controller, SYS module and DMA controller lie is not known) */
+		 * PMM, flash controller, SYS module and DMA controller lie is not
+		 * known) */
 		Fx f;
 		f.cpu_runs();
 		f.tap.memory[0x1A04] = 0x1234;

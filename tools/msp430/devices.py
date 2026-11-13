@@ -86,6 +86,9 @@ MSP430F5529 = Device(
     ram_start=0x2400,
     peripherals=(0x0000, 0x1000),
     peripheral_holes=(
+        # PMMCTL0..PM5CTL0: PMMCTL0's password (written 0xA5, read 0x96) makes a
+        # byte write, done as a word read-modify-write, a reset; core voltage, SVS
+        (0x0120, 0x0140, "PMM"),
         (0x0140, 0x0150, "flash controller"),  # FCTL1..FCTL4
         (0x0180, 0x01A0, "SYS"),  # SYSCTL (SYSRIVECT), SYSBSLC, ...: vectors, BSL protection
         (0x0500, 0x0540, "DMA"),  # DMACTL0..DMA2SZ: a transfer could write FCTL

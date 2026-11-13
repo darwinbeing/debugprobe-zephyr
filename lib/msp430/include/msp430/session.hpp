@@ -4,19 +4,20 @@
  * input yields an error status.
  *
  * Debug sessions (protocol version 2) are read-only. What that guarantees:
- * for the host, the probe never writes flash, the registers of the flash
- * controller, the DMA controller or the SYS module, and never moves the PC
- * outside the device's main flash. WRITE_MEM may write only RAM and the
- * peripherals below 0x1000 minus those three register blocks (F5529: FCTL
- * 0x0140-0x014F, SYS 0x0180-0x019F, DMA 0x0500-0x053F); DBG_WRITE_REG may
- * set the PC only to an address in main flash or to its current value;
- * ERASE and FLASH_BEGIN are refused. On a device the probe does not know,
- * no RAM and no peripheral may be written and the PC stays where it is.
- * It does not stop the firmware's own code from doing what it normally does
- * when it runs, nor code the user places by other means (a return address
- * changed on the stack, for example). This class is the only barrier
- * between the host and the Debugger's write_mem and write_reg, which write
- * any address and any PC they are given.
+ * for the host, the probe never writes flash, the registers of the PMM, the
+ * flash controller, the DMA controller or the SYS module, and never moves the
+ * PC outside the device's main flash. WRITE_MEM may write only RAM and the
+ * peripherals below 0x1000 minus those four register blocks (F5529: PMM
+ * 0x0120-0x013F, FCTL 0x0140-0x014F, SYS 0x0180-0x019F, DMA 0x0500-0x053F;
+ * the host's device table, tools/msp430/devices.py, mirrors them);
+ * DBG_WRITE_REG may set the PC only to an address in main flash or to its
+ * current value; ERASE and FLASH_BEGIN are refused. On a device the probe
+ * does not know, no RAM and no peripheral may be written and the PC stays
+ * where it is. It does not stop the firmware's own code from doing what it
+ * normally does when it runs, nor code the user places by other means (a
+ * return address changed on the stack, for example). This class is the only
+ * barrier between the host and the Debugger's write_mem and write_reg, which
+ * write any address and any PC they are given.
  */
 #include <cstddef>
 #include <cstdint>

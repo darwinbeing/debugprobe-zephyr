@@ -8,8 +8,8 @@
  * The debugger never erases or programs flash: it uses only identify(),
  * in_full_emulation() and disconnect() of Cpuxv2, none of the funclet,
  * erase or flash-write code. write_mem, though, writes any address it is
- * given; keeping it off flash, the flash controller, the SYS and DMA
- * registers is Session's job.
+ * given; keeping it off flash, the PMM, the flash controller, the SYS and
+ * DMA registers is Session's job.
  */
 #include <cstddef>
 #include <cstdint>
@@ -142,8 +142,8 @@ public:
 	 * arrive. write_mem makes the same check before its first write and
 	 * returns TargetError without writing anything if it fails. Other
 	 * address checks are the caller's: write_mem writes any address it is
-	 * given, flash, the flash controller, the SYS and DMA registers
-	 * included; keeping it off them is Session's job. */
+	 * given, flash, the PMM, the flash controller, the SYS and DMA
+	 * registers included; keeping it off them is Session's job. */
 	Status read_mem(uint32_t addr, size_t nwords, uint8_t *dst);
 	Status write_mem(uint32_t addr, size_t nwords, const uint8_t *src);
 

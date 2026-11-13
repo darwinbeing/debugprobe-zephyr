@@ -60,7 +60,7 @@ struct KnownDevice {
 	uint16_t device_id;
 	Range ram;
 	Range main_flash;
-	Range holes[3];
+	Range holes[4];
 };
 
 namespace {
@@ -70,6 +70,10 @@ constexpr KnownDevice kKnownDevices[] = {
 	 {0x1C00, 0x4400},  /* USB RAM + RAM */
 	 {0x4400, 0x24400}, /* 128 KB */
 	 {
+		 {0x0120, 0x0140}, /* PMM: PMMCTL0..PM5CTL0. PMMCTL0 is written with
+				    * password 0xA5 but reads 0x96, so a host's byte write,
+				    * done as a word read-modify-write, resets the device;
+				    * the others set the core voltage and the supervisors */
 		 {0x0140, 0x0150}, /* FCTL1..FCTL4: the flash controller */
 		 {0x0180, 0x01A0}, /* SYS: SYSCTL (SYSRIVECT), SYSBSLC, SYSJMBC..SYSJMBO1,
 				    * SYSBERRIV..SYSRSTIV */
