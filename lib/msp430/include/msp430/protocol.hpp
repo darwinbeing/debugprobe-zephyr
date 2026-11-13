@@ -8,7 +8,7 @@ namespace msp430 {
 
 /* CMSIS-DAP vendor command that carries this protocol (ID_DAP_Vendor16). */
 inline constexpr uint8_t kVendorCmd = 0x90;
-inline constexpr uint8_t kProtocolVersion = 1;
+inline constexpr uint8_t kProtocolVersion = 2;
 inline constexpr uint32_t kFeatureCpuxv2Flash = 1u << 0;
 inline constexpr uint32_t kFeatureDebug = 1u << 1;
 

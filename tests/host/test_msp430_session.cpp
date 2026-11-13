@@ -1,10 +1,13 @@
 #include "testing.hpp"
 #include "fake_tap.hpp"
+#include "debug_logs.hpp"
 #include "msp430/session.hpp"
 
+#include <utility>
 #include <vector>
 
 using msp430::State;
+using dbglog::Log;
 
 namespace {
 
@@ -13,7 +16,33 @@ using Bytes = std::vector<uint8_t>;
 struct Fx {
 	FakeTap tap;
 	msp430::Cpuxv2 cpu{tap};
-	msp430::Session s{cpu, 1016};
+	msp430::Debugger dbg{tap, cpu};
+	msp430::Session s{cpu, dbg, 1016};
+
+	/* Whatever the Session does, the fake's mailbox, EEM exchange, password
+	 * and memory-access rules must hold and the CPU is fed only the
+	 * instructions FakeTap allows. flash_write_attempt is not checked here:
+	 * Phase A's session_range_rules writes 0xFFFFE on purpose; every test of
+	 * a debug session (test_msp430_session_debug.cpp) checks it too. */
+	~Fx() { CHECK_LOG(faults(), Log{}); }
+
+	Log faults() const
+	{
+		const std::pair<bool, const char *> flags[] = {
+			{tap.jmb_protocol_error, "jmb_protocol_error"},
+			{tap.eem_protocol_error, "eem_protocol_error"},
+			{tap.password_violation, "password_violation"},
+			{tap.mem_protocol_error, "mem_protocol_error"},
+			{tap.unexpected_instruction, "unexpected_instruction"},
+		};
+		Log set;
+		for (const auto &flag : flags) {
+			if (flag.first) {
+				set.push_back(flag.second);
+			}
+		}
+		return set;
+	}
 
 	Bytes run(const Bytes &req)
 	{
@@ -59,8 +88,9 @@ TEST(session_truncated_and_unknown_ops)
 TEST(session_info_reports_version_state_limits)
 {
 	Fx f;
-	/* version 1, state Idle, max_data_bytes 1016 = 0x03F8, features bit 0 */
-	const Bytes want = {0x90, 0x00, 0x01, 0x00, 0xF8, 0x03, 0x01, 0x00, 0x00, 0x00};
+	/* version 2, state Idle, max_data_bytes 1016 = 0x03F8, features bits 0
+	 * (flash) and 1 (debugging), 8 hardware breakpoints */
+	const Bytes want = {0x90, 0x00, 0x02, 0x00, 0xF8, 0x03, 0x03, 0x00, 0x00, 0x00, 0x08};
 	CHECK_BYTES(f.run({0x90, 0x00}), want);
 }
 
@@ -390,12 +420,12 @@ TEST(session_ops_need_a_connection)
 TEST(session_small_response_buffers)
 {
 	Fx f;
-	uint8_t r9[9] = {};
-	CHECK_EQ(f.s.handle(Bytes{0x90, 0x00}, r9), 2u);
-	CHECK_EQ(r9[1], 0x01);
 	uint8_t r10[10] = {};
-	CHECK_EQ(f.s.handle(Bytes{0x90, 0x00}, r10), 10u);
-	CHECK_EQ(r10[1], 0x00);
+	CHECK_EQ(f.s.handle(Bytes{0x90, 0x00}, r10), 2u);
+	CHECK_EQ(r10[1], 0x01);
+	uint8_t r11[11] = {};
+	CHECK_EQ(f.s.handle(Bytes{0x90, 0x00}, r11), 11u);
+	CHECK_EQ(r11[1], 0x00);
 
 	uint8_t c10[10] = {};
 	CHECK_EQ(f.s.handle(kConnectReq, c10), 2u);

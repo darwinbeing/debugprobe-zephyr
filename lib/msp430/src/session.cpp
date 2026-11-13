@@ -37,6 +37,23 @@ bool range_ok(uint32_t addr, uint64_t nwords)
 	       addr + 2u * nwords <= kAddressSpace;
 }
 
+/* Read-only debug sessions may write the peripheral space except the flash
+ * controller, and RAM. */
+constexpr uint32_t kPeripheralEnd = 0x1000;
+constexpr uint32_t kFlashCtlStart = 0x0140; /* FCTL1..FCTL4 */
+constexpr uint32_t kFlashCtlEnd = 0x0150;
+
+/* RAM of the devices the probe knows, by device ID. A read-only session may
+ * write only RAM that lies inside both this range and the one the host
+ * passes with DBG_ATTACH, so a wrong host table cannot open flash. */
+struct KnownRam {
+	uint16_t device_id;
+	uint32_t lo, hi; /* [lo, hi) */
+};
+constexpr KnownRam kKnownRam[] = {
+	{0x2955, 0x1C00, 0x4400}, /* MSP430F5529: USB RAM + RAM */
+};
+
 } // namespace
 
 size_t Session::handle(std::span<const uint8_t> request, std::span<uint8_t> response)
@@ -83,12 +100,57 @@ size_t Session::handle(std::span<const uint8_t> request, std::span<uint8_t> resp
 	case Op::FlashEnd:
 		st = op_flash_end(args);
 		break;
+	case Op::DbgAttach:
+		st = op_dbg_attach(args, out, n);
+		break;
+	case Op::DbgDetach:
+		st = op_dbg_detach(args);
+		break;
+	case Op::DbgHalt:
+		st = op_dbg_halt(args, out, n);
+		break;
+	case Op::DbgResume:
+		st = op_dbg_resume(args);
+		break;
+	case Op::DbgStatus:
+		st = op_dbg_status(args, out, n);
+		break;
+	case Op::DbgStep:
+		st = op_dbg_step(args, out, n);
+		break;
+	case Op::DbgReadRegs:
+		st = op_dbg_read_regs(args, out, n);
+		break;
+	case Op::DbgWriteReg:
+		st = op_dbg_write_reg(args);
+		break;
+	case Op::DbgBpSet:
+		st = op_dbg_bp_set(args);
+		break;
+	case Op::DbgBpClear:
+		st = op_dbg_bp_clear(args);
+		break;
 	default:
 		break;
 	}
 
+	/* The debugger may have stopped or lost the CPU during the command. A
+	 * TargetError from poll(), halt() or step() means it has already ended
+	 * the session (EEM off, CPU let go, pins released): Idle, nothing more
+	 * is sent. */
+	if (debugging()) {
+		if (!dbg_.attached()) {
+			state_ = State::Idle;
+			ram_lo_ = ram_hi_ = 0;
+		} else {
+			state_ = dbg_.running() ? State::DebugRunning : State::DebugHalted;
+		}
+	}
 	/* The target is in an unknown state (lost synchronization). Close the
-	 * session so the pins are released; the host must connect again. */
+	 * session so the pins are released; the host must connect again. A
+	 * debugger still attached here (the CPU left JTAG control during a
+	 * memory, register or breakpoint access) is detached with Run, as
+	 * Debugger::attach does for the same failure. */
 	if (st == Status::TargetError && state_ != State::Idle) {
 		abort();
 	}
@@ -102,23 +164,36 @@ void Session::abort()
 	if (state_ == State::Flashing) {
 		cpu_.flash_end(false);
 	}
-	if (state_ != State::Idle) {
+	if (debugging()) {
+		dbg_.detach(DetachAction::Run);
+	} else if (state_ != State::Idle) {
 		cpu_.disconnect();
 	}
 	state_ = State::Idle;
 	flash_remaining_ = 0;
+	ram_lo_ = ram_hi_ = 0;
+}
+
+bool Session::writable(uint32_t addr, uint32_t nbytes) const
+{
+	const uint64_t end = static_cast<uint64_t>(addr) + nbytes;
+	const bool peripheral = end <= kPeripheralEnd &&
+				(end <= kFlashCtlStart || addr >= kFlashCtlEnd);
+	const bool ram = addr >= ram_lo_ && end <= ram_hi_;
+	return peripheral || ram;
 }
 
 Status Session::op_info(In args, Out out, size_t &n)
 {
-	if (!args.empty() || out.size() < 8) {
+	if (!args.empty() || out.size() < 9) {
 		return Status::BadArg;
 	}
 	out[0] = kProtocolVersion;
 	out[1] = static_cast<uint8_t>(state_);
 	put16(out, 2, max_data_bytes_);
-	put32(out, 4, kFeatureCpuxv2Flash);
-	n = 8;
+	put32(out, 4, kFeatureCpuxv2Flash | kFeatureDebug);
+	out[8] = static_cast<uint8_t>(kHwBreakpoints);
+	n = 9;
 	return Status::Ok;
 }
 
@@ -153,8 +228,8 @@ Status Session::op_connect(In args, Out out, size_t &n)
 
 Status Session::op_disconnect(In args)
 {
-	if (state_ == State::Idle) {
-		return Status::BadState;
+	if (state_ == State::Idle || debugging()) {
+		return Status::BadState; /* a debug session ends with DBG_DETACH */
 	}
 	if (!args.empty()) {
 		return Status::BadArg;
@@ -165,7 +240,10 @@ Status Session::op_disconnect(In args)
 
 Status Session::op_read_mem(In args, Out out, size_t &n)
 {
-	if (state_ != State::Connected) {
+	if (state_ == State::DebugRunning) {
+		return Status::Running;
+	}
+	if (state_ != State::Connected && state_ != State::DebugHalted) {
 		return Status::BadState;
 	}
 	if (args.size() != 6) {
@@ -178,7 +256,8 @@ Status Session::op_read_mem(In args, Out out, size_t &n)
 	    nbytes > out.size()) {
 		return Status::BadArg;
 	}
-	const Status st = cpu_.read_mem(addr, nwords, out.data());
+	const Status st = state_ == State::DebugHalted ? dbg_.read_mem(addr, nwords, out.data())
+						       : cpu_.read_mem(addr, nwords, out.data());
 	if (st == Status::Ok) {
 		n = nbytes;
 	}
@@ -187,7 +266,10 @@ Status Session::op_read_mem(In args, Out out, size_t &n)
 
 Status Session::op_write_mem(In args)
 {
-	if (state_ != State::Connected) {
+	if (state_ == State::DebugRunning) {
+		return Status::Running;
+	}
+	if (state_ != State::Connected && state_ != State::DebugHalted) {
 		return Status::BadState;
 	}
 	if (args.size() < 4) {
@@ -196,14 +278,30 @@ Status Session::op_write_mem(In args)
 	const uint32_t addr = get32(args, 0);
 	const In data = args.subspan(4);
 	if (data.empty() || (data.size() & 1u) != 0 || data.size() > max_data_bytes_ ||
-	    !range_ok(addr, data.size() / 2)) {
+	    (addr & 1u) != 0) {
 		return Status::BadArg;
+	}
+	if (state_ == State::DebugHalted) {
+		/* Before the range check: a range that leaves the 20-bit space
+		 * lies outside every window, so it is refused as PROTECTED. */
+		if (!writable(addr, static_cast<uint32_t>(data.size()))) {
+			return Status::Protected;
+		}
+	}
+	if (!range_ok(addr, data.size() / 2)) {
+		return Status::BadArg;
+	}
+	if (state_ == State::DebugHalted) {
+		return dbg_.write_mem(addr, data.size() / 2, data.data());
 	}
 	return cpu_.write_mem(addr, data.size() / 2, data.data());
 }
 
 Status Session::op_erase(In args)
 {
+	if (debugging()) {
+		return Status::Protected; /* no flash writes in a debug session */
+	}
 	if (state_ != State::Connected) {
 		return Status::BadState;
 	}
@@ -221,6 +319,9 @@ Status Session::op_erase(In args)
 
 Status Session::op_flash_begin(In args)
 {
+	if (debugging()) {
+		return Status::Protected; /* no flash writes in a debug session */
+	}
 	if (state_ != State::Connected) {
 		return Status::BadState;
 	}
@@ -282,6 +383,209 @@ Status Session::op_flash_end(In args)
 		return Status::BadState;
 	}
 	return st;
+}
+
+Status Session::op_dbg_attach(In args, Out out, size_t &n)
+{
+	/* From Idle only: in Connected and Flashing a Phase A funclet may still
+	 * be running on the target, and Cpuxv2::identify() with the normal
+	 * entry would not stop it; a debug session ends with DBG_DETACH. */
+	if (state_ != State::Idle) {
+		return Status::BadState;
+	}
+	if (args.size() != 12 || out.size() < 15) {
+		return Status::BadArg;
+	}
+	const uint8_t mode = args[0];
+	const uint8_t flags = args[1];
+	const uint16_t speed_khz = get16(args, 2);
+	const uint32_t ram_lo = get32(args, 4);
+	const uint32_t ram_hi = get32(args, 8);
+	/* flags bit 0 (full mode) belongs to phase B2 and is refused here. */
+	if (mode > 1 || flags != 0 || speed_khz < kMinSpeedKhz || speed_khz > kMaxSpeedKhz ||
+	    (ram_lo & 1u) != 0 || ram_lo >= ram_hi || ram_hi > kAddressSpace) {
+		return Status::BadArg;
+	}
+
+	Identity id;
+	const Status st = dbg_.attach(static_cast<AttachMode>(mode), speed_khz * 1000u, id);
+	if (st == Status::NoTarget) {
+		out[0] = id.jtag_id;
+		n = 1;
+	}
+	if (st != Status::Ok) {
+		return st; /* the debugger has released the pins */
+	}
+	state_ = State::DebugHalted;
+	/* The writable RAM: the intersection of the host's range and the RAM
+	 * the probe knows for the device; empty for a device it does not know. */
+	ram_lo_ = ram_hi_ = 0;
+	for (const KnownRam &k : kKnownRam) {
+		if (k.device_id == id.device_id) {
+			ram_lo_ = ram_lo > k.lo ? ram_lo : k.lo;
+			ram_hi_ = ram_hi < k.hi ? ram_hi : k.hi;
+		}
+	}
+	if (ram_lo_ >= ram_hi_) {
+		ram_lo_ = ram_hi_ = 0;
+	}
+	out[0] = id.jtag_id;
+	put16(out, 1, id.core_id);
+	put32(out, 3, id.device_id_ptr);
+	put16(out, 7, id.device_id);
+	put32(out, 9, dbg_.pc());
+	out[13] = static_cast<uint8_t>(dbg_.stop_reason());
+	out[14] = static_cast<uint8_t>(kHwBreakpoints);
+	n = 15;
+	return Status::Ok;
+}
+
+Status Session::op_dbg_detach(In args)
+{
+	if (!debugging()) {
+		return Status::BadState;
+	}
+	if (args.size() != 1 || args[0] > 1) {
+		return Status::BadArg;
+	}
+	dbg_.detach(static_cast<DetachAction>(args[0]));
+	state_ = State::Idle;
+	ram_lo_ = ram_hi_ = 0;
+	return Status::Ok;
+}
+
+Status Session::op_dbg_halt(In args, Out out, size_t &n)
+{
+	if (!debugging()) {
+		return Status::BadState;
+	}
+	if (!args.empty() || out.size() < 4) {
+		return Status::BadArg;
+	}
+	const Status st = dbg_.halt();
+	if (st == Status::Ok) {
+		put32(out, 0, dbg_.pc());
+		n = 4;
+	}
+	return st;
+}
+
+Status Session::op_dbg_resume(In args)
+{
+	if (!debugging()) {
+		return Status::BadState;
+	}
+	if (state_ == State::DebugRunning) {
+		return Status::Running;
+	}
+	if (!args.empty()) {
+		return Status::BadArg;
+	}
+	return dbg_.resume();
+}
+
+Status Session::op_dbg_status(In args, Out out, size_t &n)
+{
+	if (!debugging()) {
+		return Status::BadState;
+	}
+	if (!args.empty() || out.size() < 7) {
+		return Status::BadArg;
+	}
+	bool halted = false;
+	const Status st = dbg_.poll(halted);
+	if (st != Status::Ok) {
+		return st; /* `halted` and the stop reason are valid on Ok only */
+	}
+	out[0] = halted ? 1 : 0;
+	out[1] = static_cast<uint8_t>(halted ? dbg_.stop_reason() : StopReason::None);
+	out[2] = halted ? dbg_.breakpoint_hit() : kNoBreakpoint;
+	put32(out, 3, halted ? dbg_.pc() : 0);
+	n = 7;
+	return Status::Ok;
+}
+
+Status Session::op_dbg_step(In args, Out out, size_t &n)
+{
+	if (!debugging()) {
+		return Status::BadState;
+	}
+	if (state_ == State::DebugRunning) {
+		return Status::Running;
+	}
+	if (!args.empty() || out.size() < 4) {
+		return Status::BadArg;
+	}
+	const Status st = dbg_.step();
+	if (st == Status::Ok) {
+		put32(out, 0, dbg_.pc());
+		n = 4;
+	}
+	return st;
+}
+
+Status Session::op_dbg_read_regs(In args, Out out, size_t &n)
+{
+	if (!debugging()) {
+		return Status::BadState;
+	}
+	if (state_ == State::DebugRunning) {
+		return Status::Running;
+	}
+	if (!args.empty() || out.size() < 64) {
+		return Status::BadArg;
+	}
+	uint32_t regs[16] = {};
+	const Status st = dbg_.read_regs(regs);
+	if (st == Status::Ok) {
+		for (size_t i = 0; i < 16; ++i) {
+			put32(out, 4 * i, regs[i]);
+		}
+		n = 64;
+	}
+	return st;
+}
+
+Status Session::op_dbg_write_reg(In args)
+{
+	if (!debugging()) {
+		return Status::BadState;
+	}
+	if (state_ == State::DebugRunning) {
+		return Status::Running;
+	}
+	if (args.size() != 5) {
+		return Status::BadArg;
+	}
+	return dbg_.write_reg(args[0], get32(args, 1));
+}
+
+Status Session::op_dbg_bp_set(In args)
+{
+	if (!debugging()) {
+		return Status::BadState;
+	}
+	if (state_ == State::DebugRunning) {
+		return Status::Running;
+	}
+	if (args.size() != 5) {
+		return Status::BadArg;
+	}
+	return dbg_.set_breakpoint(args[0], get32(args, 1));
+}
+
+Status Session::op_dbg_bp_clear(In args)
+{
+	if (!debugging()) {
+		return Status::BadState;
+	}
+	if (state_ == State::DebugRunning) {
+		return Status::Running;
+	}
+	if (args.size() != 1) {
+		return Status::BadArg;
+	}
+	return dbg_.clear_breakpoint(args[0]);
 }
 
 } // namespace msp430
