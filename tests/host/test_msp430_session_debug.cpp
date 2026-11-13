@@ -816,41 +816,49 @@ TEST(session_dbg_write_mem_whitelist)
 {
 	Fx f;
 	f.attach();
-	/* allowed: RAM, USB RAM, peripherals outside the flash and DMA
-	 * controllers */
+	/* allowed: RAM, USB RAM, the peripherals outside the F5529's flash
+	 * controller, SYS module and DMA controller, each edge included */
 	CHECK_BYTES(f.run(write_req(0x2400, 4)), kOk);
 	CHECK_BYTES(f.run(write_req(0x1C00, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x43FE, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x0200, 2)), kOk);
-	CHECK_BYTES(f.run(write_req(0x013E, 2)), kOk);
-	CHECK_BYTES(f.run(write_req(0x0150, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x0000, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x0FFE, 2)), kOk);
-	CHECK_BYTES(f.run(write_req(0x04FE, 2)), kOk);
+	CHECK_BYTES(f.run(write_req(0x013E, 2)), kOk); /* below FCTL1 */
+	CHECK_BYTES(f.run(write_req(0x0150, 2)), kOk); /* above FCTL4 */
+	CHECK_BYTES(f.run(write_req(0x017E, 2)), kOk); /* below SYSCTL */
+	CHECK_BYTES(f.run(write_req(0x01A0, 2)), kOk); /* above SYSRSTIV */
+	CHECK_BYTES(f.run(write_req(0x04FE, 2)), kOk); /* below DMACTL0 */
+	CHECK_BYTES(f.run(write_req(0x0540, 2)), kOk); /* above DMA2SZ */
+	CHECK_BYTES(f.run(write_req(0x05C0, 2)), kOk); /* UCA0CTLW0 */
+	CHECK_BYTES(f.run(write_req(0x05FE, 2)), kOk); /* UCB0IV */
 	CHECK_BYTES(f.run(write_req(0x0600, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x1C00, 1016)), kOk); /* the largest write */
 	const size_t writes = f.tap.mem_writes.size();
-	CHECK_EQ(writes, 11u + 508u);
+	CHECK_EQ(writes, 16u + 508u);
 	f.tap.log.clear();
 	/* refused: main flash, information memory, BSL, vacant memory, the
-	 * flash controller, the DMA controller's 256 bytes, the top of the
+	 * flash controller, the SYS module, the DMA controller, the top of the
 	 * address space, a write that runs off the end of RAM, of the
-	 * peripherals or into a controller */
+	 * peripherals or into one of the three */
 	for (uint32_t addr : {0x4400u, 0x4402u, 0xFFFEu, 0x10000u, 0x1FFFEu, 0x243FEu, 0x24400u,
 			      0xFFFFEu, 0x1800u, 0x1980u, 0x19FEu, 0x1A00u, 0x1B00u, 0x1BFEu,
 			      0x1000u, 0x17FEu, 0x1C00u - 2u, 0x1C00u - 0x200u, 0x0140u, 0x0142u,
-			      0x0144u, 0x0146u, 0x0148u, 0x014Eu, 0x0500u, 0x0510u, 0x053Au,
-			      0x05FEu}) {
+			      0x0144u, 0x0146u, 0x0148u, 0x014Eu, 0x0180u, 0x0182u, 0x0186u,
+			      0x019Eu, 0x0500u, 0x0510u, 0x053Au, 0x053Eu}) {
 		CHECK_BYTES(f.run(write_req(addr, 2)), kProtected);
 	}
-	CHECK_BYTES(f.run(write_req(0x43FE, 4)), kProtected);   /* RAM into flash */
+	CHECK_BYTES(f.run(write_req(0x43FE, 4)), kProtected);    /* RAM into flash */
 	CHECK_BYTES(f.run(write_req(0x4010, 1016)), kProtected); /* RAM into flash */
-	CHECK_BYTES(f.run(write_req(0x013E, 4)), kProtected);   /* into FCTL1 */
-	CHECK_BYTES(f.run(write_req(0x014E, 4)), kProtected);   /* out of FCTL4 */
-	CHECK_BYTES(f.run(write_req(0x0100, 0x50)), kProtected); /* across the controller */
-	CHECK_BYTES(f.run(write_req(0x04FE, 4)), kProtected);   /* into DMACTL0 */
-	CHECK_BYTES(f.run(write_req(0x05FE, 4)), kProtected);   /* out of the DMA block */
-	CHECK_BYTES(f.run(write_req(0x0400, 0x300)), kProtected); /* across the DMA block */
+	CHECK_BYTES(f.run(write_req(0x013E, 4)), kProtected);    /* into FCTL1 */
+	CHECK_BYTES(f.run(write_req(0x014E, 4)), kProtected);    /* out of FCTL4 */
+	CHECK_BYTES(f.run(write_req(0x0100, 0x50)), kProtected); /* across the flash controller */
+	CHECK_BYTES(f.run(write_req(0x017E, 4)), kProtected);    /* into SYSCTL */
+	CHECK_BYTES(f.run(write_req(0x019E, 4)), kProtected);    /* out of SYSRSTIV */
+	CHECK_BYTES(f.run(write_req(0x0170, 0x40)), kProtected); /* across the SYS module */
+	CHECK_BYTES(f.run(write_req(0x04FE, 4)), kProtected);    /* into DMACTL0 */
+	CHECK_BYTES(f.run(write_req(0x053E, 4)), kProtected);    /* out of the DMA controller */
+	CHECK_BYTES(f.run(write_req(0x0400, 0x300)), kProtected); /* across the DMA controller */
 	CHECK_BYTES(f.run(write_req(0x0FFE, 4)), kProtected);   /* out of the peripherals */
 	CHECK_BYTES(f.run(write_req(0x0FF0, 0x3F8)), kProtected); /* peripherals into vacant memory */
 	CHECK_BYTES(f.run(write_req(0x1BFE, 4)), kProtected);   /* descriptors into RAM */
@@ -938,16 +946,20 @@ TEST(session_dbg_write_mem_ram_is_the_intersection_with_the_known_device)
 		CHECK_BYTES(f.run(write_req(0x0200, 2)), kOk);
 	}
 	{
-		Fx f; /* an unknown device: no RAM writes at all */
+		/* an unknown device: no RAM nor peripheral writes at all (where its
+		 * flash controller, SYS module and DMA controller lie is not known) */
+		Fx f;
 		f.cpu_runs();
 		f.tap.memory[0x1A04] = 0x1234;
 		REQUIRE(f.run(attach_req())[1] == 0x00);
-		CHECK_BYTES(f.run(write_req(0x2400, 2)), kProtected);
-		CHECK_BYTES(f.run(write_req(0x1C00, 2)), kProtected);
-		CHECK_BYTES(f.run(write_req(0x43FE, 2)), kProtected);
-		CHECK_BYTES(f.run(write_req(0x4400, 2)), kProtected);
-		CHECK_BYTES(f.run(write_req(0x0200, 2)), kOk);
-		CHECK_BYTES(f.run(write_req(0x0140, 2)), kProtected);
+		f.tap.log.clear();
+		f.tap.mem_writes.clear();
+		for (const uint32_t addr : {0x2400u, 0x1C00u, 0x43FEu, 0x4400u, 0x0000u, 0x0200u,
+					    0x013Eu, 0x0140u, 0x0600u, 0x0FFEu}) {
+			CHECK_BYTES(f.run(write_req(addr, 2)), kProtected);
+		}
+		CHECK(f.tap.log.empty());
+		CHECK(f.tap.mem_writes.empty());
 	}
 	{
 		Fx f; /* the window is set anew by every attach */

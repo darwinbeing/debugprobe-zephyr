@@ -4,17 +4,19 @@
  * input yields an error status.
  *
  * Debug sessions (protocol version 2) are read-only. What that guarantees:
- * for the host, the probe never writes flash, the flash controller's
- * registers or the DMA controller's, and never moves the PC outside the
- * device's main flash. WRITE_MEM may write only the peripheral space without
- * the flash controller (0x0140-0x014F) and the DMA controller (0x0500-
- * 0x05FF), and RAM; DBG_WRITE_REG may set the PC only to an address in main
- * flash or to its current value; ERASE and FLASH_BEGIN are refused. It does
- * not stop the firmware's own code from doing what it normally does when it
- * runs, nor code the user places by other means (a return address changed
- * on the stack, for example). This class is the only barrier between the
- * host and the Debugger's write_mem and write_reg, which write any address
- * and any PC they are given.
+ * for the host, the probe never writes flash, the registers of the flash
+ * controller, the DMA controller or the SYS module, and never moves the PC
+ * outside the device's main flash. WRITE_MEM may write only RAM and the
+ * peripherals below 0x1000 minus those three register blocks (F5529: FCTL
+ * 0x0140-0x014F, SYS 0x0180-0x019F, DMA 0x0500-0x053F); DBG_WRITE_REG may
+ * set the PC only to an address in main flash or to its current value;
+ * ERASE and FLASH_BEGIN are refused. On a device the probe does not know,
+ * no RAM and no peripheral may be written and the PC stays where it is.
+ * It does not stop the firmware's own code from doing what it normally does
+ * when it runs, nor code the user places by other means (a return address
+ * changed on the stack, for example). This class is the only barrier
+ * between the host and the Debugger's write_mem and write_reg, which write
+ * any address and any PC they are given.
  */
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +27,8 @@
 #include "msp430/protocol.hpp"
 
 namespace msp430 {
+
+struct KnownDevice; /* session.cpp */
 
 class Session {
 public:
@@ -97,7 +101,7 @@ private:
 	/* Read-only debug sessions: may [addr, addr + nbytes) be written? No
 	 * when nbytes is 0. */
 	bool writable(uint32_t addr, uint32_t nbytes) const;
-	/* Empty the RAM window and the main flash range. */
+	/* Forget the RAM window and the device's limits. */
 	void clear_windows();
 
 	Cpuxv2 &cpu_;
@@ -107,8 +111,10 @@ private:
 	uint32_t flash_remaining_ = 0; /* words still expected by the funclet */
 	uint32_t ram_lo_ = 0;          /* writable RAM in a debug session, */
 	uint32_t ram_hi_ = 0;          /* [ram_lo_, ram_hi_); empty when equal */
-	uint32_t flash_lo_ = 0;        /* main flash, where DBG_WRITE_REG may */
-	uint32_t flash_hi_ = 0;        /* move the PC; empty when equal */
+	/* In a debug session: the identified device's RAM, main flash and
+	 * peripheral holes (session.cpp); nullptr for a device the probe does
+	 * not know. */
+	const KnownDevice *device_ = nullptr;
 };
 
 } // namespace msp430

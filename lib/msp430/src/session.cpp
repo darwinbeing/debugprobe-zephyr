@@ -37,34 +37,45 @@ bool range_ok(uint32_t addr, uint64_t nwords)
 	       addr + 2u * nwords <= kAddressSpace;
 }
 
-/* Read-only debug sessions may write the peripheral space except the flash
- * controller and the DMA controller, and RAM. */
+/* The peripheral space, 0x0000-0x0FFF on every CPUXv2 device. */
 constexpr uint32_t kPeripheralEnd = 0x1000;
-constexpr uint32_t kFlashCtlStart = 0x0140; /* FCTL1..FCTL4 */
-constexpr uint32_t kFlashCtlEnd = 0x0150;
-/* The DMA controller, whose transfers could write the flash controller. On
- * the F5529 its registers are 0x0500-0x053F; the 256 bytes refused here also
- * hold USCI_A0 (0x05C0) and USCI_B0 (0x05E0). */
-constexpr uint32_t kDmaStart = 0x0500;
-constexpr uint32_t kDmaEnd = 0x0600;
 
-/* Does [addr, end) overlap [lo, hi)? */
-bool overlaps(uint64_t addr, uint64_t end, uint32_t lo, uint32_t hi)
-{
-	return addr < hi && end > lo;
-}
+} // namespace
 
-/* The devices the probe knows, by device ID. A read-only session may write
- * only RAM that lies inside both the RAM range here and the one the host
- * passes with DBG_ATTACH, so a wrong host table cannot open flash; it may
- * move the PC only into the main flash here (or leave it where it is). */
+/* The devices the probe knows, by device ID. In a read-only session:
+ * WRITE_MEM may write only RAM that lies inside both `ram` and the range the
+ * host passes with DBG_ATTACH, so a wrong host table cannot open flash, and
+ * the peripherals below kPeripheralEnd minus the `holes`; DBG_WRITE_REG may
+ * move the PC only into `main_flash` (or leave it where it is). Names and
+ * addresses from TI's device header. */
 struct KnownDevice {
+	struct Range {
+		uint32_t lo, hi; /* [lo, hi) */
+
+		bool contains(uint32_t a) const { return a >= lo && a < hi; }
+		/* Does [addr, end) overlap the range? */
+		bool overlaps(uint64_t addr, uint64_t end) const { return addr < hi && end > lo; }
+	};
+
 	uint16_t device_id;
-	uint32_t ram_lo, ram_hi;     /* [lo, hi) */
-	uint32_t flash_lo, flash_hi; /* main flash, [lo, hi) */
+	Range ram;
+	Range main_flash;
+	Range holes[3];
 };
+
+namespace {
+
 constexpr KnownDevice kKnownDevices[] = {
-	{0x2955, 0x1C00, 0x4400, 0x4400, 0x24400}, /* MSP430F5529: USB RAM + RAM; 128 KB */
+	{0x2955, /* MSP430F5529 */
+	 {0x1C00, 0x4400},  /* USB RAM + RAM */
+	 {0x4400, 0x24400}, /* 128 KB */
+	 {
+		 {0x0140, 0x0150}, /* FCTL1..FCTL4: the flash controller */
+		 {0x0180, 0x01A0}, /* SYS: SYSCTL (SYSRIVECT), SYSBSLC, SYSJMBC..SYSJMBO1,
+				    * SYSBERRIV..SYSRSTIV */
+		 {0x0500, 0x0540}, /* DMA: DMACTL0..DMA2SZ, whose transfers could write
+				    * the flash controller */
+	 }},
 };
 
 } // namespace
@@ -193,17 +204,26 @@ bool Session::writable(uint32_t addr, uint32_t nbytes) const
 		return false;
 	}
 	const uint64_t end = static_cast<uint64_t>(addr) + nbytes;
-	const bool peripheral = end <= kPeripheralEnd &&
-				!overlaps(addr, end, kFlashCtlStart, kFlashCtlEnd) &&
-				!overlaps(addr, end, kDmaStart, kDmaEnd);
-	const bool ram = addr >= ram_lo_ && end <= ram_hi_;
-	return peripheral || ram;
+	if (addr >= ram_lo_ && end <= ram_hi_) {
+		return true;
+	}
+	/* The peripherals minus the device's holes; none for a device the probe
+	 * does not know, whose holes it cannot tell. */
+	if (device_ == nullptr || end > kPeripheralEnd) {
+		return false;
+	}
+	for (const KnownDevice::Range &hole : device_->holes) {
+		if (hole.overlaps(addr, end)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 void Session::clear_windows()
 {
 	ram_lo_ = ram_hi_ = 0;
-	flash_lo_ = flash_hi_ = 0;
+	device_ = nullptr;
 }
 
 Status Session::op_info(In args, Out out, size_t &n)
@@ -445,16 +465,15 @@ Status Session::op_dbg_attach(In args, Out out, size_t &n)
 		return st;
 	}
 	state_ = State::DebugHalted;
-	/* The writable RAM: the intersection of the host's range and the RAM
-	 * the probe knows for the device; the main flash the PC may be moved
-	 * into. Both empty for a device the probe does not know. */
+	/* The device's limits (none for a device the probe does not know: no
+	 * RAM, no peripherals, the PC stays where it is) and the writable RAM,
+	 * the intersection of the host's range and the device's RAM. */
 	clear_windows();
 	for (const KnownDevice &k : kKnownDevices) {
 		if (k.device_id == id.device_id) {
-			ram_lo_ = ram_lo > k.ram_lo ? ram_lo : k.ram_lo;
-			ram_hi_ = ram_hi < k.ram_hi ? ram_hi : k.ram_hi;
-			flash_lo_ = k.flash_lo;
-			flash_hi_ = k.flash_hi;
+			device_ = &k;
+			ram_lo_ = ram_lo > k.ram.lo ? ram_lo : k.ram.lo;
+			ram_hi_ = ram_hi < k.ram.hi ? ram_hi : k.ram.hi;
 		}
 	}
 	if (ram_lo_ >= ram_hi_) {
@@ -594,8 +613,8 @@ Status Session::op_dbg_write_reg(In args)
 	 * (GDB's G packet writes every register back, and the CPU may be halted
 	 * in code the firmware runs from RAM). An odd PC is left to the
 	 * Debugger's BAD_ARG: the form is checked first, as for WRITE_MEM. */
-	if (index == 0 && (value & 1u) == 0 && value != dbg_.pc() &&
-	    (value < flash_lo_ || value >= flash_hi_)) {
+	const bool into_main_flash = device_ != nullptr && device_->main_flash.contains(value);
+	if (index == 0 && (value & 1u) == 0 && value != dbg_.pc() && !into_main_flash) {
 		return Status::Protected;
 	}
 	return dbg_.write_reg(index, value);
