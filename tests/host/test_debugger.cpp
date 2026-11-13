@@ -746,3 +746,84 @@ TEST(debugger_write_reg_rejects_bad_arguments)
 	CHECK(f.d.write_reg(2, 0x10000) == Status::BadArg);
 	CHECK(f.t.log.empty());
 }
+
+TEST(debugger_read_mem_follows_mspds_read_mem_words)
+{
+	Fx f;
+	f.attached();
+	f.t.memory[0x2400] = 0x1234;
+	f.t.memory[0x2402] = 0xABCD;
+	uint8_t out[4] = {};
+	REQUIRE(f.d.read_mem(0x2400, 2, out) == Status::Ok);
+	const Log want = Log{"tclk:0", ir(0xC1), d20(0x2400), "tclk:1", "tclk:0", ir(0x42), d16(0),
+			     ir(0xC1), d20(0x2402), "tclk:1", "tclk:0", ir(0x42), d16(0),
+			     "tclk:1", "tclk:0", "tclk:1", "ir:28", "dr16:0000"};
+	CHECK_LOG(f.t.log, want);
+	const uint8_t want_bytes[] = {0x34, 0x12, 0xCD, 0xAB};
+	CHECK_BYTES(out, want_bytes);
+	CHECK_EQ(f.d.pc(), 0x4520u); /* no SetPC: the context is untouched */
+}
+
+TEST(debugger_write_mem_follows_mspds_write_mem_words)
+{
+	Fx f;
+	f.attached();
+	const uint8_t data[] = {0x34, 0x12, 0x78, 0x56};
+	REQUIRE(f.d.write_mem(0x2400, 2, data) == Status::Ok);
+	CHECK_LOG(f.t.log, (Log{"ir:28", "dr16:0000"} + write_word(0x2400, 0x1234) +
+			    write_word(0x2402, 0x5678) + Log{"ir:28", "dr16:0000"}));
+	CHECK_EQ(f.t.memory[0x2400], 0x1234);
+	CHECK_EQ(f.t.memory[0x2402], 0x5678);
+}
+
+TEST(debugger_memory_access_detects_a_dead_link)
+{
+	{
+		Fx f;
+		f.attached();
+		f.t.cntrl_sig = 0x0000; /* the CPU has left full emulation */
+		uint8_t buf[2] = {};
+		CHECK(f.d.read_mem(0x2400, 1, buf) == Status::TargetError);
+		CHECK(f.d.write_mem(0x2400, 1, buf) == Status::TargetError);
+		CHECK(f.t.mem_writes.empty()); /* checked before writing */
+	}
+	{
+		Fx f;
+		f.attached();
+		f.t.jtag_id = 0xFF; /* the check also tests the JTAG ID */
+		uint8_t buf[2] = {};
+		CHECK(f.d.read_mem(0x2400, 1, buf) == Status::TargetError);
+		CHECK(f.d.write_mem(0x2400, 1, buf) == Status::TargetError);
+		CHECK(f.t.mem_writes.empty());
+	}
+}
+
+TEST(debugger_write_mem_reports_a_link_that_dies_during_the_transfer)
+{
+	Fx f;
+	f.attached();
+	/* the check before the writes passes, the one after them does not */
+	f.t.cntrl_sig_script = {0x0301, 0x0000};
+	const uint8_t data[] = {0x34, 0x12};
+	CHECK(f.d.write_mem(0x2400, 1, data) == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK_LOG(f.t.log, (Log{"ir:28", "dr16:0000"} + write_word(0x2400, 0x1234) +
+			    Log{"ir:28", "dr16:0000"}));
+}
+
+TEST(debugger_memory_access_needs_an_attached_cpu)
+{
+	Fx f;
+	uint8_t buf[2] = {0x34, 0x12};
+	CHECK(f.d.read_mem(0x2400, 1, buf) == Status::BadState);
+	CHECK(f.d.write_mem(0x2400, 1, buf) == Status::BadState);
+	CHECK(f.t.log.empty());
+	f.attached();
+	f.d.detach(DetachAction::Run);
+	f.t.log.clear();
+	f.t.mem_writes.clear();
+	CHECK(f.d.read_mem(0x2400, 1, buf) == Status::BadState);
+	CHECK(f.d.write_mem(0x2400, 1, buf) == Status::BadState);
+	CHECK(f.t.log.empty());
+	CHECK(f.t.mem_writes.empty());
+}

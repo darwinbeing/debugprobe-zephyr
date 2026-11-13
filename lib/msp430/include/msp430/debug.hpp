@@ -7,7 +7,8 @@
  *
  * The debugger never erases or programs flash: it uses only identify(),
  * in_full_emulation() and disconnect() of Cpuxv2, none of the funclet,
- * erase or flash-write code.
+ * erase or flash-write code. write_mem, though, writes any address it is
+ * given; keeping it off flash and the flash controller is Session's job.
  */
 #include <cstddef>
 #include <cstdint>
@@ -74,9 +75,14 @@ public:
 	 * TargetError if the CPU is no longer under JTAG control after a write
 	 * to the CPU. */
 	Status write_reg(unsigned index, uint32_t value);
-	/* Halted only. Little-endian byte pairs, one per word. The CPU context
-	 * is preserved. TargetError if the CPU is no longer under JTAG control
-	 * afterwards. Address checks are the caller's (Session). */
+	/* `nwords` words from `addr` on, little-endian byte pairs, one per word.
+	 * The PC is not moved: the saved context stays valid. BadState when not
+	 * attached, Running while the CPU runs; TargetError if the CPU is no
+	 * longer under JTAG control afterwards (`dst` is filled and the words
+	 * are written anyway). write_mem makes the same check before its first
+	 * write and returns TargetError without writing anything if it fails.
+	 * Address checks are the caller's (Session): write_mem writes any
+	 * address it is given, flash and the flash controller included. */
 	Status read_mem(uint32_t addr, size_t nwords, uint8_t *dst);
 	Status write_mem(uint32_t addr, size_t nwords, const uint8_t *src);
 

@@ -24,7 +24,9 @@
  *    afterwards as the DLL does (WatchdogControl::checkRead);
  *  - "check for Init State" after a sync is Cpuxv2::in_full_emulation(),
  *    which also checks the JTAG ID; read_mem, write_mem, read_regs and
- *    write_reg end with the same check;
+ *    write_reg end with the same check. write_mem also makes it before its
+ *    first write, as Phase A's Cpuxv2::write_word does, and writes nothing
+ *    if it fails. ReadMemWordsXv2 and WriteMemWordsXv2 check nothing;
  *  - when the init-state check or the WDTCTL password check fails during a
  *    sync (MSPDS checks neither, in both sync macros), the CPU is already in
  *    full emulation and the operation ends with TargetError. After
@@ -783,6 +785,52 @@ Status Debugger::write_reg(unsigned index, uint32_t value)
 		value &= ~1u;
 	}
 	write_cpu_reg(mova_imm(index, value), static_cast<uint16_t>(value));
+	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
+}
+
+/* ReadMemWordsXv2.c:57-83. No SetPcXv2: the saved context stays valid. */
+Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
+{
+	if (!attached_) {
+		return Status::BadState;
+	}
+	if (running_) {
+		return Status::Running;
+	}
+	tap_.clr_tclk();
+	for (size_t i = 0; i < nwords; ++i) {
+		tap_.ir_shift(kIrAddr16Bit);
+		tap_.dr_shift20(addr + 2u * static_cast<uint32_t>(i));
+		tap_.set_tclk();
+		tap_.clr_tclk();
+		tap_.ir_shift(kIrDataCapture);
+		const uint16_t word = tap_.dr_shift16(0);
+		dst[2 * i] = static_cast<uint8_t>(word);
+		dst[2 * i + 1] = static_cast<uint8_t>(word >> 8);
+	}
+	tap_.set_tclk();
+	tap_.clr_tclk(); /* one more cycle, so the CPU drives the correct MAB */
+	tap_.set_tclk();
+	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
+}
+
+/* WriteMemWordsXv2.c:58-104; its loop body is WriteMemWordXv2. The check
+ * before the first write is not in MSPDS (see the file header). */
+Status Debugger::write_mem(uint32_t addr, size_t nwords, const uint8_t *src)
+{
+	if (!attached_) {
+		return Status::BadState;
+	}
+	if (running_) {
+		return Status::Running;
+	}
+	if (!cpu_.in_full_emulation()) {
+		return Status::TargetError;
+	}
+	for (size_t i = 0; i < nwords; ++i) {
+		write_word(addr + 2u * static_cast<uint32_t>(i),
+			   static_cast<uint16_t>(src[2 * i] | (src[2 * i + 1] << 8)));
+	}
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
 
