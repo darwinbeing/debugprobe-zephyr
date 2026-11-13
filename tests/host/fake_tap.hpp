@@ -45,19 +45,28 @@ public:
 	std::map<uint8_t, uint32_t> eem;
 
 	/* --- debug-layer model (msp430::Debugger) --- */
+	static constexpr uint32_t kWdtctl = 0x015C;
+	static constexpr uint16_t kWdtctlRead = 0x6900; /* WDTCTL reads 0x69xx */
 	/* Word memory read through IR_DATA_CAPTURE right after an address was
 	 * loaded with IR_ADDR_16BIT (ReadMemWordXv2); writes through
-	 * IR_DATA_TO_ADDR update it. Missing addresses read 0. Defaults:
-	 * WDTCTL (password 0x69 on read), FCTL3 (not busy), the F5529 device
-	 * ID and a reset vector. */
+	 * IR_DATA_TO_ADDR update it. Missing addresses read 0. */
 	std::map<uint32_t, uint16_t> memory = {
-		{0x015C, 0x6904}, {0x0144, 0x9658}, {0x1A04, 0x2955}, {0xFFFE, 0x441A}};
+		{kWdtctl, 0x6904}, /* WDTCTL after reset (password 0x69 on read) */
+		{0x0144, 0x9658},  /* FCTL3: locked, not busy */
+		{0x1A04, 0x2955},  /* TLV device ID of the F5529 */
+		{0xFFFE, 0x441A},  /* reset vector */
+	};
 	/* DR16 under IR_DATA_CAPTURE when no address is pending: the two words
 	 * (low, high) of every CPU register read (ReadCpuRegXv2). Default 0. */
 	std::deque<uint16_t> captured;
-	uint32_t mab = 0x04524;              /* DR20 under IR_ADDR_CAPTURE */
+	/* DR20 under IR_ADDR_CAPTURE. Every such shift consumes one mab_script
+	 * entry, dummy captures included (SetPcXv2 and WriteCpuRegXv2 end with
+	 * one); then mab. */
+	uint32_t mab = 0x04524;
 	std::deque<uint32_t> mab_script;
-	uint16_t eem_control = 0x0000;       /* DR16 under IR_EMEX_READ_CONTROL */
+	/* DR16 under IR_EMEX_READ_CONTROL. Every read consumes one
+	 * eem_control_script entry; then eem_control. Writes do not change it. */
+	uint16_t eem_control = 0x0000;
 	std::deque<uint16_t> eem_control_script;
 
 	/* --- recordings --- */
@@ -70,6 +79,16 @@ public:
 	/* EEM exchange out of order: an IR shift between address and data, an
 	 * address above one byte, or a 16/20-bit shift under the EEM IR. */
 	bool eem_protocol_error = false;
+	/* A write to WDTCTL without 0x5A, or to PMMCTL0, FCTL1, FCTL3 or FCTL4
+	 * without 0xA5, in the high byte. On the chip this causes a PUC and
+	 * nothing is written: the write is recorded in mem_writes, memory keeps
+	 * its contents. */
+	bool password_violation = false;
+	/* A memory access out of step with TCLK and the control signal's R/W bit
+	 * (ReadMemWordXv2, WriteMemWordXv2): a read with no TCLK rise since the
+	 * address load, with TCLK high at the capture, or with the CPU set to
+	 * write; a write with TCLK low or with the CPU set to read. */
+	bool mem_protocol_error = false;
 
 	/* Post a 32-bit value in the target's mailbox output. */
 	void push_jmb_out(uint32_t value) { jmb_out.push_back(value); }
@@ -128,6 +147,8 @@ private:
 			eem_protocol_error = true; /* the data shift never came */
 		}
 		eem_addr_pending_ = false;
+		/* ReadMemWordXv2 captures right after the address load; any other
+		 * instruction ends that read, so the next capture is a register word. */
 		if (ir != msp430::kIrDataCapture) {
 			addr_pending_ = false;
 		}
@@ -154,16 +175,31 @@ private:
 			return pop(quick_words, 0xFFFF);
 		case msp430::kIrJmbExchange:
 			return jmb_shift(value);
+		case msp430::kIrCntrlSig16Bit:
+			cntrl_read_ = (value & 0x0001u) != 0; /* R/W: 1 = read */
+			return 0;
 		case msp430::kIrDataToAddr:
 			mem_writes.push_back({addr_, value});
-			/* WDTCTL reads back with its read password 0x69 */
-			memory[addr_] = addr_ == 0x015C ? static_cast<uint16_t>(0x6900 | (value & 0xFF))
-							 : value;
+			if (!tclk_ || cntrl_read_) {
+				mem_protocol_error = true;
+			}
+			if (!password_ok(addr_, value)) {
+				password_violation = true; /* a PUC on the chip: no write */
+				return 0;
+			}
+			/* WDTCTL reads back with its read password; WDTCNTCL (bit 3)
+			 * reads 0 */
+			memory[addr_] = addr_ == kWdtctl ? static_cast<uint16_t>(kWdtctlRead | (value & 0xF7))
+							  : value;
 			return 0;
 		case msp430::kIrDataCapture:
 			if (addr_pending_) {
 				addr_pending_ = false;
-				return memory.count(addr_) != 0 ? memory[addr_] : 0;
+				if (!addr_clocked_ || tclk_ || !cntrl_read_) {
+					mem_protocol_error = true;
+				}
+				const auto it = memory.find(addr_);
+				return it != memory.end() ? it->second : 0;
 			}
 			return pop(captured, 0);
 		case msp430::kIrEmexReadControl:
@@ -185,6 +221,7 @@ private:
 		if (ir_ == msp430::kIrAddr16Bit) {
 			addr_ = value;
 			addr_pending_ = true;
+			addr_clocked_ = false;
 		}
 		if (ir_ == msp430::kIrAddrCapture) {
 			return pop(mab_script, mab);
@@ -221,8 +258,17 @@ private:
 	}
 
 public:
-	void set_tclk() override { log.push_back("tclk:1"); }
-	void clr_tclk() override { log.push_back("tclk:0"); }
+	void set_tclk() override
+	{
+		log.push_back("tclk:1");
+		tclk_ = true;
+		addr_clocked_ = true;
+	}
+	void clr_tclk() override
+	{
+		log.push_back("tclk:0");
+		tclk_ = false;
+	}
 	void delay_ms(uint32_t ms) override { log.push_back("delay:" + std::to_string(ms)); }
 	uint32_t millis() override
 	{
@@ -237,6 +283,22 @@ private:
 		char buf[32];
 		std::snprintf(buf, sizeof(buf), f, v);
 		return buf;
+	}
+	/* the key in the high byte of a password-protected register */
+	static bool password_ok(uint32_t addr, uint16_t value)
+	{
+		const unsigned key = value >> 8;
+		switch (addr) {
+		case kWdtctl:
+			return key == 0x5A;
+		case 0x0120: /* PMMCTL0 */
+		case 0x0140: /* FCTL1 */
+		case 0x0144: /* FCTL3 */
+		case 0x0146: /* FCTL4 */
+			return key == 0xA5;
+		default:
+			return true;
+		}
 	}
 	template <typename T>
 	static T pop(std::deque<T> &q, std::type_identity_t<T> fallback)
@@ -299,4 +361,7 @@ private:
 	uint8_t ir_ = 0;
 	uint32_t addr_ = 0;
 	bool addr_pending_ = false;
+	bool tclk_ = false;         /* TCLK level */
+	bool addr_clocked_ = false; /* set_tclk since the address load (even if TCLK was high) */
+	bool cntrl_read_ = true;    /* R/W bit of the last IR_CNTRL_SIG_16BIT word */
 };
