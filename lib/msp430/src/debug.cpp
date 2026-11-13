@@ -59,6 +59,10 @@
  *    at 0x000E as in MSPDS: MCLK, SMCLK and ACLK stop while the CPU is
  *    halted. It also ends there when the macro fails after switching the
  *    clocks to JCK (0x6D8E); MSPDS then returns with them on JCK;
+ *  - read_regs keeps each value to 20 bits; ReadAllCpuRegsXv2 passes 24
+ *    bits of the capture on. write_reg writes one register (the macro
+ *    writes R1 and R4-R15 together) and refuses a value above 20 bits, an
+ *    odd PC or an SR above 16 bits with BadArg; the macro drops bits 20-23;
  *  - SingleStepXv2 polls up to 496 times as MSPDS does (its counter starts
  *    at 4); if the CPU has not stopped by then, it is stopped as halt()
  *    does, trigger block 0 is restored and Timeout returned (MSPDS returns
@@ -700,6 +704,71 @@ void Debugger::detach(DetachAction action)
 	attached_ = false;
 	running_ = false;
 	reason_ = StopReason::None;
+}
+
+/* i_ReadJmbOut, Bios/src/hil/edt.c:44-57 */
+void Debugger::clear_jmb_out()
+{
+	tap_.ir_shift(kIrJmbExchange);
+	if ((tap_.dr_shift16(0x0000) & kJmbOut1Rdy) != 0) {
+		tap_.dr_shift16(kJmb32Bit | kJmbOutReq);
+		tap_.dr_shift16(0);
+		tap_.dr_shift16(0);
+	}
+}
+
+/* ReadAllCpuRegsXv2.c:58-91, JTAG ID 0x91 */
+Status Debugger::read_regs(uint32_t regs[16])
+{
+	if (!attached_) {
+		return Status::BadState;
+	}
+	if (running_) {
+		return Status::Running;
+	}
+	regs[0] = ctx_.pc;
+	regs[2] = ctx_.sr;
+	regs[3] = 0;
+	tap_.ir_shift(kIrCntrlSigCapture); /* id: 0x91 takes the safe-PC step below */
+	for (unsigned r = 1; r < 16; ++r) {
+		if (r == 2) {
+			r += 2;
+		}
+		regs[r] = read_cpu_reg(mova_to_abs(r)) & 0xFFFFFu;
+		/* JTAG ID 0x91: set the PC to a safe address */
+		set_pc(kSafePc);
+		tap_.ir_shift(kIrCntrlSig16Bit);
+		tap_.dr_shift16(0x0501);
+		tap_.set_tclk();
+		tap_.ir_shift(kIrAddrCapture);
+	}
+	clear_jmb_out();
+	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
+}
+
+/* WriteAllCpuRegsXv2.c:60-85, for one register */
+Status Debugger::write_reg(unsigned index, uint32_t value)
+{
+	if (!attached_) {
+		return Status::BadState;
+	}
+	if (running_) {
+		return Status::Running;
+	}
+	if (index > 15 || index == 3 || value >= kAddressSpace ||
+	    (index == 0 && (value & 1u) != 0) || (index == 2 && value > 0xFFFFu)) {
+		return Status::BadArg;
+	}
+	if (index == 0) {
+		ctx_.pc = value;
+		return Status::Ok;
+	}
+	if (index == 2) {
+		ctx_.sr = static_cast<uint16_t>(value);
+		return Status::Ok;
+	}
+	write_cpu_reg(mova_imm(index, value), static_cast<uint16_t>(value));
+	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
 
 } // namespace msp430

@@ -600,3 +600,67 @@ TEST(debugger_reset_and_halt_with_a_late_init_state_failure_releases_at_the_rese
 	CHECK_LOG(last(f.t.log, want.size()), want);
 	CHECK_EQ(f.t.eem[0x88], 0x000Eu);
 }
+
+TEST(debugger_read_regs_follows_mspds_read_all_cpu_regs)
+{
+	Fx f;
+	f.attached();
+	/* SP, R4..R15: low word, high word each */
+	f.t.captured = {0x43F0, 0x0000, 0x0004, 0x0000, 0x1234, 0x000F};
+	uint32_t regs[16] = {};
+	REQUIRE(f.d.read_regs(regs) == Status::Ok);
+	Log want = {"ir:28"};
+	for (unsigned r : {1u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u}) {
+		want = want + read_reg(0x0060u | (r << 8)) + set_pc(0x0004) +
+		       Log{ir(0xC8), d16(0x0501), "tclk:1", ir(0x21)};
+	}
+	want = want + Log{ir(0x86), d16(0), ir(0x28), d16(0)};
+	CHECK_LOG(f.t.log, want);
+	CHECK_EQ(regs[0], 0x4520u);
+	CHECK_EQ(regs[1], 0x43F0u);
+	CHECK_EQ(regs[2], 0x0008u);
+	CHECK_EQ(regs[3], 0u);
+	CHECK_EQ(regs[4], 0x4u);
+	CHECK_EQ(regs[5], 0xF1234u); /* 20 bits */
+	CHECK_EQ(regs[6], 0u);
+}
+
+TEST(debugger_read_regs_clears_a_full_mailbox)
+{
+	Fx f;
+	f.attached();
+	f.t.push_jmb_out(0x12345678);
+	uint32_t regs[16] = {};
+	REQUIRE(f.d.read_regs(regs) == Status::Ok);
+	CHECK(f.t.jmb_out.empty());
+	CHECK(contains(f.t.log, Log{ir(0x86), d16(0), d16(0x0014), d16(0), d16(0)}));
+}
+
+TEST(debugger_write_reg)
+{
+	Fx f;
+	f.attached();
+	CHECK(f.d.write_reg(12, 0xA5432) == Status::Ok);
+	/* MOVA #0xA5432, R12 */
+	CHECK_LOG(f.t.log, (write_reg(0x0A8C, 0x5432) + Log{"ir:28", "dr16:0000"}));
+	f.t.log.clear();
+	CHECK(f.d.write_reg(0, 0x4600) == Status::Ok); /* PC: context only */
+	CHECK(f.d.write_reg(2, 0x0001) == Status::Ok); /* SR: context only */
+	CHECK(f.t.log.empty());
+	CHECK_EQ(f.d.pc(), 0x4600u);
+	uint32_t regs[16] = {};
+	REQUIRE(f.d.read_regs(regs) == Status::Ok);
+	CHECK_EQ(regs[2], 1u);
+}
+
+TEST(debugger_write_reg_rejects_bad_arguments)
+{
+	Fx f;
+	f.attached();
+	CHECK(f.d.write_reg(3, 0) == Status::BadArg);
+	CHECK(f.d.write_reg(16, 0) == Status::BadArg);
+	CHECK(f.d.write_reg(4, 0x100000) == Status::BadArg);
+	CHECK(f.d.write_reg(0, 0x4601) == Status::BadArg);
+	CHECK(f.d.write_reg(2, 0x10000) == Status::BadArg);
+	CHECK(f.t.log.empty());
+}
