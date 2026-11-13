@@ -333,16 +333,16 @@ already worked into the text above, the others take precedence over it:
 14. The watchdog is held right after the sync, then `FCTL3.BUSY` is waited
     for (up to 100 ms), then the status register is saved (changed in the
     Task 5 review so the watchdog cannot bite during the wait).
-17. The reset-vector substitution on attach applies only to PC 0x0FFFE or
+15. The reset-vector substitution on attach applies only to PC 0x0FFFE or
     0xFFFFE; MSPDS applies it to any address ending in FFFE, which on the
     F5529 includes 0x1FFFE in main flash.
-18. A failure after the CPU is in full emulation (failed init-state check,
+16. A failure after the CPU is in full emulation (failed init-state check,
     WDTCTL without its 0x69 password) restores the PC before releasing the
     CPU, as every TI release does; failures before full emulation release
     without writing anything.
-15. A single step that does not stop in time halts the CPU, restores trigger
+17. A single step that does not stop in time halts the CPU, restores trigger
     block 0 and returns `TIMEOUT`.
-16. `DBG_ATTACH` uses only the normal SBW entry; its full-mode flag is
+18. `DBG_ATTACH` uses only the normal SBW entry; its full-mode flag is
     `BAD_ARG` in B1; `DISCONNECT` in a debug state is `BAD_STATE`; `ERASE`
     and `FLASH_BEGIN` are `PROTECTED`; GDB's `k` detaches instead of killing;
     `monitor speed` takes effect at the next attach; `--allow-flash-write` is
