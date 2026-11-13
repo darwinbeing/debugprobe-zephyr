@@ -339,7 +339,12 @@ already worked into the text above, the others take precedence over it:
 16. A failure after the CPU is in full emulation (failed init-state check,
     WDTCTL without its 0x69 password) restores the PC before releasing the
     CPU, as every TI release does; failures before full emulation release
-    without writing anything.
+    without writing anything to memory. On the reset-and-halt path a failure
+    after the power-on reset leaves the CPU at the safe PC (vacant memory), so
+    instead of a release it gets a second power-on reset; and on every
+    reset-and-halt failure after the clock switch, GENCLKCTRL is set back to
+    0x000E (the macro's own end value) before the release or the reset, so
+    the CPU is never let go with its clocks on the JTAG clock.
 17. A single step that does not stop in time halts the CPU, restores trigger
     block 0 and returns `TIMEOUT`.
 18. `DBG_ATTACH` uses only the normal SBW entry; its full-mode flag is
