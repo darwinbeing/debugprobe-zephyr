@@ -413,6 +413,7 @@ TEST(cpuxv2_connect_fails_when_core_id_is_zero)
 	CHECK(cpu.connect(msp430::EntryMode::Normal, 250000, id) == Status::TargetError);
 	REQUIRE(!t.log.empty());
 	CHECK(t.log.back() == "close");
+	CHECK_EQ(std::count(t.log.begin(), t.log.end(), "close"), 1);
 }
 
 TEST(cpuxv2_connect_fails_when_id_changes_during_sync)
@@ -763,7 +764,9 @@ TEST(cpuxv2_identify_failures_release_the_pins)
 		Cpuxv2 cpu{t};
 		msp430::Identity id;
 		CHECK(cpu.identify(msp430::EntryMode::Normal, 250000, id) == Status::NoTarget);
+		REQUIRE(!t.log.empty());
 		CHECK(t.log.back() == "close");
+		CHECK_EQ(std::count(t.log.begin(), t.log.end(), "close"), 1);
 	}
 	{
 		FakeTap t;
@@ -771,7 +774,9 @@ TEST(cpuxv2_identify_failures_release_the_pins)
 		Cpuxv2 cpu{t};
 		msp430::Identity id;
 		CHECK(cpu.identify(msp430::EntryMode::Normal, 250000, id) == Status::Locked);
+		REQUIRE(!t.log.empty());
 		CHECK(t.log.back() == "close");
+		CHECK_EQ(std::count(t.log.begin(), t.log.end(), "close"), 1);
 	}
 	{
 		FakeTap t;
@@ -779,11 +784,44 @@ TEST(cpuxv2_identify_failures_release_the_pins)
 		Cpuxv2 cpu{t};
 		msp430::Identity id;
 		CHECK(cpu.identify(msp430::EntryMode::Normal, 250000, id) == Status::TargetError);
+		REQUIRE(!t.log.empty());
 		CHECK(t.log.back() == "close");
+		CHECK_EQ(std::count(t.log.begin(), t.log.end(), "close"), 1);
 	}
 }
 
-TEST(cpuxv2_in_full_emulation_is_public)
+TEST(cpuxv2_identify_busy_when_pins_unavailable)
+{
+	FakeTap t;
+	t.open_ok = false;
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.identify(msp430::EntryMode::Normal, 250000, id) == Status::Busy);
+	/* the pins were never taken: no entry, nothing to release */
+	CHECK_LOG(t.log, (Log{"speed:250000", "open"}));
+}
+
+TEST(cpuxv2_identify_magic_pattern_entry)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.identify(msp430::EntryMode::MagicPattern, 250000, id) == Status::Ok);
+	CHECK_EQ(id.jtag_id, 0x91);
+	/* magicPattern() as in connect(), then the same reads as a Normal
+	 * identify(): no control-signal write, no sync, no reset. */
+	CHECK_LOG(t.log, (Log{"speed:250000", "open", "enter:low",
+			      "ir:86", "dr16:0000", "dr16:0001", "dr16:a55a",
+			      "enter:high", "ir:28", "ir:f4", "dr16:4020",
+			      "ir:28", "dr16:aaaa", "ir:28", "dr16:aaaa", "ir:28", "dr16:aaaa",
+			      "ir:e8", "dr16:0000", "ir:e1", "dr20:00000"}));
+	const std::vector<uint16_t> fed = {0xA55A};
+	CHECK(t.jmb_in == fed);
+	CHECK(!t.jmb_protocol_error);
+	CHECK(t.mem_writes.empty());
+}
+
+TEST(cpuxv2_in_full_emulation_needs_the_id_and_a_control_signal_bit)
 {
 	FakeTap t;
 	Cpuxv2 cpu{t};

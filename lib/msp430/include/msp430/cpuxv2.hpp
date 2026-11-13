@@ -28,12 +28,20 @@ public:
 	 * and no ID was read. */
 	Status connect(EntryMode mode, uint32_t slot_hz, Identity &id);
 	/* The first half of connect(): entry, JTAG ID, lock check, core ID and
-	 * device-ID pointer (`id.device_id` stays 0). Does not touch the CPU:
-	 * no sync, no reset. On Ok the pins stay taken and the TAP is ready;
-	 * on failure they are released (same statuses as connect()). */
+	 * device-ID pointer (`id.device_id` stays 0). With EntryMode::Normal it
+	 * does not touch the CPU (entry with RST high, ID and lock reads only).
+	 * MagicPattern resets the device through RST and holds it in the boot
+	 * code; debug attach uses Normal only. On Ok the pins stay taken, the
+	 * CPU keeps running and is not under JTAG control: read_mem, write_mem
+	 * and the flash operations need connect() (or a Debugger sync) first.
+	 * To let go without a reset, close the Tap; disconnect() resets the
+	 * target. On failure the pins are released (same statuses as
+	 * connect()). */
 	Status identify(EntryMode mode, uint32_t slot_hz, Identity &id);
-	/* "Check Init State": the CPU is under JTAG control and synchronized
-	 * (JTAG ID 0x91 captured, and a control-signal bit set). */
+	/* "Check Init State": JTAG ID 0x91 captured and any of control-signal
+	 * bits 0x0301 set. Detects a dead or floating link; it does not prove
+	 * that the CPU is halted or synchronized. Shifts IR and DR, so call it
+	 * only while the pins are taken. */
 	bool in_full_emulation();
 	/* Reset the target through JTAG and release the pins. */
 	void disconnect();
@@ -59,8 +67,9 @@ public:
 	 * the operation's own result.
 	 * flash_end(false) abandons a write. With the Info-A key locked, erasing
 	 * or writing Info segment A is silently ignored by the device and still
-	 * reports Ok. During an active write only flash_data, flash_end, connect
-	 * and disconnect are allowed. */
+	 * reports Ok. During an active write only flash_data, flash_end, connect,
+	 * identify and disconnect are allowed; the last three clear the write
+	 * state. */
 	Status erase(EraseMode mode, uint32_t addr, uint32_t ram_addr);
 	Status flash_begin(uint32_t addr, uint32_t nwords, uint32_t ram_addr);
 	Status flash_data(size_t nwords, const uint8_t *src);
