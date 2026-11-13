@@ -30,6 +30,8 @@ public:
 	virtual uint16_t dr_shift16(uint16_t value) = 0;
 	/* Returns the de-scrambled 20-bit value. */
 	virtual uint32_t dr_shift20(uint32_t value) = 0;
+	/* 32-bit DR shift, MSB first (EEM register access). */
+	virtual uint32_t dr_shift32(uint32_t value) = 0;
 	virtual void set_tclk() = 0;
 	virtual void clr_tclk() = 0;
 

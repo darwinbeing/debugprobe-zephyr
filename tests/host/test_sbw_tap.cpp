@@ -266,3 +266,60 @@ TEST(sbw_tap_dr20_vector_with_tclk_low)
 	CHECK_EQ(c.tdi, 0x0D16246u);
 	CHECK_EQ(c.count, 25u);
 }
+
+TEST(sbw_tap_dr32_is_split_into_two_port_calls)
+{
+	MockSbwPort p;
+	SbwTap t{p};
+	t.reset();
+	p.cycle_calls.clear();
+	t.dr_shift32(0x80000083);
+	/* 3 lead-in + 32 data + 2 trailing cycles = 37: one call of 32, one of 5.
+	 * cycle: 0 (1,T) 1 (0,1) 2 (0,1) | 3..34 data, TMS=1 on 34 | 35 (1,1) | 36 (0,T)
+	 * 0x80000083 MSB first: TDI=1 on cycles 3, 27, 33, 34.
+	 * first call (cycles 0..31): tms = bit 0          = 0x00000001
+	 *                            tdi = bits 0,1,2,3,27 = 0x0800000F
+	 * second call (cycles 32..36): tms = 34, 35 -> bits 2, 3 = 0x0C
+	 *                              tdi = 33, 34, 35, 36 -> bits 1..4 = 0x1E */
+	REQUIRE(p.cycle_calls.size() == 2u);
+	CHECK_EQ(p.cycle_calls[0].count, 32u);
+	CHECK_EQ(p.cycle_calls[0].tms, 0x00000001u);
+	CHECK_EQ(p.cycle_calls[0].tdi, 0x0800000Fu);
+	CHECK_EQ(p.cycle_calls[1].count, 5u);
+	CHECK_EQ(p.cycle_calls[1].tms, 0x0Cu);
+	CHECK_EQ(p.cycle_calls[1].tdi, 0x1Eu);
+	REQUIRE(!p.scans.empty());
+	CHECK(p.scans.back() == (MockSbwPort::Scan{false, 32, 0x80000083}));
+	CHECK_EQ(p.state, MockSbwPort::RTI);
+	CHECK(!p.tclk_glitch);
+	CHECK(!p.bad_count);
+}
+
+TEST(sbw_tap_dr32_assembles_tdo_across_the_calls)
+{
+	MockSbwPort p;
+	SbwTap t{p};
+	t.reset();
+	/* 0xC0000003: data bits on cycles 3, 4 (first call) and 33, 34 (second
+	 * call, bits 1 and 2). */
+	p.tdo_script.push_back((1u << 3) | (1u << 4));
+	p.tdo_script.push_back((1u << 1) | (1u << 2));
+	CHECK_EQ(t.dr_shift32(0), 0xC0000003u);
+}
+
+TEST(sbw_tap_dr32_with_tclk_low_keeps_tclk_low)
+{
+	MockSbwPort p;
+	SbwTap t{p};
+	t.reset();
+	t.clr_tclk();
+	p.cycle_calls.clear();
+	t.dr_shift32(0x12345678);
+	REQUIRE(p.cycle_calls.size() == 2u);
+	CHECK_EQ(p.cycle_calls[0].tdi & 1u, 0u);          /* cycle 0: TDI = TCLK = 0 */
+	CHECK_EQ((p.cycle_calls[1].tdi >> 4) & 1u, 0u);   /* cycle 36: TDI = TCLK = 0 */
+	CHECK(!p.tclk_glitch);
+	CHECK(!p.tclk);
+	REQUIRE(!p.scans.empty());
+	CHECK_EQ(p.scans.back().value, 0x12345678u);
+}

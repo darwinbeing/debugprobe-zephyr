@@ -22,6 +22,7 @@ public:
 	uint8_t ir_shift(uint8_t ir) override;
 	uint16_t dr_shift16(uint16_t value) override;
 	uint32_t dr_shift20(uint32_t value) override;
+	uint32_t dr_shift32(uint32_t value) override;
 	void set_tclk() override;
 	void clr_tclk() override;
 

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <deque>
+#include <map>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -38,8 +39,14 @@ public:
 	uint32_t millis_now = 0;
 	uint32_t millis_step = 1;
 
+	/* EEM registers behind IR_EMEX_DATA_EXCHANGE32, by even address. A
+	 * 32-bit shift carries an address (bit 0 set: read); the next shift
+	 * returns the register (read) or stores its value (write). */
+	std::map<uint8_t, uint32_t> eem;
+
 	/* --- recordings --- */
 	std::vector<std::string> log;
+	std::vector<std::pair<uint8_t, uint32_t>> eem_writes; /* (address, value) */
 	std::vector<std::pair<uint32_t, uint16_t>> mem_writes; /* (address, data) */
 	std::vector<uint16_t> jmb_in;         /* words the probe wrote to the mailbox */
 	bool jmb_protocol_error = false;      /* unexpected mailbox control word */
@@ -79,6 +86,11 @@ public:
 		const uint32_t v = dr_shift20_(value);
 		return floating() ? 0xFFFFF : v;
 	}
+	uint32_t dr_shift32(uint32_t value) override
+	{
+		const uint32_t v = dr_shift32_(value);
+		return floating() ? 0xFFFFFFFFu : v;
+	}
 
 private:
 	/* Counts one shift; true if this one reads all ones. */
@@ -92,6 +104,7 @@ private:
 	{
 		ir_ = ir;
 		jmb_phase_ = JmbPhase::Control;
+		eem_addr_pending_ = false;
 		if (ir == msp430::kIrCntrlSigRelease && has_cntrl_sig_after_release) {
 			cntrl_sig = cntrl_sig_after_release;
 		}
@@ -130,6 +143,27 @@ private:
 			return 0;
 		}
 		return ((device_id_ptr << 16) + (device_id_ptr >> 4)) & 0xFFFFFu;
+	}
+
+	uint32_t dr_shift32_(uint32_t value)
+	{
+		log.push_back(fmt("dr32:%08x", value));
+		if (ir_ != msp430::kIrEmexDataExchange32) {
+			return 0;
+		}
+		if (!eem_addr_pending_) {
+			eem_addr_ = static_cast<uint8_t>(value);
+			eem_addr_pending_ = true;
+			return 0;
+		}
+		eem_addr_pending_ = false;
+		const uint8_t reg = static_cast<uint8_t>(eem_addr_ & 0xFEu);
+		if ((eem_addr_ & 1u) != 0) {
+			return eem.count(reg) != 0 ? eem[reg] : 0;
+		}
+		eem[reg] = value;
+		eem_writes.push_back({reg, value});
+		return 0;
 	}
 
 public:
@@ -206,6 +240,8 @@ private:
 	}
 
 	JmbPhase jmb_phase_ = JmbPhase::Control;
+	bool eem_addr_pending_ = false;
+	uint8_t eem_addr_ = 0;
 	uint8_t ir_ = 0;
 	uint32_t addr_ = 0;
 };

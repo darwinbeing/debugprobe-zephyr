@@ -113,33 +113,43 @@ void SbwTap::reset()
  * TDI follows the saved TCLK level on the first and last cycle so that TCLK
  * does not change while the TAP leaves and re-enters Run-Test/Idle.
  *
- * `nbits` must be 1..26 for an IR scan (4 lead-in cycles) and 1..27 for a DR
- * scan (3 lead-in cycles), because head + nbits + 2 cycles must fit the 32
- * cycles of one port call; callers pass 8, 16 and 20.
+ * `nbits` is 1..32. One port call clocks at most 32 cycles, so a longer scan
+ * (the 32-bit DR scan has 3 + 32 + 2 = 37 cycles) is split into several
+ * calls. Between two calls SBWTCK stays high and the TAP stays in Shift-DR;
+ * SBW limits only the low phase of SBWTCK, not the high phase.
  */
 uint32_t SbwTap::scan(bool ir, unsigned nbits, uint32_t data)
 {
 	const unsigned head = ir ? 4u : 3u;
-	uint32_t tms = ir ? 0b0011u : 0b001u;
-	uint32_t tdi = (ir ? 0b1110u : 0b110u) | (tclk_ ? 1u : 0u);
+	const unsigned total = head + nbits + 2u;
+	uint64_t tms = ir ? 0b0011u : 0b001u;
+	uint64_t tdi = (ir ? 0b1110u : 0b110u) | (tclk_ ? 1u : 0u);
 
 	for (unsigned k = 0; k < nbits; ++k) {
 		if ((data >> (nbits - 1u - k)) & 1u) {
-			tdi |= 1u << (head + k);
+			tdi |= uint64_t{1} << (head + k);
 		}
 	}
-	tms |= 1u << (head + nbits - 1u); /* last data bit: Exit1 */
-	tms |= 1u << (head + nbits);      /* Update */
-	tdi |= 1u << (head + nbits);
+	tms |= uint64_t{1} << (head + nbits - 1u); /* last data bit: Exit1 */
+	tms |= uint64_t{1} << (head + nbits);      /* Update */
+	tdi |= uint64_t{1} << (head + nbits);
 	if (tclk_) {
-		tdi |= 1u << (head + nbits + 1u); /* Run-Test/Idle: TDI = TCLK */
+		tdi |= uint64_t{1} << (head + nbits + 1u); /* Run-Test/Idle: TDI = TCLK */
 	}
 
-	const uint32_t tdo = port_.cycles(tms, tdi, head + nbits + 2u);
+	uint64_t tdo = 0;
+	for (unsigned done = 0; done < total;) {
+		const unsigned n = (total - done > 32u) ? 32u : total - done;
+		const uint32_t mask = (n == 32u) ? 0xFFFFFFFFu : ((1u << n) - 1u);
+		const uint32_t part = port_.cycles(static_cast<uint32_t>(tms >> done) & mask,
+						   static_cast<uint32_t>(tdi >> done) & mask, n);
+		tdo |= static_cast<uint64_t>(part & mask) << done;
+		done += n;
+	}
 
 	uint32_t out = 0;
 	for (unsigned k = 0; k < nbits; ++k) {
-		out = (out << 1) | ((tdo >> (head + k)) & 1u);
+		out = (out << 1) | static_cast<uint32_t>((tdo >> (head + k)) & 1u);
 	}
 	return out;
 }
@@ -159,6 +169,13 @@ uint32_t SbwTap::dr_shift20(uint32_t value)
 	const uint32_t v = scan(false, 20, value & 0xFFFFFu);
 	/* AllShifts, F_ADDR: de-scramble the 20-bit result. */
 	return ((v << 16) + (v >> 4)) & 0xFFFFFu;
+}
+
+/* MSPDS hil_2w.c, _hil_2w_SetReg_XBits32: same framing, 32 data bits, no
+ * de-scramble. */
+uint32_t SbwTap::dr_shift32(uint32_t value)
+{
+	return scan(false, 32, value);
 }
 
 /* SetTCLK_sbw / ClrTCLK_sbw: one Run-Test/Idle cycle whose TDI slot carries
