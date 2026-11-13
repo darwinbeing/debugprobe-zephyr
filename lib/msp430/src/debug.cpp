@@ -11,32 +11,43 @@
  * Deliberate differences from MSPDS:
  *  - a sync that does not complete (SyncJtagXv2, wait_for_synch), a CPU pipe
  *    that never empties, or a JTAG ID other than 0x91 in the IR capture of
- *    SyncJtagXv2 (MSPDS discards it there) ends the operation with
- *    TargetError; the CPU, not yet in full emulation, is then released
- *    without anything written (MSPDS carries on);
+ *    SyncJtagXv2 (MSPDS discards it there) or at the start of
+ *    SyncJtag_AssertPor_SaveContextXv2 (MSPDS takes the other devices'
+ *    paths there) ends the operation with TargetError; the CPU, not yet in
+ *    full emulation, is then released without anything written (MSPDS
+ *    carries on, except that a failed wait_for_synch returns an error
+ *    without releasing the CPU);
  *  - WDTCTL is checked for its read password 0x69 before it is written, not
  *    afterwards as the DLL does (WatchdogControl::checkRead);
  *  - "check for Init State" after a sync is Cpuxv2::in_full_emulation(),
  *    which also checks the JTAG ID; read_mem, write_mem, read_regs and
  *    write_reg end with the same check;
  *  - when the init-state check or the WDTCTL password check fails during a
- *    sync, the CPU is already in full emulation: it is released at the PC
+ *    sync (MSPDS checks neither, in both sync macros), the CPU is already in
+ *    full emulation and the operation ends with TargetError. After
+ *    SyncJtag_Conditional_SaveContextXv2 the CPU is released at the PC
  *    where it stopped (SetPcXv2 and the release of
  *    RestoreContext_ReleaseJtagXv2, the PC 2 lower if the control signal
- *    shows CPUOFF), SR and WDTCTL unwritten, and the operation ends with
- *    TargetError (SyncJtag_Conditional_SaveContextXv2 checks neither);
+ *    shows CPUOFF), SR and WDTCTL unwritten. In
+ *    SyncJtag_AssertPor_SaveContextXv2 the power-on reset has left the CPU
+ *    at SAFE_PC_ADDRESS (0x0004, vacant memory) and the reset vector is not
+ *    read yet: the CPU gets another power-on reset (EEM off,
+ *    ReleaseDevice_430Xv2(V_RESET), as detach(Reset)) and starts at its
+ *    reset vector;
  *  - the PC derived from the MAB (MAB - 4, or - 2 in a low-power mode) is
  *    kept to 20 bits; MSPDS computes it in 32 bits, so a MAB below 4 wraps
  *    to 0xFFFFFFFx there and to 0xFFFFx here;
  *  - that PC is replaced by the reset vector read from 0xFFFE only when it
  *    is 0x0FFFE or 0xFFFFE (Note 1495, 1637); MSPDS replaces any PC ending
  *    in FFFE, which includes 0x1FFFE in the F5529's main flash;
- *  - after the watchdog is held and before SR is saved, the sync waits up to
- *    100 ms for the flash controller to finish an erase or write the
- *    firmware had started (FCTL3.BUSY; not in MSPDS). The design spec
- *    (item 14) originally put this wait before the hold; the Task 5 review
- *    changed both. Holding first keeps the watchdog from resetting the
- *    device during the wait;
+ *  - after the watchdog is held and before SR is saved,
+ *    SyncJtag_Conditional_SaveContextXv2 waits up to 100 ms for the flash
+ *    controller to finish an erase or write the firmware had started
+ *    (FCTL3.BUSY; not in MSPDS). The design spec (item 14) originally put
+ *    this wait before the hold; the Task 5 review changed both. Holding
+ *    first keeps the watchdog from resetting the device during the wait.
+ *    The reset-and-halt sync does not wait: after its power-on reset no
+ *    flash operation can be running;
  *  - SyncJtag_AssertPor_SaveContextXv2 leaves out the per-module clock
  *    control (ETKEYSEL/ETCLKSEL), whose module codes come from the DLL's
  *    device database; the modules keep their reset defaults. GENCLKCTRL ends
@@ -130,7 +141,7 @@ constexpr uint32_t kCmpEqualFetchMab = 0x0000; /* CMP_EQUAL + TRIG_0 + MAB */
 constexpr uint32_t kMaskAll = 0xFFFFF;
 constexpr uint32_t kNoMask = 0x00000;
 constexpr uint32_t kStopClocks = 0x000E;    /* *_SEL0 + STOP_MCLK + STOP_SMCLK + STOP_ACLK */
-constexpr uint32_t kJclkStopClocks = 0x7F8E; /* *_SEL3 + STOP_MCLK + STOP_SMCLK + STOP_ACLK */
+constexpr uint32_t kJclkStopClocks = 0x6D8E; /* *_SEL3 + STOP_MCLK + STOP_SMCLK + STOP_ACLK */
 
 /* Loop limits, as in MSPDS */
 constexpr unsigned kEemStopPolls = 3000;
@@ -298,6 +309,19 @@ bool Debugger::sync_jtag()
 	return false;
 }
 
+/* wait_for_synch, edt.h:819-830 (50 polls; MSPDS reads up to 51 times but
+ * fails on the 51st anyway). */
+bool Debugger::wait_for_sync()
+{
+	tap_.ir_shift(kIrCntrlSigCapture);
+	for (unsigned i = 0; i < kSyncPolls; ++i) {
+		if ((tap_.dr_shift16(0) & kSigSync) != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* eem_read_control() + SetReg_16Bits(0) */
 uint16_t Debugger::read_control()
 {
@@ -348,6 +372,17 @@ void Debugger::release_unsaved(uint32_t pc, bool cpuoff)
 {
 	release_at(pc, cpuoff, kEmuClkEn | kClearStop);
 	tap_.close();
+	attached_ = false;
+	running_ = false;
+}
+
+/* EEM off, then ReleaseDevice_430Xv2(V_RESET) (Cpuxv2::disconnect): a
+ * power-on reset, after which the CPU starts at its reset vector. Lets go of
+ * the pins. */
+void Debugger::release_with_reset()
+{
+	write_control(kEmuClkEn | kClearStop);
+	cpu_.disconnect();
 	attached_ = false;
 	running_ = false;
 }
@@ -485,6 +520,80 @@ Status Debugger::sync_conditional()
 	return Status::Ok;
 }
 
+/* SyncJtag_AssertPor_SaveContextXv2.c:68-228, JTAG ID 0x91 */
+Status Debugger::sync_assert_por()
+{
+	if (tap_.ir_shift(kIrCntrlSigCapture) != kJtagId91) {
+		abandon();
+		return Status::TargetError;
+	}
+	/* switch all functional clocks to JCK = 1 and stop them */
+	tap_.ir_shift(kIrEmexDataExchange32);
+	eem_write(kGenClkCtrl, kJclkStopClocks);
+	write_control(kEmuClkEn | kEemEn);
+	tap_.ir_shift(kIrCntrlSig16Bit);
+	tap_.dr_shift16(0x1501);
+	if (!wait_for_sync()) {
+		abandon();
+		return Status::TargetError;
+	}
+	tap_.clr_tclk(); /* one more clock to empty the pipe */
+	tap_.set_tclk();
+	tap_.ir_shift(kIrCntrlSig16Bit);
+	tap_.dr_shift16(0x0C01); /* release CPUFLUSH, apply POR */
+	tap_.delay_ms(kPorDelayMs);
+	tap_.dr_shift16(0x0401); /* release POR */
+	/* force the PC to a safe address (JMP $) */
+	tap_.ir_shift(kIrData16Bit);
+	tap_.clr_tclk();
+	tap_.set_tclk();
+	tap_.clr_tclk();
+	tap_.set_tclk();
+	tap_.dr_shift16(kSafePc);
+	tap_.clr_tclk();
+	tap_.set_tclk();
+	tap_.clr_tclk(); /* JTAG ID 0x91: one more */
+	tap_.set_tclk();
+	tap_.ir_shift(kIrDataCapture);
+	/* two more to release the CPU-internal POR delay signals */
+	tap_.clr_tclk();
+	tap_.set_tclk();
+	tap_.clr_tclk();
+	tap_.set_tclk();
+	tap_.ir_shift(kIrCntrlSig16Bit);
+	tap_.dr_shift16(0x0501); /* set CPUFLUSH */
+	tap_.clr_tclk();
+	tap_.set_tclk();
+	write_control(kEmuFeatEn | kEmuClkEn | kClearStop);
+	/* "check that sequence exits on Init State" (unchecked in MSPDS), then
+	 * hold the watchdog. On failure the CPU is in full emulation with its PC
+	 * at SAFE_PC, so it is reset again rather than let go there; see the
+	 * file header. No flash wait: after the POR no flash operation runs. */
+	if (!cpu_.in_full_emulation() || !hold_watchdog()) {
+		release_with_reset();
+		return Status::TargetError;
+	}
+	tap_.ir_shift(kIrAddrCapture); /* MAB; JTAG ID 0x91 takes the reset vector */
+	tap_.dr_shift20(0);
+	ctx_.pc = read_word(kResetVector);
+	ctx_.sr = 0; /* always 0 after a POR */
+	ctx_.irq = 0;
+	/* module clock control (ETKEYSEL/ETCLKSEL): not ported, see the header */
+	tap_.ir_shift(kIrEmexDataExchange32);
+	eem_write(kGenClkCtrl, kStopClocks);
+	/* JTAG ID 0x91: reset the vacant-memory flag in SFRIFG1 */
+	const uint16_t sfr = read_word(kSfrIfg1);
+	if ((sfr & kVmaIfg) != 0) {
+		set_pc(kSafePc);
+		tap_.ir_shift(kIrCntrlSig16Bit);
+		tap_.dr_shift16(0x0501);
+		tap_.set_tclk();
+		tap_.ir_shift(kIrAddrCapture);
+		write_word(kSfrIfg1, static_cast<uint16_t>(sfr & ~kVmaIfg));
+	}
+	return Status::Ok;
+}
+
 /* RestoreContext_ReleaseJtagXv2.c:69-196 with mdb = 0 (no software
  * breakpoints), releaseJtag = 0 and ulpDebug = 0. */
 void Debugger::restore_and_release(uint16_t eem_control)
@@ -534,9 +643,6 @@ void Debugger::clear_triggers()
 
 Status Debugger::attach(AttachMode mode, uint32_t slot_hz, Identity &id)
 {
-	if (mode != AttachMode::Running) {
-		return Status::BadArg; /* AttachMode::Reset comes with sync_assert_por() */
-	}
 	detach(DetachAction::Run);
 	const Status st = cpu_.identify(EntryMode::Normal, slot_hz, id);
 	if (st != Status::Ok) {
@@ -544,7 +650,7 @@ Status Debugger::attach(AttachMode mode, uint32_t slot_hz, Identity &id)
 	}
 	attached_ = true;
 	running_ = false;
-	const Status sync = sync_conditional();
+	const Status sync = (mode == AttachMode::Reset) ? sync_assert_por() : sync_conditional();
 	if (sync != Status::Ok) {
 		return sync;
 	}
@@ -554,7 +660,7 @@ Status Debugger::attach(AttachMode mode, uint32_t slot_hz, Identity &id)
 		detach(DetachAction::Run);
 		return Status::TargetError;
 	}
-	reason_ = StopReason::Request;
+	reason_ = (mode == AttachMode::Reset) ? StopReason::Reset : StopReason::Request;
 	bp_hit_ = kNoBreakpoint;
 	return Status::Ok;
 }
@@ -566,8 +672,7 @@ void Debugger::detach(DetachAction action)
 	}
 	clear_triggers();
 	if (action == DetachAction::Reset) {
-		write_control(kEmuClkEn | kClearStop);
-		cpu_.disconnect(); /* ReleaseDevice_430Xv2(V_RESET), pins released */
+		release_with_reset();
 	} else {
 		restore_and_release(kEmuClkEn | kClearStop); /* DLL run(): EEM off */
 		tap_.close();

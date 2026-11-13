@@ -30,7 +30,9 @@ public:
 	 * Cpuxv2::connect. On failure the pins are released and the CPU is let
 	 * go: before it reached full emulation with nothing written; in full
 	 * emulation before its context was saved, at the PC where it stopped
-	 * (SR and WDTCTL unwritten); after that with its context restored, as
+	 * (SR and WDTCTL unwritten), except that with Reset, whose power-on
+	 * reset left the CPU at a safe address, it gets another power-on reset
+	 * as detach(Reset) does; after that with its context restored, as
 	 * detach(Run) does. */
 	Status attach(AttachMode mode, uint32_t slot_hz, Identity &id);
 	/* Clear the triggers, then Run: restore the context and let the program
@@ -94,6 +96,7 @@ private:
 	void restore_and_release(uint16_t eem_control);
 	void release_at(uint32_t pc, bool cpuoff, uint16_t eem_control);
 	void release_unsaved(uint32_t pc, bool cpuoff);
+	void release_with_reset();
 	void abandon();
 	void clear_triggers();
 	void clear_jmb_out();

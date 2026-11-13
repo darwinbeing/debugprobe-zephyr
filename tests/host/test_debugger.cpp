@@ -419,3 +419,103 @@ TEST(debugger_detach_with_reset)
 						  "dr16:0401", "ir:a8", "close"});
 	CHECK(!f.d.attached());
 }
+
+namespace {
+
+/* SyncJtag_AssertPor_SaveContextXv2.c:68-228, JTAG ID 0x91, sync at the
+ * first look, SFRIFG1 without the vacant-memory flag. GENCLKCTRL first gets
+ * MCLK_SEL3 + SMCLK_SEL3 + ACLK_SEL3 + STOP_MCLK + STOP_SMCLK + STOP_ACLK
+ * = 0x6D8E (EEM_defs.h; TI's compiled HALs load the same constant). */
+Log assert_por_log(unsigned wdt)
+{
+	return Log{ir(0x28), ir(0xB0)} + eem_write(0x88, 0x6D8E) +
+	       Log{ir(0x30), d16(0x0005), ir(0xC8), d16(0x1501), ir(0x28), d16(0)} + kTclk +
+	       Log{ir(0xC8), d16(0x0C01), "delay:40", d16(0x0401), ir(0x82)} + kTclk + kTclk +
+	       Log{d16(0x0004)} + kTclk + kTclk + Log{ir(0x42)} + kTclk + kTclk +
+	       Log{ir(0xC8), d16(0x0501)} + kTclk + Log{ir(0x30), d16(0x000E), ir(0x28), d16(0)} +
+	       read_word(0x015C) + write_word(0x015C, 0x5A80u | (wdt & 0xFFu)) +
+	       Log{ir(0x21), d20(0)} + read_word(0xFFFE) + Log{ir(0xB0)} +
+	       eem_write(0x88, 0x000E) + read_word(0x0102);
+}
+
+/* EEM off, then ReleaseDevice_430Xv2(V_RESET) (Cpuxv2::disconnect) */
+const Log kResetRelease = {"ir:30", "dr16:0006", "ir:c8", "dr16:0c01", "dr16:0401", "ir:a8",
+			   "close"};
+
+} // namespace
+
+TEST(debugger_reset_and_halt_follows_mspds_assert_por)
+{
+	Fx f;
+	REQUIRE(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::Ok);
+	const Log want = identify_log() + assert_por_log(0x6904) + read_word(0x1A04) +
+			 clear_triggers() + Log{"ir:28", "dr16:0000"};
+	CHECK_LOG(f.t.log, want);
+	CHECK_EQ(f.d.pc(), 0x441Au); /* the reset vector's target */
+	CHECK(f.d.stop_reason() == StopReason::Reset);
+	f.t.log.clear();
+	f.d.detach(DetachAction::Run);
+	CHECK(contains(f.t.log, write_reg(0x0082, 0))); /* SR is 0 after a POR */
+}
+
+TEST(debugger_reset_and_halt_clears_the_vacant_memory_flag)
+{
+	Fx f;
+	f.t.memory[0x0102] = 0x000C; /* VMAIFG and another flag */
+	REQUIRE(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::Ok);
+	CHECK(contains(f.t.log, read_word(0x0102) + set_pc(0x0004) +
+					Log{ir(0xC8), d16(0x0501), "tclk:1", ir(0x21)} +
+					write_word(0x0102, 0x0004)));
+}
+
+TEST(debugger_reset_and_halt_without_sync_releases)
+{
+	Fx f;
+	f.t.cntrl_sig = 0x0101;
+	CHECK(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::TargetError);
+	CHECK(!contains(f.t.log, Log{"dr16:0c01"})); /* no POR without sync */
+	CHECK(f.t.mem_writes.empty());
+	REQUIRE(!f.t.log.empty());
+	CHECK(f.t.log.back() == "close");
+}
+
+TEST(debugger_reset_and_halt_refuses_another_jtag_id)
+{
+	Fx f;
+	/* The seventh IR shift is the macro's own capture (identify 6). */
+	f.t.jtag_id_script = {0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x98};
+	CHECK(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::TargetError);
+	CHECK(f.t.jtag_id_script.empty());
+	CHECK(f.t.mem_writes.empty());
+	CHECK(!f.d.attached());
+	/* no clock switch, no POR: released at once with nothing written */
+	CHECK_LOG(f.t.log, identify_log() + Log{"ir:28", "ir:30", "dr16:0006", "ir:a8", "close"});
+}
+
+TEST(debugger_reset_and_halt_with_a_failed_init_state_check_resets_again)
+{
+	Fx f;
+	/* Five control-signal reads up to the init-state check (lock check 3,
+	 * wait_for_synch, init state); the check sees none of the bits 0x0301. */
+	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0000};
+	CHECK(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(f.t.mem_writes.empty());
+	CHECK(!f.d.attached());
+	/* The CPU sits at SAFE_PC (0x0004, vacant memory) after the POR: it is
+	 * not let go there but reset again, so it starts at its reset vector. */
+	const Log want = Log{"ir:30", "dr16:000e", "ir:28", "dr16:0000"} + kResetRelease;
+	CHECK_LOG(last(f.t.log, want.size()), want);
+}
+
+TEST(debugger_reset_and_halt_refuses_a_watchdog_without_its_password)
+{
+	Fx f;
+	f.t.memory[0x015C] = 0x0000; /* link fault: not a WDTCTL read */
+	CHECK(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::TargetError);
+	CHECK(f.t.mem_writes.empty());
+	CHECK(!f.d.attached());
+	CHECK(!contains(f.t.log, read_word(0xFFFE)));
+	const Log want = read_word(0x015C) + kResetRelease;
+	CHECK_LOG(last(f.t.log, want.size()), want);
+}
