@@ -1,5 +1,6 @@
 import io
 import os
+import signal
 import socket
 import struct
 import sys
@@ -13,7 +14,8 @@ import devices  # noqa: E402
 import gdbserver  # noqa: E402
 import probe as probe_mod  # noqa: E402
 import rsp  # noqa: E402
-from fake_firmware import NO_TARGET, TIMEOUT, FakeFirmware  # noqa: E402
+from fake_firmware import (BAD_STATE, BUSY, NO_TARGET, TARGET_ERROR, TIMEOUT,  # noqa: E402
+                           FakeFirmware)
 from probe import ProbeError, SbwProbe  # noqa: E402
 
 
@@ -62,7 +64,7 @@ class ServerFixture(unittest.TestCase):
         self.fw = FakeFirmware()
         self.out = io.StringIO()
         self.server = gdbserver.GdbServer(SbwProbe(self.fw), devices.MSP430F5529,
-                                          out=self.out, poll_interval=0.001)
+                                          out=self.out, poll_interval=0.001, linger=0.05)
         self.server_sock, client_sock = socket.socketpair()
         self.gdb = Client(client_sock)
         self.error = None
@@ -71,7 +73,7 @@ class ServerFixture(unittest.TestCase):
     def _serve(self):
         try:
             self.server.serve_connection(self.server_sock)
-        except ProbeError as e:
+        except (ProbeError, KeyboardInterrupt) as e:
             self.error = e
         finally:
             self.server_sock.close()
@@ -283,7 +285,7 @@ class RunControlTest(ServerFixture):
         replies = [self.gdb.reply(), self.gdb.reply()]
         self.assertTrue(replies[0].startswith("O"))
         self.assertIn("target lost", bytes.fromhex(replies[0][1:]).decode())
-        self.assertEqual(replies[1], "W00")
+        self.assertEqual(replies[1], "X1d")  # SIGLOST
         self.thread.join(5)
         self.assertEqual(self.fw.detaches, [])  # nothing left to detach
 
@@ -346,7 +348,9 @@ class MonitorTest(ServerFixture):
 
     def test_reset(self):
         self.start()
-        self.assertIn("halted at 0x0441A", self.monitor("reset"))
+        text = self.monitor("reset")
+        self.assertIn("halted at 0x0441A", text)
+        self.assertIn("maintenance flush register-cache", text)
         self.assertEqual([a[0] for a in self.fw.attaches], [0, 1])
         self.assertEqual(self.gdb.cmd("?"), "T0500:1a440000;")
 
@@ -589,6 +593,409 @@ class MalformedPacketTest(ServerFixture):
             self.assertEqual(self.gdb.cmd(packet), "", packet)
 
 
+# ---- the Task 18 review ----
+
+class FaultyTransport:
+    """FakeFirmware behind a link that fails once on `op`: `error` is raised
+    after the firmware has handled the request, so its answer is lost."""
+
+    def __init__(self, fw, op, error):
+        self.fw, self.op, self.error = fw, op, error
+
+    def transfer(self, request, timeout_ms=3000):
+        response = self.fw.transfer(request, timeout_ms)
+        if self.op is not None and request[1:2] == bytes([self.op]):
+            self.op = None
+            raise self.error
+        return response
+
+
+class FlakySocket:
+    """The server's end of the connection, whose recv or sendall can be made to fail."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.fail_recv = self.fail_send = False
+
+    def fileno(self):
+        return self.sock.fileno()
+
+    def recv(self, n):
+        if self.fail_recv:
+            raise ConnectionResetError("connection reset by peer")
+        return self.sock.recv(n)
+
+    def sendall(self, data):
+        if self.fail_send:
+            raise BrokenPipeError("broken pipe")
+        return self.sock.sendall(data)
+
+    def close(self):
+        self.sock.close()
+
+
+class InterruptWhileSteppingTest(ServerFixture):
+    """GDB's stepi N sends one step after the other; Ctrl-C must end the series."""
+
+    def test_an_interrupt_with_the_step_stops_after_it(self):
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"vCont;s:1") + b"\x03")
+        self.assertEqual(self.gdb.reply(), "T0200:22450000;")
+        self.assertEqual(self.fw.steps, 1)
+        self.assertEqual(self.gdb.cmd("vCont;s:1"), "T0500:24450000;")  # used up
+
+    def test_an_interrupt_between_steps_answers_the_next_step_without_stepping(self):
+        self.start()
+        self.assertEqual(self.gdb.cmd("vCont;s:1"), "T0500:22450000;")
+        self.gdb.sock.sendall(b"\x03")
+        self.assertEqual(self.gdb.cmd("vCont;s:1"), "T0200:22450000;")
+        self.assertEqual(self.fw.steps, 1)
+
+    def test_an_interrupt_while_halted_answers_the_next_continue_without_resuming(self):
+        self.start()
+        self.gdb.sock.sendall(b"\x03")
+        self.assertEqual(self.gdb.cmd("g")[:8], "20450000")  # other packets are unaffected
+        self.assertEqual(self.gdb.cmd("vCont;c"), "T0200:20450000;")
+        self.assertEqual(self.fw.resumes, 0)
+        self.assertEqual(self.fw.state, probe_mod.STATE_DEBUG_HALTED)
+        self.assertEqual(self.gdb.cmd("Z1,4600,2"), "OK")
+        self.assertEqual(self.gdb.cmd("c"), "T05hwbreak:;00:00460000;")  # used up
+        self.assertEqual(self.fw.resumes, 1)
+
+
+class InterruptAtAStopTest(ServerFixture):
+    def test_an_interrupt_that_arrives_with_a_breakpoint_stop_is_used_up_by_it(self):
+        gdb, fw = self.gdb, self.fw
+        polls = []
+
+        class CtrlCAtTheStop:  # GDB's 0x03 arrives while DBG_STATUS finds the stop
+            def transfer(self, request, timeout_ms=3000):
+                response = fw.transfer(request, timeout_ms)
+                if request[1:2] == bytes([probe_mod.OP_DBG_STATUS]):
+                    polls.append(response)
+                    if len(polls) == fw.run_polls:
+                        gdb.sock.sendall(b"\x03")
+                return response
+
+        self.server.probe = SbwProbe(CtrlCAtTheStop())
+        self.start()
+        self.assertEqual(self.gdb.cmd("Z1,4600,2"), "OK")
+        self.assertEqual(self.gdb.cmd("c"), "T05hwbreak:;00:00460000;")
+        polls.clear()
+        self.fw.stop_at = 0x4700
+        self.assertEqual(self.gdb.cmd("c"), "T0500:00470000;")  # not T02
+        self.assertEqual(self.fw.resumes, 2)
+
+
+class ResyncTest(ServerFixture):
+    """GDB sends a packet again, or a nack, when an answer takes longer than
+    its remotetimeout (2 s); every reply must still answer its own packet."""
+
+    def test_copies_gdb_sent_during_a_slow_attach_get_one_reply(self):
+        q = rsp.frame(b"qSupported:multiprocess+;swbreak+;hwbreak+")
+        self.gdb.sock.sendall(q + q)
+        self.start()
+        self.assertEqual(self.gdb.reply(), "PacketSize=1000;qXfer:memory-map:read+;swbreak+;hwbreak+")
+        self.assertEqual(self.gdb.cmd("qAttached"), "1")
+        self.assertEqual(self.gdb.raw[0], ("ack", None))
+        self.assertEqual(self.gdb.raw[1][0], "packet")  # the copy got no second ack
+
+    def test_a_copy_sent_while_the_server_works_gets_no_reply(self):
+        gdb, fw = self.gdb, self.fw
+
+        class SlowRegisters:  # GDB's remotetimeout expires during DBG_READ_REGS
+            def transfer(self, request, timeout_ms=3000):
+                if request[1:2] == bytes([probe_mod.OP_DBG_READ_REGS]):
+                    gdb.sock.sendall(rsp.frame(b"g") + b"-")
+                return fw.transfer(request, timeout_ms)
+
+        self.server.probe = SbwProbe(SlowRegisters())
+        self.start()
+        self.assertEqual(len(self.gdb.cmd("g")), 128)
+        self.assertEqual(self.gdb.cmd("qAttached"), "1")
+        self.assertEqual(self.gdb.cmd("?"), "T0500:20450000;")
+
+    def test_two_copies_in_one_segment_get_one_reply(self):
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"vCont?") * 2)
+        self.assertEqual(self.gdb.reply(), "vCont;c;C;s;S")
+        self.assertEqual(self.gdb.cmd("?"), "T0500:20450000;")
+
+    def test_a_nack_sent_while_gdb_waited_resends_nothing(self):
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"qAttached") + b"-")
+        self.assertEqual(self.gdb.reply(), "1")
+        self.assertEqual(self.gdb.cmd("?"), "T0500:20450000;")
+
+    def test_a_nack_after_an_acknowledged_reply_resends_nothing(self):
+        self.start()
+        self.assertEqual(self.gdb.cmd("qAttached"), "1")
+        self.gdb.sock.sendall(b"-")
+        self.assertEqual(self.gdb.cmd("?"), "T0500:20450000;")
+
+    def test_a_nack_of_an_unacknowledged_reply_resends_it(self):
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"qAttached"))
+        self.assertEqual(self.gdb._event(), ("ack", None))
+        self.assertEqual(self.gdb._event(), ("packet", b"1"))
+        self.gdb.sock.sendall(b"-")
+        self.assertEqual(self.gdb.reply(), "1")
+        self.assertEqual(self.gdb.cmd("?"), "T0500:20450000;")
+
+    def test_acks_and_nacks_while_the_target_runs(self):
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"vCont;c"))
+        self.assertEqual(self.gdb._event(), ("ack", None))
+        self.gdb.sock.sendall(b"+-+-")
+        self.gdb.sock.sendall(b"\x03")
+        self.assertEqual(self.gdb.reply(), "T0200:bc4a0000;")
+        self.assertEqual(self.gdb.cmd("?"), "T0200:bc4a0000;")
+        self.assertEqual([e for e in self.gdb.raw if e[0] == "packet"],
+                         [("packet", b"T0200:bc4a0000;")] * 2)
+
+
+class RunFailureTest(ServerFixture):
+    """GDB waits for a stop reply while the target runs or steps: a failure
+    must not come back as an error reply, after which GDB believes the
+    target stopped."""
+
+    def run_to_failure(self, packet):
+        self.gdb.sock.sendall(rsp.frame(packet))
+        note = self.gdb.reply()
+        self.assertTrue(note.startswith("O"), note)
+        return console(note), self.gdb.reply()
+
+    def lost(self, op, status, packet):
+        self.fw.fail_op = {op: status}
+        self.start()
+        note, stop = self.run_to_failure(packet)
+        self.assertIn("target lost", note)
+        self.assertEqual(stop, "X1d")
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        self.assertEqual(self.fw.detaches, [])  # the probe has no session left
+
+    def test_target_error_while_running_is_a_lost_target(self):
+        self.lost(13, TARGET_ERROR, b"c")
+
+    def test_bad_state_while_running_is_a_lost_target(self):
+        self.lost(13, BAD_STATE, b"c")
+
+    def test_another_status_while_running_halts_the_cpu(self):
+        self.fw.fail_op = {13: TIMEOUT}
+        self.start()
+        note, stop = self.run_to_failure(b"c")
+        self.assertIn("DBG_STATUS failed: TIMEOUT", note)
+        self.assertIn("the CPU was stopped", note)
+        self.assertEqual(stop, "T0200:bc4a0000;")
+        self.assertEqual(self.fw.state, probe_mod.STATE_DEBUG_HALTED)
+        self.fw.fail_op = {}
+        self.assertEqual(self.gdb.cmd("g")[:8], "bc4a0000")  # the session goes on
+
+    def test_a_halt_that_fails_too_ends_the_session_and_detaches(self):
+        self.fw.fail_op = {13: TIMEOUT, 11: TIMEOUT}
+        self.start()
+        note, stop = self.run_to_failure(b"c")
+        self.assertIn("DBG_HALT failed: TIMEOUT", note)
+        self.assertEqual(stop, "X1d")
+        self.thread.join(5)
+        self.assertEqual(self.fw.detaches, [0])
+        self.assertEqual(self.fw.state, 0)
+
+    def test_target_error_on_a_step_is_a_lost_target(self):
+        self.lost(14, TARGET_ERROR, b"vCont;s:1")
+
+    def test_bad_state_on_a_step_is_a_lost_target(self):
+        self.lost(14, BAD_STATE, b"vCont;s:1")
+
+    def test_another_status_on_a_step_halts_and_reports_an_interrupt(self):
+        self.fw.fail_op = {14: BUSY}
+        self.start()
+        note, stop = self.run_to_failure(b"vCont;s:1")
+        self.assertIn("DBG_STEP failed: BUSY", note)
+        self.assertEqual(stop, "T0200:20450000;")
+        self.assertEqual(self.gdb.cmd("?"), "T0200:20450000;")
+
+    def test_a_failure_after_a_step_timeout_is_a_run_failure_too(self):
+        self.fw.fail_op = {14: TIMEOUT, 13: TARGET_ERROR}
+        self.start()
+        note, stop = self.run_to_failure(b"s")
+        self.assertIn("target lost", note)
+        self.assertEqual(stop, "X1d")
+
+    def test_a_usb_error_while_running_ends_the_session_and_detaches(self):
+        self.server.probe = SbwProbe(FaultyTransport(self.fw, probe_mod.OP_DBG_STATUS,
+                                                     ProbeError("USB error: pipe error")))
+        self.start()
+        note, stop = self.run_to_failure(b"c")
+        self.assertIn("DBG_STATUS: USB error: pipe error; the debug session has ended", note)
+        self.assertEqual(stop, "X1d")
+        self.thread.join(5)
+        self.assertEqual(self.fw.detaches, [0])
+        self.assertEqual(self.fw.state, 0)
+
+
+class LingerTest(ServerFixture):
+    """After the last reply of a session GDB closes the connection itself
+    (target-remote mode); closing first, with GDB's acks unread, resets the
+    connection and GDB reports a communication error instead of the reply."""
+
+    def test_after_a_lost_target_the_server_waits_for_gdb_to_close(self):
+        self.server.linger = 5
+        self.fw.lost_on_poll = True
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"c"))
+        self.assertTrue(self.gdb.reply().startswith("O"))
+        self.assertEqual(self.gdb.reply(), "X1d")  # acknowledged, as GDB does
+        self.thread.join(0.2)
+        self.assertTrue(self.thread.is_alive())
+        self.gdb.sock.close()
+        self.thread.join(2)
+        self.assertFalse(self.thread.is_alive())
+
+    def test_a_new_packet_ends_the_wait(self):
+        self.server.linger = 5
+        self.start()
+        self.fw.fail_op = {3: TARGET_ERROR}
+        self.assertEqual(self.gdb.cmd("m4400,2"), "E03")
+        self.assertIsNone(self.gdb.cmd("g"))  # not answered: the connection closes
+        self.thread.join(2)
+        self.assertFalse(self.thread.is_alive())
+
+    def test_the_wait_ends_after_linger_seconds(self):
+        self.server.linger = 0.3
+        self.start()
+        self.assertEqual(self.gdb.cmd("D"), "OK")
+        self.thread.join(0.1)
+        self.assertTrue(self.thread.is_alive())
+        self.thread.join(2)
+        self.assertFalse(self.thread.is_alive())
+
+
+class LeavingTest(ServerFixture):
+    """Every way out of a session detaches, if the probe may still have one."""
+
+    def test_vkill_with_a_pid(self):
+        self.start()
+        self.assertEqual(self.gdb.cmd("vKill;1"), "OK")
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        self.assertEqual(self.fw.detaches, [0])
+
+    def test_ctrl_c_of_the_server_while_halted_detaches(self):
+        self.fw.interrupt_on_op = probe_mod.OP_DBG_READ_REGS
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"g"))
+        self.thread.join(5)
+        self.assertIsInstance(self.error, KeyboardInterrupt)
+        self.assertEqual(self.fw.detaches, [0])
+
+    def test_ctrl_c_of_the_server_while_running_detaches(self):
+        self.fw.interrupt_on_op = probe_mod.OP_DBG_STATUS
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"c"))
+        self.thread.join(5)
+        self.assertIsInstance(self.error, KeyboardInterrupt)
+        self.assertEqual(self.fw.detaches, [0])
+        self.assertEqual(self.fw.state, 0)
+
+    def test_ctrl_c_during_the_attach_still_detaches(self):
+        self.server.probe = SbwProbe(FaultyTransport(self.fw, probe_mod.OP_DBG_ATTACH,
+                                                     KeyboardInterrupt()))
+        self.start()
+        self.thread.join(5)
+        self.assertIsInstance(self.error, KeyboardInterrupt)
+        self.assertEqual(self.fw.detaches, [0])  # the probe had attached
+
+    def test_a_detach_interrupted_once_is_sent_again(self):
+        self.start()
+        self.fw.interrupt_on_op = probe_mod.OP_DBG_DETACH
+        self.assertEqual(self.gdb.cmd("D"), "OK")
+        self.thread.join(5)
+        self.assertEqual(self.fw.detaches, [0])
+
+    def test_a_socket_read_error_while_running_detaches(self):
+        flaky = self.server_sock = FlakySocket(self.server_sock)
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"c"))
+        self.assertEqual(self.gdb._event(), ("ack", None))
+        flaky.fail_recv = True
+        self.gdb.sock.sendall(b"+")
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        self.assertIsNone(self.error)
+        self.assertEqual(self.fw.detaches, [0])
+        self.assertEqual(self.fw.state, 0)  # detached with Run: the firmware runs
+
+    def test_a_socket_write_error_while_running_detaches(self):
+        flaky = self.server_sock = FlakySocket(self.server_sock)
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"c"))
+        self.assertEqual(self.gdb._event(), ("ack", None))
+        flaky.fail_send = True
+        self.gdb.sock.sendall(rsp.frame(b"qAttached"))  # its ack cannot be sent
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        self.assertEqual(self.fw.detaches, [0])
+        self.assertEqual(self.fw.state, 0)
+
+
+class DetachSignalTest(unittest.TestCase):
+    def test_the_detach_ignores_ctrl_c_on_the_main_thread(self):
+        fw = FakeFirmware()
+        seen = []
+
+        class Watch:
+            def transfer(self, request, timeout_ms=3000):
+                if request[1:2] == bytes([probe_mod.OP_DBG_DETACH]):
+                    seen.append(signal.getsignal(signal.SIGINT))
+                return fw.transfer(request, timeout_ms)
+
+        server = gdbserver.GdbServer(SbwProbe(Watch()), devices.MSP430F5529, out=io.StringIO())
+        mine, gdb = socket.socketpair()
+        gdb.close()  # GDB went away at once
+        before = signal.getsignal(signal.SIGINT)
+        try:
+            server.serve_connection(mine)
+        finally:
+            mine.close()
+        self.assertEqual(seen, [signal.SIG_IGN])
+        self.assertIs(signal.getsignal(signal.SIGINT), before)
+        self.assertEqual(fw.detaches, [0])
+
+
+class StopReplyTest(ServerFixture):
+    def test_a_halt_that_finds_a_breakpoint_stop_reports_the_breakpoint(self):
+        self.fw.run_polls = 1  # the first look after the resume finds the CPU stopped
+        self.start()
+        self.assertEqual(self.gdb.cmd("Z1,4600,2"), "OK")
+        self.gdb.sock.sendall(rsp.frame(b"c") + b"\x03")  # the halt is that first look
+        self.assertEqual(self.gdb.reply(), "T05hwbreak:;00:00460000;")
+        self.assertEqual(self.fw.resumes, 1)
+
+    def test_hwbreak_only_with_a_breakpoint_at_the_stop(self):
+        self.fw.stop_at = 0x4800  # a breakpoint stop at no breakpoint's address
+        self.start()
+        self.assertEqual(self.gdb.cmd("c"), "T0500:00480000;")
+
+
+class LimitsTest(ServerFixture):
+    def test_m_is_capped_at_half_the_packet_size(self):
+        self.start()
+        reply = self.gdb.cmd("m4400,1000")
+        self.assertEqual(len(reply), 2 * (gdbserver.PACKET_SIZE // 2))
+        self.assertEqual(sum(n for _, n in self.fw.reads), gdbserver.PACKET_SIZE // 4)
+
+    def test_memory_map_m_and_l_at_the_boundary(self):
+        self.start()
+        xml = self.server.memory_map_xml()
+        n = len(xml)
+        self.assertEqual(self.gdb.cmd(f"qXfer:memory-map:read::0,{n - 1:x}"), "m" + xml[:-1])
+        self.assertEqual(self.gdb.cmd(f"qXfer:memory-map:read::0,{n:x}"), "l" + xml)
+        self.assertEqual(self.gdb.cmd(f"qXfer:memory-map:read::{n - 1:x},1"), "l" + xml[-1])
+        self.assertEqual(self.gdb.cmd(f"qXfer:memory-map:read::{n:x},10"), "l")
+
+
 class PacketSizeTest(unittest.TestCase):
     def test_the_reader_buffers_what_the_packet_size_allows(self):
         self.assertEqual(rsp.MAX_UNFINISHED, 2 * gdbserver.PACKET_SIZE + 4)
@@ -628,8 +1035,10 @@ class ServeTest(unittest.TestCase):
             gdbserver.socket.create_server = real
         self.assertEqual((listeners[0].address, listeners[0].backlog), (("127.0.0.1", 3333), 1))
         self.assertTrue(listeners[0].closed)
-        self.assertIn("waiting for GDB on 127.0.0.1:3333 (in GDB: target remote :3333)",
-                      server.out.getvalue())
+        self.assertIn("waiting for GDB on 127.0.0.1:3333; in GDB:\n"
+                      "  set remotetimeout 10\n"
+                      "  set remote hardware-breakpoint-limit 8\n"
+                      "  target remote :3333\n", server.out.getvalue())
 
 
 if __name__ == "__main__":

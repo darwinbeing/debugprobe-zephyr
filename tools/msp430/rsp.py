@@ -18,7 +18,7 @@ from __future__ import annotations
 INTERRUPT = 0x03
 ESCAPE = 0x7D  # '}'
 _SPECIAL = b"#$*}"
-_HEX = frozenset(b"0123456789abcdefABCDEF")
+HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 _SINGLE = {INTERRUPT: "interrupt", ord("+"): "ack", ord("-"): "nack"}
 # The most an unfinished packet may buffer before its '#': twice the
 # PacketSize gdbserver.py announces (0x1000), as if every byte were escaped,
@@ -107,6 +107,6 @@ class PacketReader:
 
     @staticmethod
     def _packet(raw: bytes, digits: bytes) -> tuple:
-        if not _HEX.issuperset(digits) or int(digits, 16) != checksum(raw):
+        if not HEX_DIGITS.issuperset(digits) or int(digits, 16) != checksum(raw):
             return ("bad", None)
         return ("packet", raw)

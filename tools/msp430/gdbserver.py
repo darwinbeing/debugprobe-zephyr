@@ -21,10 +21,14 @@ sent.
 """
 from __future__ import annotations
 
+import contextlib
 import select
+import signal
 import socket
 import struct
 import sys
+import threading
+import time
 
 import probe as probe_mod
 import rsp
@@ -33,13 +37,13 @@ from probe import ProbeError, StatusError
 HOST = "127.0.0.1"    # GDB connects from this machine only
 PACKET_SIZE = 0x1000  # rsp.MAX_UNFINISHED is sized for it
 POLL_INTERVAL = 0.05  # seconds between DBG_STATUS polls while the target runs
+LINGER = 2.0          # seconds to let GDB close the connection after a session's last reply
 ATTACH_TRIES = 4      # normal-entry tries, as flasher.NORMAL_ENTRY_TRIES
 ADDR_LIMIT = probe_mod.ADDRESS_LIMIT
-SIGINT, SIGTRAP = 2, 5
+SIGINT, SIGTRAP, SIGLOST = 2, 5, 0x1D  # GDB's signal numbers (gdb/signals.def)
 REG_CG = 3            # R3, the constant generator: never written
 SR_CPUOFF = 0x0010
 MONITOR_READ_WORDS = 256
-_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 HELP = """monitor commands:
   monitor reset              reset the target and halt at the reset vector
@@ -67,16 +71,30 @@ class Refused(Exception):
 def _hex(text) -> int:
     """A hex number as GDB writes it. ValueError for anything else: int(x, 16)
     would also take a sign, spaces, underscores and a 0x prefix."""
-    if isinstance(text, bytes):
-        text = text.decode("latin-1")
-    if not text or not _HEX_DIGITS.issuperset(text):
-        raise ValueError(f"{text!r} is not a hex number")
+    if isinstance(text, str):
+        text = text.encode("latin-1")
+    if not text or not rsp.HEX_DIGITS.issuperset(text):
+        raise ValueError(f"{text.decode('latin-1')!r} is not a hex number")
     return int(text, 16)
 
 
 def _addr_len(text: str):
     addr, length = text.split(",")
     return _hex(addr), _hex(length)
+
+
+@contextlib.contextmanager
+def _sigint_ignored():
+    """Ctrl-C is ignored inside (on the main thread, where Python delivers it):
+    the detach that lets the target's program run again must not be cut off."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def _reg_value(text: str) -> int:
@@ -89,15 +107,15 @@ def _reg_value(text: str) -> int:
 
 class GdbServer:
     def __init__(self, probe, device, speed_khz=250, attach_mode=probe_mod.ATTACH_RUNNING,
-                 out=sys.stdout, poll_interval=POLL_INTERVAL):
+                 out=sys.stdout, poll_interval=POLL_INTERVAL, linger=LINGER):
         self.probe = probe
         self.device = device
         self.speed_khz = speed_khz
         self.attach_mode = attach_mode
         self.out = out
         self.poll_interval = poll_interval
-        self.mode = "readonly"
-        self.attached = False
+        self.linger = linger
+        self.attached = False  # the probe has (or may have) a debug session for us
         self.running = False
         self.slots = []        # hardware breakpoint index -> address or None
         self.regs = None       # cached registers while halted
@@ -107,12 +125,20 @@ class GdbServer:
         self._reader = None
         self._backlog = []
         self._deferred = []
-        self._last = b""
+        self._last = b""       # the last packet sent, until GDB acknowledges it
+        self._eof = False
+        self._interrupt_pending = False
 
     def say(self, line: str) -> None:
         self.out.write(line + "\n")
         if hasattr(self.out, "flush"):
             self.out.flush()
+
+    def hardware_breakpoint_limit(self) -> int:
+        info = getattr(self.probe, "last_info", None)
+        if info is not None and info.hw_breakpoints:
+            return min(info.hw_breakpoints, probe_mod.MAX_HW_BREAKPOINTS)
+        return probe_mod.MAX_HW_BREAKPOINTS
 
     # ---- one GDB connection ----
 
@@ -124,14 +150,43 @@ class GdbServer:
         self._backlog = []   # events received but not handled yet, in order
         self._deferred = []  # packets that arrived while the target ran
         self._last = b""
-        self._attach(self.attach_mode)
+        self._eof = False
+        ended = False
         try:
+            self._attach(self.attach_mode)
             while True:
                 self._handle_event(*self._next_event(None, deferred=True))
-        except (Disconnected, SessionEnded):
+        except Disconnected:
             pass
+        except SessionEnded:
+            ended = True
         finally:
             self._detach()
+        if ended:
+            self._let_gdb_close()
+
+    def _let_gdb_close(self) -> None:
+        """After the last reply of a session (W/X, OK to D or vKill, E03),
+        wait up to `linger` seconds for GDB to close the connection, as it
+        does in target-remote mode, reading its acks meanwhile. Closing
+        first, with GDB's acks unread, resets the connection, and GDB then
+        reports "Remote communication error" instead of the reply. A new
+        packet ends the wait: the session is over, nothing will answer it."""
+        deadline = time.monotonic() + self.linger
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                event = self._next_event(remaining)
+                if event is None or event[0] in ("packet", "bad"):
+                    return
+                if event[0] == "ack":
+                    self._last = b""
+                elif event[0] == "nack" and self._last:
+                    self._put(self._last)
+        except Disconnected:
+            pass
 
     def _handle_event(self, kind, payload):
         if kind in ("packet", "deferred"):
@@ -139,12 +194,45 @@ class GdbServer:
                 self._put(b"+")
             reply = self._dispatch(payload)
             if reply is not None:
-                self._send(reply)
+                self._reply(payload, reply)
         elif kind == "bad":
             self._put(b"-")
-        elif kind == "nack" and self._last:
-            self._put(self._last)
-        # an interrupt while halted, and acks, need nothing
+        elif kind == "ack":
+            self._last = b""
+        elif kind == "nack":
+            if self._last:  # GDB did not get the last reply right
+                self._put(self._last)
+        elif kind == "interrupt":
+            # Ctrl-C between two of GDB's steps (stepi N), or just after a
+            # stop: the next step or continue stops at once
+            self._interrupt_pending = True
+
+    def _fill(self, timeout) -> bool:
+        """Read once from GDB into the backlog, waiting up to `timeout` seconds
+        (None: for ever). False if nothing arrived; Disconnected at the end."""
+        if self._eof:
+            raise Disconnected()
+        ready, _, _ = select.select([self._conn], [], [], timeout)
+        if not ready:
+            return False
+        try:
+            data = self._conn.recv(4096)
+        except OSError:
+            data = b""
+        if not data:
+            self._eof = True
+            raise Disconnected()
+        self._backlog += self._reader.feed(data)
+        return True
+
+    def _drain(self) -> None:
+        """What GDB has sent already, into the backlog, without waiting. The
+        end of the connection is noticed once the backlog has been handled."""
+        try:
+            while self._fill(0):
+                pass
+        except Disconnected:
+            pass
 
     def _next_event(self, timeout, deferred=False):
         """The next event: deferred packets first (if asked for), then what
@@ -153,16 +241,8 @@ class GdbServer:
         if deferred and self._deferred:
             return ("deferred", self._deferred.pop(0))
         while not self._backlog:
-            ready, _, _ = select.select([self._conn], [], [], timeout)
-            if not ready:
+            if not self._fill(timeout):
                 return None
-            try:
-                data = self._conn.recv(4096)
-            except OSError:
-                data = b""
-            if not data:
-                raise Disconnected()
-            self._backlog += self._reader.feed(data)
         return self._backlog.pop(0)
 
     def _put(self, data: bytes) -> None:
@@ -177,6 +257,16 @@ class GdbServer:
         self._last = rsp.frame(payload)
         self._put(self._last)
 
+    def _reply(self, request: bytes, reply) -> None:
+        """Send the reply to `request`. When an answer takes longer than GDB's
+        remotetimeout, GDB sends the packet again, or a nack, while it waits.
+        Those copies and nacks, already received, are dropped first (a copy
+        is not acknowledged either): answering them would put every later
+        reply one packet behind."""
+        self._drain()
+        self._backlog = [e for e in self._backlog if e != ("packet", request) and e[0] != "nack"]
+        self._send(reply)
+
     def _note(self, text: str) -> None:
         """A line on the server's console and on GDB's (while GDB waits for a
         stop reply or a monitor command)."""
@@ -187,14 +277,18 @@ class GdbServer:
 
     def _attach(self, mode) -> None:
         # DBG_ATTACH first ends an open debug session (detached with Run)
-        self.attached = False
         self.running = False
+        self._interrupt_pending = False
         last = None
         for _ in range(ATTACH_TRIES):
+            # the probe may attach even if its answer never arrives (Ctrl-C,
+            # USB error): until it refuses, a detach on the way out is due
+            self.attached = True
             try:
                 a = self.probe.dbg_attach(mode, self.speed_khz, *self.device.ram)
                 break
             except StatusError as e:
+                self.attached = False  # a refused attach leaves the probe idle
                 if e.status == probe_mod.STATUS_LOCKED:
                     raise ProbeError("the device's JTAG lock key is programmed; "
                                      "it cannot be debugged") from None
@@ -206,15 +300,11 @@ class GdbServer:
             raise ProbeError(f"no MSP430 found (JTAG ID read as 0x{jtag_id:02X}); check the wiring "
                              "and the target supply, or try a lower --speed")
         if a.identity.device_id != self.device.device_id:
-            try:
-                self.probe.dbg_detach(probe_mod.DETACH_RUN)
-            except ProbeError as e:
-                self.say(f"detach failed: {e}")
+            self._detach()
             raw = a.identity.device_id
             raise ProbeError(f"unexpected device: ID bytes {raw & 0xFF:02X}h {raw >> 8:02X}h, "
                              f"this server is set up for {self.device.name}; "
                              "the target was left running")
-        self.attached = True
         # the probe's client takes breakpoint indexes up to MAX_HW_BREAKPOINTS - 1
         self.slots = [None] * min(a.hw_breakpoints, probe_mod.MAX_HW_BREAKPOINTS)
         self.regs = None
@@ -224,14 +314,24 @@ class GdbServer:
                  f"{len(self.slots)} hardware breakpoints")
 
     def _detach(self) -> None:
+        """DBG_DETACH with Run, if the probe may have a session for us. Ctrl-C
+        does not cut it off: ignored on the main thread, and the detach is
+        sent once more if a KeyboardInterrupt comes through anyway."""
         if not self.attached:
             return
         self.attached = False
-        try:
-            self.probe.dbg_detach(probe_mod.DETACH_RUN)
-            self.say("detached; the program continues where it stopped")
-        except ProbeError as e:
-            self.say(f"detach failed: {e}")
+        with _sigint_ignored():
+            for attempt in (1, 2):
+                try:
+                    self.probe.dbg_detach(probe_mod.DETACH_RUN)
+                    self.say("detached; the program continues where it stopped")
+                    return
+                except KeyboardInterrupt:
+                    if attempt == 2:
+                        raise
+                except ProbeError as e:
+                    self.say(f"detach failed: {e}")
+                    return
 
     def _lost(self, e) -> None:
         """The probe answered TARGET_ERROR: it has ended the session itself."""
@@ -329,12 +429,16 @@ class GdbServer:
         self.say(f"refused: {why}")
         return "E01"
 
-    def _stopped(self, signal: int, pc: int, hwbreak: bool = False) -> str:
+    def _stopped(self, signo: int, pc: int, hwbreak: bool = False) -> str:
         """Record a stop; its stop reply, with the PC as expedited register 0."""
         self.stop_pc = pc
-        self.stop_reply = (f"T{signal:02x}" + ("hwbreak:;" if hwbreak else "") +
+        self.stop_reply = (f"T{signo:02x}" + ("hwbreak:;" if hwbreak else "") +
                            "00:" + struct.pack("<I", pc).hex() + ";")
         return self.stop_reply
+
+    def _stopped_at(self, st, signo: int) -> str:
+        """A stop DBG_STATUS reported; hwbreak only with a breakpoint at the stop."""
+        return self._stopped(signo, st.pc, st.breakpoint != probe_mod.NO_BREAKPOINT)
 
     # ---- registers ----
 
@@ -444,62 +548,129 @@ class GdbServer:
 
     # ---- run control ----
 
-    def _set_pc(self, arg: str) -> None:
-        """c ADDR, s ADDR: the PC first, under the PC rule."""
-        if arg:
-            self._write_reg(0, _hex(arg))
+    def _resume_pc(self, arg: str):
+        """The ADDR of c ADDR / s ADDR, checked under the PC rule; None without one."""
+        if not arg:
+            return None
+        pc = _hex(arg)
+        self._check_reg(0, pc)
+        return pc
 
     def _continue(self, arg: str) -> str:
-        self._set_pc(arg)
-        self.regs = None
-        self.probe.dbg_resume()
-        self.running = True
+        pc = self._resume_pc(arg)
         try:
-            while True:
-                event = self._next_event(self.poll_interval)
-                while event is not None:
-                    kind, payload = event
-                    if kind == "interrupt":
-                        self.probe.dbg_halt()
-                        st = self.probe.dbg_status()  # the halt may have met a breakpoint stop
-                        self.running = False
-                        hit = st.stop_reason == probe_mod.STOP_BREAKPOINT
-                        return self._stopped(SIGTRAP if hit else SIGINT, st.pc, hit)
-                    if kind == "packet":  # all-stop GDB waits; answer it after the stop
-                        self._put(b"+")
-                        self._deferred.append(payload)
-                    elif kind == "bad":
-                        self._put(b"-")
-                    event = self._next_event(0)
-                st = self.probe.dbg_status()
-                if st.halted:
+            if self._interrupt_pending:
+                return self._interrupted()
+            self.regs = None
+            if pc is not None:
+                self.probe.dbg_write_reg(0, pc)
+            self.probe.dbg_resume()
+            self.running = True
+            return self._run()
+        except ProbeError as e:
+            return self._run_failed(e)
+
+    def _run(self) -> str:
+        """Poll the running target until it stops or GDB interrupts it."""
+        while True:
+            event = self._next_event(self.poll_interval)
+            while event is not None:
+                kind, payload = event
+                if kind == "interrupt":
+                    self.probe.dbg_halt()
+                    st = self.probe.dbg_status()  # the halt may have met a breakpoint stop
                     self.running = False
-                    return self._stopped(SIGTRAP, st.pc,
-                                         st.stop_reason == probe_mod.STOP_BREAKPOINT)
-        except StatusError as e:
-            if e.status != probe_mod.STATUS_TARGET_ERROR:
-                raise
-            self._lost(e)
-            self._send("O" + f"target lost ({e})\n".encode().hex())
-            self._send("W00")
-            raise SessionEnded() from None
+                    hit = st.stop_reason == probe_mod.STOP_BREAKPOINT
+                    return self._stopped_at(st, SIGTRAP if hit else SIGINT)
+                if kind == "packet":  # all-stop GDB waits; answer it after the stop
+                    self._put(b"+")
+                    self._deferred.append(payload)
+                elif kind == "bad":
+                    self._put(b"-")
+                elif kind == "ack":
+                    self._last = b""
+                elif kind == "nack" and self._last:
+                    self._put(self._last)
+                event = self._next_event(0)
+            st = self.probe.dbg_status()
+            if st.halted:
+                self.running = False
+                self._take_interrupts()  # a Ctrl-C GDB sent during this run ends with it
+                return self._stopped_at(st, SIGTRAP)
 
     def _step(self, arg: str) -> str:
-        self._set_pc(arg)
-        self.regs = None
+        pc = self._resume_pc(arg)
         try:
-            return self._stopped(SIGTRAP, self.probe.dbg_step())
-        except StatusError as e:
-            if e.status != probe_mod.STATUS_TIMEOUT:
-                raise
-        # The CPU did not stop by itself and the probe halted it. A step over
-        # an instruction that enters a low-power mode ends like this too.
+            if self._interrupt_pending:
+                return self._interrupted()
+            self.regs = None
+            if pc is not None:
+                self.probe.dbg_write_reg(0, pc)
+            try:
+                new_pc = self.probe.dbg_step()
+            except StatusError as e:
+                if e.status != probe_mod.STATUS_TIMEOUT:
+                    raise
+                return self._step_timed_out()
+            # Ctrl-C during the step: GDB's stepi N ends with this step
+            interrupted = self._take_interrupts()
+            return self._stopped(SIGINT if interrupted else SIGTRAP, new_pc)
+        except ProbeError as e:
+            return self._run_failed(e)
+
+    def _take_interrupts(self) -> bool:
+        """Remove the interrupts GDB has sent already (during the run or step
+        that is being answered); True if there were any."""
+        self._drain()
+        before = len(self._backlog)
+        self._backlog = [e for e in self._backlog if e[0] != "interrupt"]
+        return len(self._backlog) < before
+
+    def _interrupted(self) -> str:
+        """Ctrl-C came while halted (between two steps of GDB's stepi N, or
+        just after a stop): the next step or continue stops at once, at the
+        PC, without running the target (as GDB's own gdbserver does)."""
+        self._interrupt_pending = False
+        return self._stopped(SIGINT, self._regs()[0])
+
+    def _step_timed_out(self) -> str:
+        """DBG_STEP answered TIMEOUT: the CPU did not stop by itself and the
+        probe halted it. A step over an instruction that enters a low-power
+        mode ends like this too, though the instruction executed."""
         st = self.probe.dbg_status()
         if self._regs()[2] & SR_CPUOFF:
             self._note("the CPU entered a low-power mode during the step; it is halted there")
             return self._stopped(SIGTRAP, st.pc)
         self._note("the step did not complete in time; the CPU was stopped")
         return self._stopped(SIGINT, st.pc)
+
+    def _run_failed(self, e: ProbeError, may_halt: bool = True) -> str:
+        """The probe failed while GDB waits for a stop reply (continue, step).
+        An error reply would make GDB believe the target is stopped, so:
+        TARGET_ERROR or BAD_STATE (the probe lost the target, or has no
+        session any more) ends the session, and GDB is told the target is
+        gone (X1d, SIGLOST); another status stops the CPU and reports a
+        SIGINT stop; any other failure (USB) ends the session, which is
+        detached on the way out if the probe still answers."""
+        self.running = False
+        self.regs = None
+        status = e.status if isinstance(e, StatusError) else None
+        if status in (probe_mod.STATUS_TARGET_ERROR, probe_mod.STATUS_BAD_STATE):
+            self.attached = False  # nothing left to detach
+            text = f"target lost ({e}); the debug session has ended"
+        elif status is not None and may_halt:
+            self.say(f"error: {e}; stopping the CPU")
+            try:
+                pc = self.probe.dbg_halt()
+            except ProbeError as halt_error:
+                return self._run_failed(halt_error, may_halt=False)
+            self._note(f"error: {e}; the CPU was stopped")
+            return self._stopped(SIGINT, pc)
+        else:
+            text = f"error: {e}; the debug session has ended"
+        self._note(text)
+        self._send(f"X{SIGLOST:02x}")
+        raise SessionEnded()
 
     # ---- breakpoints ----
 
@@ -550,7 +721,8 @@ class GdbServer:
         elif words == ["reset"]:
             self._attach(probe_mod.ATTACH_RESET)
             text = (f"target reset, halted at 0x{self.stop_pc:05X}; "
-                    "run 'flushregs' so that GDB reads the registers again\n")
+                    "run 'maintenance flush register-cache' so that GDB reads the "
+                    "registers again\n")
         elif words[0] == "read":
             text = self._monitor_read(words[1:])
         elif words[0] == "mode" and len(words) == 2 and words[1] in ("readonly", "full"):
@@ -627,7 +799,12 @@ def serve(server: GdbServer, port: int) -> None:
     try:
         while True:
             bound = listener.getsockname()[1]
-            server.say(f"waiting for GDB on {HOST}:{bound} (in GDB: target remote :{bound})")
+            # the attach when GDB connects can take longer than GDB's 2 s default
+            server.say(f"waiting for GDB on {HOST}:{bound}; in GDB:\n"
+                       "  set remotetimeout 10\n"
+                       "  set remote hardware-breakpoint-limit "
+                       f"{server.hardware_breakpoint_limit()}\n"
+                       f"  target remote :{bound}")
             conn, _ = listener.accept()
             with conn:
                 conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
