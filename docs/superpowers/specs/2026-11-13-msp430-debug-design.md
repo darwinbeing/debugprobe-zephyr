@@ -243,7 +243,11 @@ board cannot be put into full mode by mistake.
   debug session with `TargetError` as in Phase A; GDB is told the target
   exited.
 - The firmware's watchdog is stopped while halted and restored on release, so
-  a halt never ends in a watchdog reset; single-stepping keeps it stopped.
+  a halt never ends in a watchdog reset. A single step, like TI's DLL, puts
+  the firmware's own `WDTCTL` back for the step's brief release, so the
+  watchdog counts during each step and its counter is not cleared; many steps
+  in a row with the watchdog running can therefore end in a watchdog reset,
+  as with TI's tools.
 
 ## Testing and Acceptance
 
