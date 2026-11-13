@@ -39,10 +39,12 @@ public:
 	 * restored, as detach(Run) does. With Reset, system clocks already
 	 * switched to the JTAG clock are switched back before any release. */
 	Status attach(AttachMode mode, uint32_t slot_hz, Identity &id);
-	/* Clear the triggers and turn the EEM sequencer off, then Run: restore
-	 * the context and let the program continue where it stopped; Reset:
-	 * power-on reset and run. Releases the pins. Does nothing when not
-	 * attached. Expects a halted CPU. */
+	/* A running CPU is halted first (halt()); if that fails, the CPU has
+	 * been let go as halt() describes and nothing more is done. Then the
+	 * triggers are cleared and the EEM sequencer is turned off, and Run:
+	 * the context is restored and the program continues where it stopped,
+	 * EEM off; Reset: power-on reset and run. Releases the pins. Does
+	 * nothing when not attached. */
 	void detach(DetachAction action);
 
 	bool attached() const { return attached_; }
@@ -50,16 +52,34 @@ public:
 	/* Valid while attached and halted. */
 	uint32_t pc() const { return ctx_.pc; }
 	StopReason stop_reason() const { return reason_; }
-	/* Index of the breakpoint at the stop address, or kNoBreakpoint. */
+	/* After a breakpoint stop: the index of the breakpoint whose address is
+	 * the stop PC (the lowest if several), else kNoBreakpoint. */
 	uint8_t breakpoint_hit() const { return bp_hit_; }
 
-	/* Stop a running CPU (stop reason Request, or Breakpoint if the EEM had
-	 * already stopped it). Ok when already halted. */
+	/* Stop a running CPU. poll()'s look first: a CPU the EEM has already
+	 * stopped is taken as poll() takes it (stop reason Breakpoint).
+	 * Otherwise SyncJtag_Conditional_SaveContextXv2 stops it through the
+	 * EEM (at once in a low-power mode) and saves its context (stop reason
+	 * Request). Ok, nothing sent, when already halted. BadState when not
+	 * attached. TargetError as poll() reports it, or when the sync fails:
+	 * the CPU is let go as attach(Running) describes for its failures and
+	 * the debugger is detached. */
 	Status halt();
-	/* Restore the context and run with the EEM and the breakpoints armed. */
+	/* Restore the context (SR, WDTCTL, PC) and let the CPU run with the EEM
+	 * on and the breakpoints armed (EEM control 0x0007). BadState when not
+	 * attached, Running (nothing sent) when it already runs. Nothing is
+	 * checked (MSPDS checks nothing here): a lost target shows at the next
+	 * poll(). */
 	Status resume();
-	/* While running: has the EEM stopped the CPU? If so the context is saved
-	 * (stop reason Breakpoint). `halted` reports the state afterwards. */
+	/* While running: has the EEM stopped the CPU (WaitForEem)? If so its
+	 * context is saved (stop reason Breakpoint, see breakpoint_hit()).
+	 * `halted` reports the state afterwards. Ok, nothing sent, `halted`
+	 * true, when already halted. BadState when not attached (`halted`
+	 * true). TargetError, `halted` false and the debugger detached: the JTAG
+	 * ID is not 0x91 (the target reset or lost power): an attempt is made to
+	 * turn the EEM off, the CPU is released where it is with nothing written
+	 * to it, the pins are released; or the sync after a stop failed: the
+	 * CPU is let go as attach(Running) describes for its failures. */
 	Status poll(bool &halted);
 	/* Execute one instruction (stop reason Step). Timeout if the CPU did not
 	 * stop by itself; it is halted anyway. */

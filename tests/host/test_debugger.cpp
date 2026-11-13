@@ -1209,3 +1209,442 @@ TEST(debugger_breakpoints_need_an_attached_cpu)
 	CHECK(f.d.clear_breakpoint(msp430::kAllBreakpoints) == Status::BadState);
 	CHECK(f.t.log.empty());
 }
+
+TEST(debugger_resume_restores_the_context_with_the_eem_armed)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	/* DebugManagerMSP430::run with breakpoints polled: EEM control 0x0007 */
+	CHECK_LOG(f.t.log, restore_release(0x4520, 0x0008, 0x6904, 0x0007));
+	CHECK(f.d.attached());
+	CHECK(f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::None);
+	CHECK_EQ(f.d.breakpoint_hit(), msp430::kNoBreakpoint);
+	f.t.log.clear();
+	CHECK(f.d.resume() == Status::Running);
+	CHECK(f.t.log.empty());
+}
+
+TEST(debugger_resume_into_a_low_power_mode_backs_up_the_pc)
+{
+	Fx f;
+	f.t.cntrl_sig = 0x0321;
+	f.t.eem_control_script = {0x0000};
+	f.t.captured = {0x00D8, 0x0000}; /* LPM3 + GIE */
+	f.t.mab = 0x0453E;
+	REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
+	CHECK(f.scripts_consumed());
+	f.t.log.clear();
+	f.t.cntrl_sig = 0x0301;
+	REQUIRE(f.d.resume() == Status::Ok);
+	/* Note 1411: PC - 2 again, SR with CPUOFF and GIE back */
+	CHECK_LOG(f.t.log, restore_release(0x453C, 0x00D8, 0x6904, 0x0007));
+	CHECK(contains(f.t.log, set_pc(0x453A)));
+}
+
+TEST(debugger_release_answers_a_halt_signal)
+{
+	Fx f;
+	f.attached();
+	/* the control-signal reads of SetPcXv2 and of the release clock; the
+	 * second shows HALT (0x0002) */
+	f.t.cntrl_sig_script = {0x0301, 0x0303};
+	REQUIRE(f.d.resume() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(contains(f.t.log, Log{ir(0x28), "tclk:0", d16(0), ir(0xC8), d16(0x0403), "tclk:1"}));
+	CHECK_LOG(f.t.log, restore_release(0x4520, 0x0008, 0x6904, 0x0007, true));
+}
+
+TEST(debugger_poll_while_running)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	bool halted = true;
+	REQUIRE(f.d.poll(halted) == Status::Ok);
+	CHECK(!halted);
+	CHECK_LOG(f.t.log, (Log{"ir:28", "ir:d0", "dr16:0000"})); /* WaitForEem */
+	CHECK(f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::None);
+	/* the DLL's mask is EEM_STOPPED (0x80) alone */
+	f.t.log.clear();
+	f.t.eem_control_script = {0xFF7F};
+	halted = true;
+	REQUIRE(f.d.poll(halted) == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(!halted);
+	CHECK_LOG(f.t.log, (Log{"ir:28", "ir:d0", "dr16:0000"}));
+	CHECK(f.d.running());
+}
+
+TEST(debugger_poll_sees_a_breakpoint_stop)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.set_breakpoint(3, 0x4600) == Status::Ok);
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.eem_control_script = {0x0080, 0x0080}; /* WaitForEem, then the sync's look */
+	f.t.captured = {0x0001, 0x0000};
+	f.t.mab = 0x4604;
+	bool halted = false;
+	REQUIRE(f.d.poll(halted) == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(halted);
+	CHECK(f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::Breakpoint);
+	CHECK_EQ(f.d.breakpoint_hit(), 3);
+	CHECK_EQ(f.d.pc(), 0x4600u);
+	/* already stopped by the EEM: no stop request, straight to the sync
+	 * (DebugManagerMSP430::runEvent, saveContext on BP_HIT_FLAG) */
+	CHECK_LOG(f.t.log, Log{"ir:28", "ir:d0", "dr16:0000", "ir:d0", "dr16:0000"} +
+				   sync_tail(0x6904, 0x0001));
+	/* halted now: nothing to poll */
+	f.t.log.clear();
+	halted = false;
+	CHECK(f.d.poll(halted) == Status::Ok);
+	CHECK(halted);
+	CHECK(f.t.log.empty());
+}
+
+TEST(debugger_poll_reports_a_lost_target)
+{
+	/* the target reset or lost power: JTAG is gone. WaitForEem would keep
+	 * polling; the debugger lets go. 0x98 and 0x99 are valid MSPDS IDs,
+	 * but not the F5529's. */
+	for (const uint8_t id : {0xFF, 0x00, 0x98, 0x99}) {
+		Fx f;
+		f.attached();
+		REQUIRE(f.d.resume() == Status::Ok);
+		f.t.log.clear();
+		f.t.mem_writes.clear();
+		f.t.jtag_id = id;
+		bool halted = true;
+		CHECK(f.d.poll(halted) == Status::TargetError);
+		CHECK(!halted);
+		CHECK(!f.d.attached());
+		CHECK(!f.d.running());
+		/* an attempt to turn the EEM off, then released, pins let go */
+		CHECK_LOG(f.t.log, Log{"ir:28"} + kAbandon);
+		CHECK(f.t.log.back() == "close");
+		CHECK(f.t.mem_writes.empty());
+	}
+}
+
+TEST(debugger_poll_with_a_failed_sync_after_a_stop)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.mem_writes.clear();
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.cntrl_sig = 0x0101; /* the sync bit never comes */
+	bool halted = true;
+	CHECK(f.d.poll(halted) == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(!halted);
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::None);
+	/* the CPU, not in full emulation, is let go with nothing written */
+	CHECK(f.t.mem_writes.empty());
+	CHECK_LOG(last(f.t.log, kAbandon.size()), kAbandon);
+}
+
+TEST(debugger_poll_names_the_breakpoint_at_the_stop_address)
+{
+	const struct {
+		uint32_t stop_pc;
+		uint8_t want;
+	} cases[] = {
+		{0x4800, 7},                     /* the last trigger block */
+		{0x4600, 2},                     /* two at one address: the lower index */
+		{0x4400, msp430::kNoBreakpoint}, /* cleared: no longer counts */
+		{0x4A00, msp430::kNoBreakpoint}, /* none there */
+	};
+	for (const auto &c : cases) {
+		Fx f;
+		f.attached();
+		REQUIRE(f.d.set_breakpoint(0, 0x4400) == Status::Ok);
+		REQUIRE(f.d.set_breakpoint(2, 0x4600) == Status::Ok);
+		REQUIRE(f.d.set_breakpoint(5, 0x4600) == Status::Ok);
+		REQUIRE(f.d.set_breakpoint(7, 0x4800) == Status::Ok);
+		REQUIRE(f.d.clear_breakpoint(0) == Status::Ok);
+		REQUIRE(f.d.resume() == Status::Ok);
+		f.t.eem_control_script = {0x0080, 0x0080};
+		f.t.captured = {0x0008, 0x0000};
+		f.t.mab = c.stop_pc + 4;
+		bool halted = false;
+		REQUIRE(f.d.poll(halted) == Status::Ok);
+		CHECK(f.scripts_consumed());
+		CHECK(halted);
+		CHECK(f.d.stop_reason() == StopReason::Breakpoint);
+		CHECK_EQ(f.d.pc(), c.stop_pc);
+		CHECK_EQ(f.d.breakpoint_hit(), c.want);
+	}
+}
+
+TEST(debugger_halt_stops_a_running_cpu)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	/* WaitForEem's look, the sync's look, the stop poll */
+	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	f.t.mab = 0x4ABC;
+	REQUIRE(f.d.halt() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::Request);
+	CHECK_EQ(f.d.breakpoint_hit(), msp430::kNoBreakpoint);
+	CHECK_EQ(f.d.pc(), 0x4AB8u);
+	CHECK_LOG(f.t.log, Log{"ir:28", "ir:d0", "dr16:0000"} + eem_stop(1, kTb0Zero) +
+				   sync_tail(0x6904, 0x0008));
+	f.t.log.clear();
+	CHECK(f.d.halt() == Status::Ok); /* already halted: nothing to do */
+	CHECK(f.t.log.empty());
+	CHECK(f.d.stop_reason() == StopReason::Request);
+}
+
+TEST(debugger_halt_in_a_low_power_mode)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.cntrl_sig = 0x0321; /* CPUOFF: the firmware sleeps */
+	f.t.eem_control_script = {0x0000, 0x0000};
+	f.t.captured = {0x00D8, 0x0000}; /* LPM3 + GIE */
+	f.t.mab = 0x0453E;
+	REQUIRE(f.d.halt() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(f.d.stop_reason() == StopReason::Request);
+	CHECK_EQ(f.d.pc(), 0x0453Cu); /* MAB - 2 in a low-power mode */
+	/* no EEM stop request in a low-power mode: straight to the sync */
+	CHECK_LOG(f.t.log, Log{"ir:28", "ir:d0", "dr16:0000", "ir:d0", "dr16:0000", "ir:28",
+			       "dr16:0000"} +
+				   sync_tail(0x6904, 0x00D8));
+	f.t.log.clear();
+	REQUIRE(f.d.resume() == Status::Ok);
+	/* back to sleep where it was: SR with CPUOFF and GIE, the PC 2 lower
+	 * (Note 1411) */
+	CHECK_LOG(f.t.log, restore_release(0x453C, 0x00D8, 0x6904, 0x0007));
+	CHECK(contains(f.t.log, set_pc(0x453A)));
+}
+
+TEST(debugger_halt_finds_a_breakpoint_stop)
+{
+	/* the EEM stopped the CPU at a breakpoint before the halt request:
+	 * WaitForEem's check reports it as such */
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.set_breakpoint(2, 0x4600) == Status::Ok);
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	f.t.mab = 0x4604;
+	REQUIRE(f.d.halt() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::Breakpoint);
+	CHECK_EQ(f.d.breakpoint_hit(), 2);
+	CHECK_EQ(f.d.pc(), 0x4600u);
+	CHECK_LOG(f.t.log, Log{"ir:28", "ir:d0", "dr16:0000", "ir:d0", "dr16:0000"} +
+				   sync_tail(0x6904, 0x0008));
+}
+
+TEST(debugger_halt_reports_a_lost_target)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.mem_writes.clear();
+	f.t.jtag_id = 0xFF;
+	CHECK(f.d.halt() == Status::TargetError);
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK_LOG(f.t.log, Log{"ir:28"} + kAbandon);
+	CHECK(f.t.mem_writes.empty());
+	f.t.log.clear();
+	CHECK(f.d.halt() == Status::BadState);
+	CHECK(f.t.log.empty());
+}
+
+TEST(debugger_halt_with_a_failed_sync_releases)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.mem_writes.clear();
+	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
+	f.t.cntrl_sig = 0x0101; /* not in a low-power mode; the sync bit never comes */
+	CHECK(f.d.halt() == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::None);
+	CHECK(f.t.mem_writes.empty());
+	/* the EEM stop and the sync attempt, then let go with nothing written */
+	const Log start = Log{"ir:28", "ir:d0", "dr16:0000"} + eem_stop(1, kTb0Zero);
+	CHECK_LOG(first(f.t.log, start.size()), start);
+	CHECK_LOG(last(f.t.log, kAbandon.size()), kAbandon);
+}
+
+TEST(debugger_breakpoint_survives_a_halt_that_borrows_trigger_block_0)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.set_breakpoint(0, 0x4600) == Status::Ok);
+	REQUIRE(f.d.set_breakpoint(5, 0x4A00) == Status::Ok);
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	REQUIRE(f.d.halt() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	/* read before the borrow, written back after the stop: value, control,
+	 * mask, combination 0 and BREAKREACT (breakpoints 0 and 5) */
+	const unsigned tb0[5] = {0x4600, 0, 0, 1, 0x21};
+	CHECK(contains(f.t.log, eem_stop(1, tb0)));
+	CHECK_EQ(f.t.eem[0x00], 0x4600u);
+	CHECK_EQ(f.t.eem[0x02], 0u);
+	CHECK_EQ(f.t.eem[0x04], 0u);
+	CHECK_EQ(f.t.eem[0x06], 1u);
+	CHECK_EQ(f.t.eem[0x80], 0x21u);
+	/* and the debugger still counts it */
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	f.t.mab = 0x4604;
+	bool halted = false;
+	REQUIRE(f.d.poll(halted) == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(halted);
+	CHECK_EQ(f.d.breakpoint_hit(), 0);
+}
+
+TEST(debugger_resume_after_a_halt_restores_the_halted_context)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.memory[0x015C] = 0x6936; /* the program changed its watchdog meanwhile */
+	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
+	f.t.captured = {0x0009, 0x0000}; /* GIE + C */
+	f.t.mab = 0x14A2C;
+	REQUIRE(f.d.halt() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK_EQ(f.d.pc(), 0x14A28u);
+	f.t.log.clear();
+	f.t.mem_writes.clear();
+	REQUIRE(f.d.resume() == Status::Ok);
+	CHECK_LOG(f.t.log, restore_release(0x14A28, 0x0009, 0x6936, 0x0007));
+	REQUIRE(f.t.mem_writes.size() == 1u);
+	CHECK(f.t.mem_writes[0] == (std::pair<uint32_t, uint16_t>{0x015C, 0x5A36}));
+}
+
+TEST(debugger_detach_halts_a_running_cpu_first)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	f.d.detach(DetachAction::Run);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::None);
+	/* as the DLL's Close: stopped (SyncJtag_Conditional_SaveContextXv2), then
+	 * run with its context restored and the EEM off */
+	CHECK_LOG(f.t.log, Log{"ir:28", "ir:d0", "dr16:0000"} + eem_stop(1, kTb0Zero) +
+				   sync_tail(0x6904, 0x0008) + clear_triggers() +
+				   restore_release(0x4520, 0x0008, 0x6904, 0x0006) + Log{"close"});
+}
+
+TEST(debugger_detach_with_reset_halts_a_running_cpu_first)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	f.d.detach(DetachAction::Reset);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK_LOG(f.t.log, Log{"ir:28", "ir:d0", "dr16:0000"} + eem_stop(1, kTb0Zero) +
+				   sync_tail(0x6904, 0x0008) + clear_triggers() + kResetRelease);
+}
+
+TEST(debugger_detach_of_a_lost_running_target_only_lets_go)
+{
+	for (const DetachAction action : {DetachAction::Run, DetachAction::Reset}) {
+		Fx f;
+		f.attached();
+		REQUIRE(f.d.resume() == Status::Ok);
+		f.t.log.clear();
+		f.t.mem_writes.clear();
+		f.t.jtag_id = 0xFF;
+		f.d.detach(action);
+		CHECK(!f.d.attached());
+		CHECK(!f.d.running());
+		/* the halt found no target and let go: no trigger clearing, nothing
+		 * written to a CPU that is not under JTAG control */
+		CHECK_LOG(f.t.log, Log{"ir:28"} + kAbandon);
+		CHECK(f.t.mem_writes.empty());
+	}
+}
+
+TEST(debugger_run_control_needs_an_attached_cpu)
+{
+	Fx f;
+	bool halted = false;
+	CHECK(f.d.halt() == Status::BadState);
+	CHECK(f.d.resume() == Status::BadState);
+	CHECK(f.d.poll(halted) == Status::BadState);
+	CHECK(f.t.log.empty());
+	f.attached();
+	f.d.detach(DetachAction::Run);
+	f.t.log.clear();
+	CHECK(f.d.halt() == Status::BadState);
+	CHECK(f.d.resume() == Status::BadState);
+	CHECK(f.d.poll(halted) == Status::BadState);
+	CHECK(f.t.log.empty());
+	CHECK(!f.d.running());
+}
+
+/* Task 12's test of the same name, without step() (Task 11) */
+TEST(debugger_halted_only_operations_refuse_a_running_cpu)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.set_breakpoint(1, 0x4600) == Status::Ok);
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.mem_writes.clear();
+	uint32_t regs[16] = {};
+	uint8_t buf[2] = {};
+	CHECK(f.d.read_regs(regs) == Status::Running);
+	CHECK(f.d.write_reg(4, 0) == Status::Running);
+	CHECK(f.d.read_mem(0x2400, 1, buf) == Status::Running);
+	CHECK(f.d.write_mem(0x2400, 1, buf) == Status::Running);
+	CHECK(f.d.set_breakpoint(0, 0x4400) == Status::Running);
+	CHECK(f.d.clear_breakpoint(1) == Status::Running);
+	CHECK(f.d.clear_breakpoint(msp430::kAllBreakpoints) == Status::Running);
+	CHECK(f.t.log.empty());
+	CHECK(f.t.mem_writes.empty());
+	CHECK(f.d.running());
+}

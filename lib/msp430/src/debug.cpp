@@ -118,7 +118,21 @@
  *    drive in place of breakpoint 7. Breakpoints change only while the CPU
  *    is halted (the DLL also changes hardware breakpoints of a running
  *    CPU), and the index and address are checked (BadArg; the DLL checks
- *    neither).
+ *    neither);
+ *  - stop detection: WaitForEem checks the JTAG ID (jtagIdIsValid, lines
+ *    84-87) and, if it is not valid, reports no event; the DLL polls on.
+ *    poll() takes an ID other than 0x91 for a lost target (a reset or a
+ *    power loss ends JTAG access) and ends the session with TargetError: an
+ *    attempt to turn the EEM off (EEM control 0x0006), IR_CNTRL_SIG_RELEASE,
+ *    the pins released, nothing written to the target's memory. halt() and
+ *    detach() of a running CPU go through poll() and do the same;
+ *  - halt() makes WaitForEem's check before
+ *    SyncJtag_Conditional_SaveContextXv2, so that a CPU the EEM has already
+ *    stopped is reported as stopped at a breakpoint. The DLL's stop
+ *    (DLL430_OldApiV3::State with stop, DebugManagerMSP430::stop) runs the
+ *    macro alone, whose own look at EEM_STOPPED then skips the stop request
+ *    as here. After a breakpoint stop, the breakpoint whose address is the
+ *    stop PC is named; the DLL reports only that one was hit.
  *
  * Copyright (C) 2012 Texas Instruments Incorporated - http://www.ti.com/
  *
@@ -428,8 +442,9 @@ void Debugger::eem_write(uint8_t reg, uint32_t value)
 
 /* ---- context save and restore ---- */
 
-/* Not in MSPDS: release a CPU that has not reached full emulation, without
- * writing anything to the target's memory, and let go of the pins. EEM
+/* Not in MSPDS: release a CPU that is not in full emulation (not yet
+ * synchronized, or running when its JTAG ID was lost), without writing
+ * anything to the target's memory, and let go of the pins. EEM
  * registers only: the EEM is turned off (once the reset path has switched
  * the system clocks to JCK, the caller switches them back first,
  * restore_system_clocks()). */
@@ -748,10 +763,16 @@ Status Debugger::attach(AttachMode mode, uint32_t slot_hz, Identity &id)
 	return Status::Ok;
 }
 
+/* A running CPU is stopped first and then let go with its context restored,
+ * as the DLL's Close does (DLL430_OldApiV3.cpp:556-567: State with stop,
+ * then Run(FREE_RUN), EEM control 0x0006). */
 void Debugger::detach(DetachAction action)
 {
 	if (!attached_) {
 		return;
+	}
+	if (running_ && halt() != Status::Ok) {
+		return; /* halt() failed and has let the CPU go */
 	}
 	clear_triggers();
 	if (action == DetachAction::Reset) {
@@ -969,6 +990,85 @@ Status Debugger::clear_breakpoint(unsigned index)
 		return Status::BadArg;
 	}
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
+}
+
+/* ---- run control ---- */
+
+/* The DLL's stop (DLL430_OldApiV3::State with stop, DebugManagerMSP430::stop
+ * and saveContext): SyncJtag_Conditional_SaveContextXv2, which stops the CPU
+ * through the EEM. WaitForEem's check first is not in the DLL (see the
+ * header). */
+Status Debugger::halt()
+{
+	bool halted = false;
+	Status st = poll(halted);
+	if (st != Status::Ok || halted) {
+		return st;
+	}
+	st = sync_conditional();
+	if (st != Status::Ok) {
+		return st; /* the CPU has been let go */
+	}
+	running_ = false;
+	reason_ = StopReason::Request;
+	bp_hit_ = kNoBreakpoint;
+	return Status::Ok;
+}
+
+/* DebugManagerMSP430::run (DebugManagerMSP430.cpp:287-294):
+ * RestoreContext_ReleaseJtagXv2 with EEM control 0x0007, as the DLL sends it
+ * when breakpoints are polled (controlMask != 0), mdb = 0, releaseJtag = 0,
+ * ulpDebug = 0. */
+Status Debugger::resume()
+{
+	if (!attached_) {
+		return Status::BadState;
+	}
+	if (running_) {
+		return Status::Running;
+	}
+	restore_and_release(kEmuClkEn | kClearStop | kEemEn);
+	running_ = true;
+	reason_ = StopReason::None;
+	bp_hit_ = kNoBreakpoint;
+	return Status::Ok;
+}
+
+/* WaitForEem.c:61-111 with the mask 0x80 the DLL's PollingManager passes
+ * (PollingManager.cpp:221, 240-242), then SyncJtag_Conditional_SaveContextXv2
+ * as DebugManagerMSP430::runEvent does on BP_HIT_FLAG (saveContext). The JTAG
+ * ID check ends the session here (see the header). */
+Status Debugger::poll(bool &halted)
+{
+	halted = !running_;
+	if (!attached_) {
+		return Status::BadState;
+	}
+	if (!running_) {
+		return Status::Ok;
+	}
+	if (tap_.ir_shift(kIrCntrlSigCapture) != kJtagId91) { /* jtagIdIsValid */
+		abandon();
+		return Status::TargetError;
+	}
+	if ((read_control() & kEemStopped) == 0) {
+		return Status::Ok;
+	}
+	const Status st = sync_conditional();
+	if (st != Status::Ok) {
+		return st; /* the CPU has been let go */
+	}
+	running_ = false;
+	halted = true;
+	reason_ = StopReason::Breakpoint;
+	bp_hit_ = kNoBreakpoint;
+	for (unsigned i = 0; i < kHwBreakpoints; ++i) { /* not in MSPDS, see the header */
+		if ((bp_used_ & (1u << i)) != 0 && bp_addr_[i] == ctx_.pc) {
+			bp_hit_ = static_cast<uint8_t>(i);
+			break;
+		}
+	}
+	return Status::Ok;
 }
 
 } // namespace msp430
