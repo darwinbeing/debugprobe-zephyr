@@ -39,6 +39,15 @@ struct Fx {
 		CHECK(!t.flash_write_attempt);
 	}
 
+	/* None of the five flags the destructor checks is set. Checked after
+	 * each operation of a sequence, a failure names the operation that set
+	 * one. */
+	bool no_fault() const
+	{
+		return !t.jmb_protocol_error && !t.eem_protocol_error && !t.password_violation &&
+		       !t.mem_protocol_error && !t.flash_write_attempt;
+	}
+
 	/* The CPU runs and is not in a low-power mode: the first EEM control
 	 * read says "not stopped", the one after the stop request "stopped".
 	 * The SR read during the sync returns `sr`. */
@@ -753,6 +762,31 @@ TEST(debugger_register_access_detects_a_dead_link)
 		CHECK(f.d.read_regs(regs) == Status::TargetError);
 		CHECK(f.d.write_reg(4, 0x1234) == Status::TargetError);
 	}
+}
+
+/* Registers, as the memory, breakpoint and run-control tests of this kind
+ * (together Task 12's debugger_operations_need_an_attached_cpu). PC and SR
+ * live in the saved context (no TAP traffic even when attached): only their
+ * status shows the check. */
+TEST(debugger_register_access_needs_an_attached_cpu)
+{
+	Fx f;
+	uint32_t regs[16] = {};
+	CHECK(f.d.read_regs(regs) == Status::BadState);
+	CHECK(f.d.write_reg(4, 0) == Status::BadState);
+	CHECK(f.d.write_reg(0, 0x4600) == Status::BadState);
+	CHECK(f.d.write_reg(2, 0x0008) == Status::BadState);
+	CHECK(f.t.log.empty());
+	f.attached();
+	f.d.detach(DetachAction::Run);
+	f.t.log.clear();
+	f.t.mem_writes.clear();
+	CHECK(f.d.read_regs(regs) == Status::BadState);
+	CHECK(f.d.write_reg(4, 0) == Status::BadState);
+	CHECK(f.d.write_reg(0, 0x4600) == Status::BadState);
+	CHECK(f.d.write_reg(2, 0x0008) == Status::BadState);
+	CHECK(f.t.log.empty());
+	CHECK(f.t.mem_writes.empty());
 }
 
 TEST(debugger_write_reg_rejects_bad_arguments)
@@ -1608,6 +1642,8 @@ TEST(debugger_detach_of_a_lost_running_target_only_lets_go)
 	}
 }
 
+/* With Task 12's debugger_operations_need_an_attached_cpu: detach does
+ * nothing either, before any attach and a second time */
 TEST(debugger_run_control_needs_an_attached_cpu)
 {
 	Fx f;
@@ -1617,18 +1653,25 @@ TEST(debugger_run_control_needs_an_attached_cpu)
 	CHECK(f.d.poll(halted) == Status::BadState);
 	CHECK(halted); /* as documented: true when not attached */
 	CHECK(f.d.step() == Status::BadState);
+	f.d.detach(DetachAction::Run);
+	f.d.detach(DetachAction::Reset);
 	CHECK(f.t.log.empty());
 	f.attached();
 	f.d.detach(DetachAction::Run);
 	f.t.log.clear();
+	f.t.mem_writes.clear();
 	CHECK(f.d.halt() == Status::BadState);
 	CHECK(f.d.resume() == Status::BadState);
 	halted = false;
 	CHECK(f.d.poll(halted) == Status::BadState);
 	CHECK(halted);
 	CHECK(f.d.step() == Status::BadState);
+	f.d.detach(DetachAction::Run);
+	f.d.detach(DetachAction::Reset);
 	CHECK(f.t.log.empty());
+	CHECK(f.t.mem_writes.empty());
 	CHECK(!f.d.running());
+	CHECK(!f.d.attached());
 }
 
 TEST(debugger_halt_refuses_a_watchdog_without_its_password)
@@ -2217,4 +2260,128 @@ TEST(debugger_step_after_an_sr_write_clearing_cpuoff_uses_the_trigger)
 				   step_give_back(kTb0Zero));
 	CHECK(f.d.stop_reason() == StopReason::Step);
 	CHECK_EQ(f.d.pc(), 0x4520u);
+}
+
+/* attach() on an open session ends it as detach(Run) does, a running CPU
+ * halted first; the new session then starts from the identify step, with
+ * no breakpoint of the old one left. */
+TEST(debugger_attach_detaches_an_open_session_first)
+{
+	const Log detach_halted = clear_triggers() +
+				  restore_release(0x4520, 0x0008, 0x6904, 0x0006) + Log{"close"};
+	const Log new_session = identify_log() + eem_stop(1, kTb0Zero) +
+				sync_tail(0x6904, 0x0008) + read_word(0x1A04) + clear_triggers() +
+				Log{"ir:28", "dr16:0000"};
+	for (const bool running : {false, true}) {
+		Fx f;
+		f.attached();
+		REQUIRE(f.d.set_breakpoint(3, 0x4600) == Status::Ok);
+		Log halt;
+		if (running) {
+			REQUIRE(f.d.resume() == Status::Ok);
+			/* the halt: WaitForEem's look, the sync's look, the stop poll;
+			 * then the new session's look and stop poll */
+			f.t.eem_control_script = {0x0000, 0x0000, 0x0080, 0x0000, 0x0080};
+			f.t.captured = {0x0008, 0x0000, 0x0008, 0x0000};
+			const unsigned tb0[5] = {0, 0, 0, 0, 0x0008}; /* BREAKREACT: breakpoint 3 */
+			halt = Log{"ir:28", "ir:d0", "dr16:0000"} + eem_stop(1, tb0) +
+			       sync_tail(0x6904, 0x0008);
+		} else {
+			f.running_cpu();
+		}
+		f.t.log.clear();
+		REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
+		CHECK(f.scripts_consumed());
+		CHECK_LOG(f.t.log, halt + detach_halted + new_session);
+		CHECK(f.d.attached());
+		CHECK(!f.d.running());
+		CHECK(f.d.stop_reason() == StopReason::Request);
+		CHECK_EQ(f.t.eem[0x1E], 0u);
+		REQUIRE(f.d.set_breakpoint(1, 0x4400) == Status::Ok);
+		CHECK_EQ(f.t.eem[0x80], 0x0002u); /* breakpoint 3 no longer counts */
+	}
+}
+
+/* The debugger never starts a funclet and never writes the flash
+ * controller or flash: every operation, run against the fake, writes
+ * memory only at WDTCTL, SFRIFG1 and the RAM address the test asks for.
+ * The five fault flags are checked after each operation (the fixture
+ * checks them, flash writes included, at the end of every test). */
+TEST(debugger_never_writes_flash)
+{
+	Fx f;
+	f.t.memory[0x0102] = 0x0008; /* SFRIFG1.VMAIFG: reset and halt clears it */
+	/* firmware words in main flash, copied to RAM below */
+	f.t.memory[0x4400] = 0x4031;
+	f.t.memory[0x4402] = 0x4400;
+	f.t.memory[0x4404] = 0x40B2;
+	f.t.memory[0x4406] = 0x5A80;
+	REQUIRE(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::Ok);
+	CHECK(f.no_fault());
+	f.d.detach(DetachAction::Run);
+	CHECK(f.no_fault());
+	REQUIRE(f.attach() == Status::Ok);
+	CHECK(f.no_fault());
+	uint32_t regs[16] = {};
+	uint8_t buf[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+	bool halted = true;
+	CHECK(f.d.read_regs(regs) == Status::Ok);
+	CHECK(f.no_fault());
+	CHECK(f.d.write_reg(5, 0x1234) == Status::Ok);
+	CHECK(f.no_fault());
+	CHECK(f.d.write_reg(0, 0x4600) == Status::Ok);
+	CHECK(f.no_fault());
+	CHECK(f.d.read_mem(0x4400, 4, buf) == Status::Ok);
+	CHECK(f.no_fault());
+	CHECK(f.d.write_mem(0x2400, 4, buf) == Status::Ok);
+	CHECK(f.no_fault());
+	CHECK(f.d.set_breakpoint(1, 0x4600) == Status::Ok);
+	CHECK(f.no_fault());
+	f.t.eem_control_script = {0x0000, 0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	CHECK(f.d.step() == Status::Ok);
+	CHECK(f.no_fault());
+	CHECK(f.d.resume() == Status::Ok);
+	CHECK(f.no_fault());
+	CHECK(f.d.poll(halted) == Status::Ok);
+	CHECK(!halted);
+	CHECK(f.no_fault());
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	CHECK(f.d.halt() == Status::Ok);
+	CHECK(f.no_fault());
+	CHECK(f.d.clear_breakpoint(msp430::kAllBreakpoints) == Status::Ok);
+	CHECK(f.no_fault());
+	f.d.detach(DetachAction::Run);
+	CHECK(f.no_fault());
+	f.running_cpu();
+	REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
+	CHECK(f.no_fault());
+	f.d.detach(DetachAction::Reset);
+	CHECK(f.no_fault());
+	/* every scripted answer used: captured, eem_control_script, mab_script
+	 * and cntrl_sig_script */
+	CHECK(f.scripts_consumed());
+
+	using Write = std::pair<uint32_t, uint16_t>;
+	std::vector<Write> ram;
+	std::vector<Write> sfr;
+	for (const Write &w : f.t.mem_writes) {
+		const bool ram_word = w.first >= 0x2400u && w.first < 0x2408u;
+		CHECK(w.first == 0x015Cu || w.first == 0x0102u || ram_word);
+		CHECK(!(w.first >= 0x0140u && w.first < 0x0150u)); /* FCTL1..FCTL4 */
+		if (ram_word) {
+			ram.push_back(w);
+		}
+		if (w.first == 0x0102u) {
+			sfr.push_back(w);
+		}
+	}
+	/* the writes the operations are meant to make did reach the fake: the
+	 * words read from flash into RAM, VMAIFG cleared */
+	CHECK(ram == (std::vector<Write>{{0x2400, 0x4031}, {0x2402, 0x4400},
+					 {0x2404, 0x40B2}, {0x2406, 0x5A80}}));
+	CHECK(sfr == (std::vector<Write>{{0x0102, 0x0000}}));
+	CHECK(f.t.jmb_in.empty()); /* nothing fed to a funclet */
+	CHECK(!f.t.jmb_protocol_error);
 }
