@@ -92,9 +92,22 @@ class PacketReaderTest(unittest.TestCase):
                           ("interrupt", None)])
 
     def test_0x03_inside_a_packet_is_data(self):
-        # an escaped '#' is '}' 0x03: no interrupt
+        # 0x03 inside a packet is data (a raw 0x03 in binary data, or the
+        # second byte of an escaped '#'), not an interrupt
         r = rsp.PacketReader()
         self.assertEqual(r.feed(b"$X2400,1:}\x03#35"), [("packet", b"X2400,1:}\x03")])
+        self.assertEqual(r.feed(wire(b"X2400,1:\x03")), [("packet", b"X2400,1:\x03")])
+
+    def test_an_unfinished_packet_is_limited(self):
+        self.assertEqual(rsp.MAX_UNFINISHED, 2 * 0x1000 + 4)
+        r = rsp.PacketReader()
+        self.assertEqual(r.feed(b"$" + b"a" * (rsp.MAX_UNFINISHED - 2)), [])
+        self.assertEqual(r.feed(b"a"), [])  # MAX_UNFINISHED bytes: still waiting
+        self.assertEqual(r.feed(b"a\x03"), [("bad", None)])
+        self.assertEqual(r.feed(b"\x03$g#67"), [("interrupt", None), ("packet", b"g")])
+        # a long packet whose '#' has arrived is not cut
+        payload = b"m" * rsp.MAX_UNFINISHED
+        self.assertEqual(rsp.PacketReader().feed(rsp.frame(payload)), [("packet", payload)])
 
     def test_bad_checksums_get_a_bad_event(self):
         r = rsp.PacketReader()

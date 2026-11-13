@@ -20,6 +20,10 @@ ESCAPE = 0x7D  # '}'
 _SPECIAL = b"#$*}"
 _HEX = frozenset(b"0123456789abcdefABCDEF")
 _SINGLE = {INTERRUPT: "interrupt", ord("+"): "ack", ord("-"): "nack"}
+# The most an unfinished packet may buffer before its '#': twice the
+# PacketSize gdbserver.py announces (0x1000), as if every byte were escaped,
+# plus '$', '#' and the checksum.
+MAX_UNFINISHED = 2 * 0x1000 + 4
 
 
 def checksum(payload: bytes) -> int:
@@ -64,10 +68,12 @@ class PacketReader:
     ("packet", payload), ("bad", None) for a packet with a wrong checksum
     (answer it with a nack and GDB sends it again), ("interrupt", None),
     ("ack", None) and ("nack", None). The payload is the bytes as sent;
-    binary data in it is still escaped. 0x03 inside a packet is data (an
-    escaped '#'), not an interrupt. Other bytes between packets are dropped,
-    and so is an unfinished packet when a new '$' arrives (packets never
-    contain a raw '$'). An incomplete packet waits for more data."""
+    binary data in it is still escaped. 0x03 inside a packet is data (a raw
+    0x03 in binary data, or the second byte of an escaped '#'), not an
+    interrupt. Other bytes between packets are dropped, and so is an
+    unfinished packet when a new '$' arrives (packets never contain a raw
+    '$'). An incomplete packet waits for more data, up to MAX_UNFINISHED
+    bytes without a '#': beyond that it is dropped as ("bad", None)."""
 
     def __init__(self):
         self._buf = bytearray()
@@ -88,6 +94,10 @@ class PacketReader:
             if restart > 0:
                 del buf[:restart]
                 continue
+            if end < 0 and len(buf) > MAX_UNFINISHED:
+                del buf[:]
+                events.append(("bad", None))
+                break
             if end < 0 or len(buf) < end + 3:
                 break
             raw, digits = bytes(buf[1:end]), bytes(buf[end + 1:end + 3])
