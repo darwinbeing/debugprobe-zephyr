@@ -59,10 +59,16 @@
  *    at 0x000E as in MSPDS: MCLK, SMCLK and ACLK stop while the CPU is
  *    halted. It also ends there when the macro fails after switching the
  *    clocks to JCK (0x6D8E); MSPDS then returns with them on JCK;
- *  - read_regs keeps each value to 20 bits; ReadAllCpuRegsXv2 passes 24
- *    bits of the capture on. write_reg writes one register (the macro
+ *  - registers: read_regs captures the JTAG ID as ReadAllCpuRegsXv2 does
+ *    but does not use it; it always takes the safe-PC step, which MSPDS
+ *    takes for 0x91, 0x98 and 0x99 only. read_regs and write_reg end with
+ *    the init-state check (above), which also checks the ID; MSPDS checks
+ *    nothing there. read_regs keeps each value to 20 bits; the macro passes
+ *    24 bits of the capture on. write_reg writes one register (the macro
  *    writes R1 and R4-R15 together) and refuses a value above 20 bits, an
- *    odd PC or an SR above 16 bits with BadArg; the macro drops bits 20-23;
+ *    odd PC or an SR above 16 bits with BadArg; the macro drops bits 20-23.
+ *    It clears bit 0 of SP, which the DLL does (CpuMemoryAccess::write)
+ *    and the macro does not;
  *  - SingleStepXv2 polls up to 496 times as MSPDS does (its counter starts
  *    at 4); if the CPU has not stopped by then, it is stopped as halt()
  *    does, trigger block 0 is restored and Timeout returned (MSPDS returns
@@ -730,7 +736,9 @@ Status Debugger::read_regs(uint32_t regs[16])
 	regs[0] = ctx_.pc;
 	regs[2] = ctx_.sr;
 	regs[3] = 0;
-	tap_.ir_shift(kIrCntrlSigCapture); /* id: 0x91 takes the safe-PC step below */
+	/* id, unchecked: MSPDS takes the safe-PC step for 0x91/0x98/0x99; the
+	 * final in_full_emulation() checks the ID. */
+	tap_.ir_shift(kIrCntrlSigCapture);
 	for (unsigned r = 1; r < 16; ++r) {
 		if (r == 2) {
 			r += 2;
@@ -743,6 +751,9 @@ Status Debugger::read_regs(uint32_t regs[16])
 		tap_.set_tclk();
 		tap_.ir_shift(kIrAddrCapture);
 	}
+	/* With the alternate ROM address nothing was moved to the mailbox;
+	 * MSPDS clears it anyway, which discards a 32-bit message the firmware
+	 * posted. */
 	clear_jmb_out();
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
@@ -767,6 +778,9 @@ Status Debugger::write_reg(unsigned index, uint32_t value)
 	if (index == 2) {
 		ctx_.sr = static_cast<uint16_t>(value);
 		return Status::Ok;
+	}
+	if (index == 1) { /* as the DLL does, CpuMemoryAccess.cpp:106-110 */
+		value &= ~1u;
 	}
 	write_cpu_reg(mova_imm(index, value), static_cast<uint16_t>(value));
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;

@@ -63,10 +63,16 @@ public:
 	Status step();
 
 	/* R0 (PC) and R2 (SR) come from the saved context, R3 reads 0. Values
-	 * are 20 bits wide (SR 16). */
+	 * are 20 bits wide (SR 16). BadState when not attached, Running while
+	 * the CPU runs; TargetError if the CPU is no longer under JTAG control
+	 * afterwards (`regs` is filled anyway). */
 	Status read_regs(uint32_t regs[16]);
-	/* R0 and R2 change the saved context, which is written back on release.
-	 * R3 cannot be written. */
+	/* R0 and R2 change the saved context, which is written back on release;
+	 * the others are written to the CPU, SP with bit 0 cleared (as the DLL
+	 * does). BadState and Running as read_regs; BadArg for an index above
+	 * 15, R3, a value above 20 bits, an odd PC or an SR above 16 bits;
+	 * TargetError if the CPU is no longer under JTAG control after a write
+	 * to the CPU. */
 	Status write_reg(unsigned index, uint32_t value);
 	/* Halted only. Little-endian byte pairs, one per word. The CPU context
 	 * is preserved. TargetError if the CPU is no longer under JTAG control

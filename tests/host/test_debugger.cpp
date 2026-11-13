@@ -650,7 +650,89 @@ TEST(debugger_write_reg)
 	CHECK_EQ(f.d.pc(), 0x4600u);
 	uint32_t regs[16] = {};
 	REQUIRE(f.d.read_regs(regs) == Status::Ok);
+	CHECK_EQ(regs[0], 0x4600u);
 	CHECK_EQ(regs[2], 1u);
+}
+
+TEST(debugger_write_reg_accepts_the_limits)
+{
+	Fx f;
+	f.attached();
+	CHECK(f.d.write_reg(15, 0xFFFFF) == Status::Ok);
+	/* MOVA #0xFFFFF, R15 */
+	CHECK_LOG(f.t.log, (write_reg(0x0F8F, 0xFFFF) + Log{"ir:28", "dr16:0000"}));
+	f.t.log.clear();
+	CHECK(f.d.write_reg(0, 0xFFFFE) == Status::Ok);
+	CHECK(f.d.write_reg(2, 0xFFFF) == Status::Ok);
+	CHECK(f.t.log.empty());
+	uint32_t regs[16] = {};
+	REQUIRE(f.d.read_regs(regs) == Status::Ok);
+	CHECK_EQ(regs[0], 0xFFFFEu);
+	CHECK_EQ(regs[2], 0xFFFFu);
+}
+
+TEST(debugger_write_reg_clears_bit_0_of_sp)
+{
+	/* as the DLL does, CpuMemoryAccess.cpp:106-110 */
+	Fx f;
+	f.attached();
+	CHECK(f.d.write_reg(1, 0x43F1) == Status::Ok);
+	/* MOVA #0x043F0, SP */
+	CHECK_LOG(f.t.log, (write_reg(0x0081, 0x43F0) + Log{"ir:28", "dr16:0000"}));
+}
+
+TEST(debugger_written_pc_and_sr_are_restored_on_detach)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.write_reg(0, 0x4600) == Status::Ok);
+	REQUIRE(f.d.write_reg(2, 0x0018) == Status::Ok); /* LPM0: CPUOFF + GIE */
+	f.d.detach(DetachAction::Run);
+	/* SR goes to the CPU as written; with CPUOFF set the PC is released 2
+	 * lower (Note 1411) */
+	CHECK_LOG(f.t.log, clear_triggers() + restore_release(0x4600, 0x0018, 0x6904, 0x0006) +
+				   Log{"close"});
+	CHECK(contains(f.t.log, set_pc(0x45FE)));
+}
+
+TEST(debugger_read_regs_keeps_20_bits)
+{
+	Fx f;
+	f.attached();
+	/* SP, R4, R5: low word, high word each; the high words carry bits above
+	 * bit 19 */
+	f.t.captured = {0x43F0, 0xFFFF, 0x0004, 0x0000, 0x1234, 0x00FF};
+	uint32_t regs[16] = {};
+	REQUIRE(f.d.read_regs(regs) == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK_EQ(regs[1], 0xF43F0u);
+	CHECK_EQ(regs[4], 0x4u);
+	CHECK_EQ(regs[5], 0xF1234u);
+}
+
+TEST(debugger_register_access_detects_a_dead_link)
+{
+	{
+		Fx f;
+		f.attached();
+		f.t.cntrl_sig = 0x0000; /* the CPU has left full emulation */
+		f.t.captured = {0x43F0, 0x0000};
+		uint32_t regs[16] = {};
+		CHECK(f.d.read_regs(regs) == Status::TargetError);
+		/* filled anyway */
+		CHECK_EQ(regs[0], 0x4520u);
+		CHECK_EQ(regs[1], 0x43F0u);
+		CHECK_EQ(regs[2], 0x0008u);
+		CHECK(f.d.write_reg(4, 0x1234) == Status::TargetError);
+	}
+	{
+		Fx f;
+		f.attached();
+		f.t.jtag_id = 0xFF; /* the final check also tests the JTAG ID */
+		uint32_t regs[16] = {};
+		CHECK(f.d.read_regs(regs) == Status::TargetError);
+		CHECK(f.d.write_reg(4, 0x1234) == Status::TargetError);
+	}
 }
 
 TEST(debugger_write_reg_rejects_bad_arguments)
