@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <string>
+#include <utility>
 #include <vector>
 
 using msp430::AttachMode;
@@ -919,4 +920,52 @@ TEST(debugger_memory_access_crosses_a_64k_boundary)
 	/* flash addresses on purpose, as in the test above */
 	CHECK(f.t.flash_write_attempt);
 	f.t.flash_write_attempt = false;
+}
+
+TEST(debugger_read_mem_returns_the_saved_watchdog)
+{
+	/* TI's DLL, RegisterAccessBase.cpp:67-79: the value the program gets
+	 * back on release, not the held one */
+	Fx f;
+	f.t.memory[0x015C] = 0x6936;
+	f.attached();
+	CHECK_EQ(f.t.memory[0x015C], 0x69B6); /* held while halted */
+	f.t.memory[0x015A] = 0x1111;
+	f.t.memory[0x015E] = 0x2222;
+	uint8_t out[6] = {};
+	REQUIRE(f.d.read_mem(0x015A, 3, out) == Status::Ok);
+	CHECK(contains(f.t.log, Log{ir(0xC1), d20(0x015C)})); /* still read on the bus */
+	const uint8_t want[] = {0x11, 0x11, 0x36, 0x69, 0x22, 0x22};
+	CHECK_BYTES(out, want);
+}
+
+TEST(debugger_write_mem_to_the_watchdog_keeps_it_held)
+{
+	/* TI's DLL, RegisterAccessBase.cpp:93-146: the low byte is kept for the
+	 * release; the live write carries the password and the hold bit */
+	const struct {
+		uint16_t written, live, released;
+	} cases[] = {
+		{0x0004, 0x5A84, 0x5A04}, /* no password: no PUC */
+		{0x5A80, 0x5A80, 0x5A80}, /* held by the program */
+	};
+	for (const auto &c : cases) {
+		Fx f;
+		f.t.memory[0x015C] = 0x6936;
+		f.attached();
+		const uint8_t data[] = {0x11, 0x11, static_cast<uint8_t>(c.written),
+					static_cast<uint8_t>(c.written >> 8), 0x22, 0x22};
+		REQUIRE(f.d.write_mem(0x015A, 3, data) == Status::Ok);
+		REQUIRE(f.t.mem_writes.size() == 3u);
+		CHECK(f.t.mem_writes[0] == (std::pair<uint32_t, uint16_t>{0x015A, 0x1111}));
+		CHECK(f.t.mem_writes[1] == (std::pair<uint32_t, uint16_t>{0x015C, c.live}));
+		CHECK(f.t.mem_writes[2] == (std::pair<uint32_t, uint16_t>{0x015E, 0x2222}));
+		uint8_t out[2] = {};
+		REQUIRE(f.d.read_mem(0x015C, 1, out) == Status::Ok);
+		CHECK_EQ(out[0] | (out[1] << 8), 0x6900 | (c.written & 0xFF));
+		f.t.mem_writes.clear();
+		f.d.detach(DetachAction::Run);
+		REQUIRE(f.t.mem_writes.size() == 1u);
+		CHECK(f.t.mem_writes[0] == (std::pair<uint32_t, uint16_t>{0x015C, c.released}));
+	}
 }

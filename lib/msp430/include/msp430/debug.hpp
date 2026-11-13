@@ -77,17 +77,21 @@ public:
 	Status write_reg(unsigned index, uint32_t value);
 	/* `nwords` words from `addr` on, little-endian byte pairs, one per word.
 	 * Plain bus accesses: reading interrupt-vector registers, RXBUF or
-	 * vacant addresses has its usual effects. The PC is not moved: the
-	 * saved context stays valid. BadState when not attached, Running while
-	 * the CPU runs, BadArg (no TAP traffic) for an odd address, an address
-	 * above 20 bits or words past 0xFFFFF; no words: Ok, no TAP traffic.
-	 * TargetError if the CPU is no longer under JTAG control afterwards:
-	 * read_mem fills `dst` anyway; write_mem has sent every word, but those
-	 * after the link died did not arrive. write_mem makes the same check
-	 * before its first write and returns TargetError without writing
-	 * anything if it fails. Other address checks are the caller's
-	 * (Session): write_mem writes any address it is given, flash and the
-	 * flash controller included. */
+	 * vacant addresses has its usual effects. The PC is not moved. WDTCTL
+	 * (0x015C) goes through the saved context, as TI's DLL does: read_mem
+	 * returns 0x69 with the saved low byte, which the program gets back on
+	 * release; write_mem saves the written low byte for the release and
+	 * writes it with the password 0x5A and the hold bit (the written high
+	 * byte is ignored), so the watchdog stays held while the CPU is halted.
+	 * BadState when not attached, Running while the CPU runs, BadArg (no
+	 * TAP traffic) for an odd address, an address above 20 bits or words
+	 * past 0xFFFFF; no words: Ok, no TAP traffic. TargetError if the CPU is
+	 * no longer under JTAG control afterwards: read_mem fills `dst` anyway;
+	 * write_mem has sent every word, but those after the link died did not
+	 * arrive. write_mem makes the same check before its first write and
+	 * returns TargetError without writing anything if it fails. Other
+	 * address checks are the caller's (Session): write_mem writes any
+	 * address it is given, flash and the flash controller included. */
 	Status read_mem(uint32_t addr, size_t nwords, uint8_t *dst);
 	Status write_mem(uint32_t addr, size_t nwords, const uint8_t *src);
 

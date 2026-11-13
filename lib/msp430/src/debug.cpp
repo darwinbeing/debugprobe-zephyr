@@ -37,6 +37,15 @@
  *    nothing for no words. The macros take any address and wrap at 20 bits
  *    (ReadMemWordsXv2 also clocks TCLK for no words); the DLL widens an odd
  *    start or end to whole words (RegisterAccessBase.cpp:104-121);
+ *  - read_mem and write_mem keep WDTCTL (0x015C) in step with the saved
+ *    context as TI's DLL does (RegisterAccessBase.cpp:67-79 and 93-146,
+ *    WatchdogControl.cpp), not the macros: read_mem still reads the word
+ *    on the bus but returns 0x69 and the saved low byte, the value the
+ *    program gets back on release (the DLL patches only the low byte);
+ *    write_mem saves the written low byte for the release and writes it
+ *    with the password 0x5A and the hold bit, so the watchdog stays held
+ *    while the CPU is halted and a written high byte without the password
+ *    causes no PUC;
  *  - when the init-state check or the WDTCTL password check fails during a
  *    sync (MSPDS checks neither, in both sync macros), the CPU is already in
  *    full emulation and the operation ends with TargetError. After
@@ -805,7 +814,8 @@ Status Debugger::write_reg(unsigned index, uint32_t value)
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
 
-/* ReadMemWordsXv2.c:57-83. No SetPcXv2: the saved context stays valid. */
+/* ReadMemWordsXv2.c:57-83. No SetPcXv2: the saved PC stays valid. The
+ * read mode, range checks and WDTCTL are not in MSPDS (see the header). */
 Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
 {
 	if (!attached_) {
@@ -824,12 +834,16 @@ Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
 	tap_.ir_shift(kIrCntrlSig16Bit); /* read mode; not in MSPDS, see the header */
 	tap_.dr_shift16(0x0501);
 	for (size_t i = 0; i < nwords; ++i) {
+		const uint32_t a = addr + 2u * static_cast<uint32_t>(i);
 		tap_.ir_shift(kIrAddr16Bit);
-		tap_.dr_shift20(addr + 2u * static_cast<uint32_t>(i));
+		tap_.dr_shift20(a);
 		tap_.set_tclk();
 		tap_.clr_tclk();
 		tap_.ir_shift(kIrDataCapture);
-		const uint16_t word = tap_.dr_shift16(0);
+		uint16_t word = tap_.dr_shift16(0);
+		if (a == kWdtCtl) { /* the DLL, RegisterAccessBase.cpp:67-79 */
+			word = static_cast<uint16_t>((kWdtReadPw << 8) | (ctx_.wdtctl & 0x00FFu));
+		}
 		dst[2 * i] = static_cast<uint8_t>(word);
 		dst[2 * i + 1] = static_cast<uint8_t>(word >> 8);
 	}
@@ -839,8 +853,9 @@ Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
 
-/* WriteMemWordsXv2.c:58-104; its loop body is WriteMemWordXv2. The check
- * before the first write is not in MSPDS (see the file header). */
+/* WriteMemWordsXv2.c:58-104; its loop body is WriteMemWordXv2. The range
+ * checks, the check before the first write and WDTCTL are not in MSPDS (see
+ * the header). */
 Status Debugger::write_mem(uint32_t addr, size_t nwords, const uint8_t *src)
 {
 	if (!attached_) {
@@ -859,8 +874,13 @@ Status Debugger::write_mem(uint32_t addr, size_t nwords, const uint8_t *src)
 		return Status::TargetError;
 	}
 	for (size_t i = 0; i < nwords; ++i) {
-		write_word(addr + 2u * static_cast<uint32_t>(i),
-			   static_cast<uint16_t>(src[2 * i] | (src[2 * i + 1] << 8)));
+		const uint32_t a = addr + 2u * static_cast<uint32_t>(i);
+		uint16_t word = static_cast<uint16_t>(src[2 * i] | (src[2 * i + 1] << 8));
+		if (a == kWdtCtl) { /* the DLL, RegisterAccessBase.cpp:93-146 */
+			ctx_.wdtctl = static_cast<uint16_t>((kWdtReadPw << 8) | (word & 0x00FFu));
+			word = static_cast<uint16_t>(kWdtHold | (word & 0x00FFu));
+		}
+		write_word(a, word);
 	}
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
