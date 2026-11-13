@@ -50,6 +50,9 @@ public:
 	std::vector<std::pair<uint32_t, uint16_t>> mem_writes; /* (address, data) */
 	std::vector<uint16_t> jmb_in;         /* words the probe wrote to the mailbox */
 	bool jmb_protocol_error = false;      /* unexpected mailbox control word */
+	/* EEM exchange out of order: an IR shift between address and data, an
+	 * address above one byte, or a 16/20-bit shift under the EEM IR. */
+	bool eem_protocol_error = false;
 
 	/* Post a 32-bit value in the target's mailbox output. */
 	void push_jmb_out(uint32_t value) { jmb_out.push_back(value); }
@@ -104,6 +107,9 @@ private:
 	{
 		ir_ = ir;
 		jmb_phase_ = JmbPhase::Control;
+		if (eem_addr_pending_) {
+			eem_protocol_error = true; /* the data shift never came */
+		}
 		eem_addr_pending_ = false;
 		if (ir == msp430::kIrCntrlSigRelease && has_cntrl_sig_after_release) {
 			cntrl_sig = cntrl_sig_after_release;
@@ -116,6 +122,9 @@ private:
 	{
 		millis_now += millis_per_shift;
 		log.push_back(fmt("dr16:%04x", value));
+		if (ir_ == msp430::kIrEmexDataExchange32) {
+			eem_protocol_error = true;
+		}
 		switch (ir_) {
 		case msp430::kIrCntrlSigCapture:
 			return pop(cntrl_sig_script, cntrl_sig);
@@ -136,6 +145,9 @@ private:
 	uint32_t dr_shift20_(uint32_t value)
 	{
 		log.push_back(fmt("dr20:%05x", value));
+		if (ir_ == msp430::kIrEmexDataExchange32) {
+			eem_protocol_error = true;
+		}
 		if (ir_ == msp430::kIrAddr16Bit) {
 			addr_ = value;
 		}
@@ -152,6 +164,9 @@ private:
 			return 0;
 		}
 		if (!eem_addr_pending_) {
+			if (value > 0xFFu) {
+				eem_protocol_error = true; /* EEM addresses are one byte */
+			}
 			eem_addr_ = static_cast<uint8_t>(value);
 			eem_addr_pending_ = true;
 			return 0;
@@ -159,7 +174,8 @@ private:
 		eem_addr_pending_ = false;
 		const uint8_t reg = static_cast<uint8_t>(eem_addr_ & 0xFEu);
 		if ((eem_addr_ & 1u) != 0) {
-			return eem.count(reg) != 0 ? eem[reg] : 0;
+			const auto it = eem.find(reg);
+			return it != eem.end() ? it->second : 0;
 		}
 		eem[reg] = value;
 		eem_writes.push_back({reg, value});

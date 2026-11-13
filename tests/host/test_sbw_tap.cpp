@@ -305,6 +305,16 @@ TEST(sbw_tap_dr32_assembles_tdo_across_the_calls)
 	p.tdo_script.push_back((1u << 3) | (1u << 4));
 	p.tdo_script.push_back((1u << 1) | (1u << 2));
 	CHECK_EQ(t.dr_shift32(0), 0xC0000003u);
+	/* 0x0000000C: data bits 3 and 2 on cycles 31 and 32, either side of the
+	 * split (bit 31 of the first call, bit 0 of the second). */
+	p.tdo_script.push_back(1u << 31);
+	p.tdo_script.push_back(1u << 0);
+	CHECK_EQ(t.dr_shift32(0), 0x0000000Cu);
+	/* The same with ones on every cycle that carries no data (0..2, 35,
+	 * 36) and in bits 5..31 of the 5-cycle second call: ignored. */
+	p.tdo_script.push_back((1u << 31) | 0x7u);
+	p.tdo_script.push_back(0xFFFFFFF9u);
+	CHECK_EQ(t.dr_shift32(0), 0x0000000Cu);
 }
 
 TEST(sbw_tap_dr32_with_tclk_low_keeps_tclk_low)

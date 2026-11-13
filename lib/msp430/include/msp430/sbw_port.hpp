@@ -29,7 +29,9 @@ public:
 	/* Clock `count` (1..32) JTAG cycles. Bit i of tms/tdi belongs to cycle
 	 * i. Every TMS slot is plain (never the TMSLDH variant). Afterwards
 	 * SBWTCK is high and SBWTDIO is still driven at the last TDI level.
-	 * Returns the sampled TDO bits, bit i from cycle i. */
+	 * Returns the sampled TDO bits, bit i from cycle i. Consecutive calls
+	 * continue the same cycle stream; nothing is clocked between them, so
+	 * one scan may span several calls. */
 	virtual uint32_t cycles(uint32_t tms, uint32_t tdi, unsigned count) = 0;
 	/* One Run-Test/Idle cycle (TMS = 0) that sets TCLK to `level`.
 	 * `was_high` selects the TMSLDH variant of the TMS slot. */

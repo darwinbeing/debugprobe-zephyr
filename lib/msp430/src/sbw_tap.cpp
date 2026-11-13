@@ -115,8 +115,9 @@ void SbwTap::reset()
  *
  * `nbits` is 1..32. One port call clocks at most 32 cycles, so a longer scan
  * (the 32-bit DR scan has 3 + 32 + 2 = 37 cycles) is split into several
- * calls. Between two calls SBWTCK stays high and the TAP stays in Shift-DR;
- * SBW limits only the low phase of SBWTCK, not the high phase.
+ * calls. Between two calls SBWTCK stays high and the TAP waits in whatever
+ * state the last cycle of the earlier call left it (Shift-DR for the 32-bit
+ * DR scan); SBW limits only the low phase of SBWTCK, not the high phase.
  */
 uint32_t SbwTap::scan(bool ir, unsigned nbits, uint32_t data)
 {
@@ -171,8 +172,10 @@ uint32_t SbwTap::dr_shift20(uint32_t value)
 	return ((v << 16) + (v >> 4)) & 0xFFFFFu;
 }
 
-/* MSPDS hil_2w.c, _hil_2w_SetReg_XBits32: same framing, 32 data bits, no
- * de-scramble. */
+/* MSPDS hil_2w.c, _hil_2w_SetReg_XBits32: 32 data bits, no de-scramble.
+ * Framing as the other scans (SLAU320 AllShifts). MSPDS sbw_Shift differs
+ * only in the Update-DR TDI slot (TCLK level instead of 1), which the target
+ * does not sample. */
 uint32_t SbwTap::dr_shift32(uint32_t value)
 {
 	return scan(false, 32, value);

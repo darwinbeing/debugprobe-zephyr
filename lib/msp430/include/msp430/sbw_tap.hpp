@@ -3,7 +3,8 @@
  * IR_Shift / DR_Shift16 / DR_Shift20 / AllShifts / ResetTAP / SetTCLK_sbw /
  * ClrTCLK_sbw produce, and the StopJtag / ConnectJTAG /
  * EntrySequences_RstHigh_SBW / EntrySequences_RstLow_SBW pin sequences
- * (slau320, LowLevelFunc430Xv2.c, JTAGfunc430Xv2.c).
+ * (slau320, LowLevelFunc430Xv2.c, JTAGfunc430Xv2.c). The 32-bit DR shift
+ * (EEM register access) follows MSPDS _hil_2w_SetReg_XBits32 (hil_2w.c).
  */
 #include "msp430/sbw_port.hpp"
 #include "msp430/tap.hpp"
