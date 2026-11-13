@@ -84,7 +84,7 @@ class Device:
 
     def debug_writable(self, addr: int, length: int) -> bool:
         """Read-only debug sessions write RAM, and peripheral registers outside
-        the peripheral holes (flash controller, SYS, DMA). Nothing else."""
+        the peripheral holes (PMM, flash controller, SYS, DMA). Nothing else."""
         end = addr + length
         in_ram = self.ram[0] <= addr and end <= self.ram[1]
         in_peripherals = self.peripherals[0] <= addr and end <= self.peripherals[1]
