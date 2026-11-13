@@ -44,9 +44,26 @@ public:
 	 * returns the register (read) or stores its value (write). */
 	std::map<uint8_t, uint32_t> eem;
 
+	/* --- debug-layer model (msp430::Debugger) --- */
+	/* Word memory read through IR_DATA_CAPTURE right after an address was
+	 * loaded with IR_ADDR_16BIT (ReadMemWordXv2); writes through
+	 * IR_DATA_TO_ADDR update it. Missing addresses read 0. Defaults:
+	 * WDTCTL (password 0x69 on read), FCTL3 (not busy), the F5529 device
+	 * ID and a reset vector. */
+	std::map<uint32_t, uint16_t> memory = {
+		{0x015C, 0x6904}, {0x0144, 0x9658}, {0x1A04, 0x2955}, {0xFFFE, 0x441A}};
+	/* DR16 under IR_DATA_CAPTURE when no address is pending: the two words
+	 * (low, high) of every CPU register read (ReadCpuRegXv2). Default 0. */
+	std::deque<uint16_t> captured;
+	uint32_t mab = 0x04524;              /* DR20 under IR_ADDR_CAPTURE */
+	std::deque<uint32_t> mab_script;
+	uint16_t eem_control = 0x0000;       /* DR16 under IR_EMEX_READ_CONTROL */
+	std::deque<uint16_t> eem_control_script;
+
 	/* --- recordings --- */
 	std::vector<std::string> log;
 	std::vector<std::pair<uint8_t, uint32_t>> eem_writes; /* (address, value) */
+	std::vector<uint16_t> eem_control_writes; /* DR16 under IR_EMEX_WRITE_CONTROL */
 	std::vector<std::pair<uint32_t, uint16_t>> mem_writes; /* (address, data) */
 	std::vector<uint16_t> jmb_in;         /* words the probe wrote to the mailbox */
 	bool jmb_protocol_error = false;      /* unexpected mailbox control word */
@@ -111,6 +128,9 @@ private:
 			eem_protocol_error = true; /* the data shift never came */
 		}
 		eem_addr_pending_ = false;
+		if (ir != msp430::kIrDataCapture) {
+			addr_pending_ = false;
+		}
 		if (ir == msp430::kIrCntrlSigRelease && has_cntrl_sig_after_release) {
 			cntrl_sig = cntrl_sig_after_release;
 		}
@@ -136,6 +156,20 @@ private:
 			return jmb_shift(value);
 		case msp430::kIrDataToAddr:
 			mem_writes.push_back({addr_, value});
+			/* WDTCTL reads back with its read password 0x69 */
+			memory[addr_] = addr_ == 0x015C ? static_cast<uint16_t>(0x6900 | (value & 0xFF))
+							 : value;
+			return 0;
+		case msp430::kIrDataCapture:
+			if (addr_pending_) {
+				addr_pending_ = false;
+				return memory.count(addr_) != 0 ? memory[addr_] : 0;
+			}
+			return pop(captured, 0);
+		case msp430::kIrEmexReadControl:
+			return pop(eem_control_script, eem_control);
+		case msp430::kIrEmexWriteControl:
+			eem_control_writes.push_back(value);
 			return 0;
 		default:
 			return 0;
@@ -150,6 +184,10 @@ private:
 		}
 		if (ir_ == msp430::kIrAddr16Bit) {
 			addr_ = value;
+			addr_pending_ = true;
+		}
+		if (ir_ == msp430::kIrAddrCapture) {
+			return pop(mab_script, mab);
 		}
 		if (ir_ != msp430::kIrDeviceId) {
 			return 0;
@@ -260,4 +298,5 @@ private:
 	uint8_t eem_addr_ = 0;
 	uint8_t ir_ = 0;
 	uint32_t addr_ = 0;
+	bool addr_pending_ = false;
 };
