@@ -143,23 +143,34 @@ are 20-bit numbers in 32-bit fields.
   so is the peripheral window (the refused ranges below are per device). Any
   other address — main flash, information memory, BSL, vacant memory — is
   refused with `PROTECTED`. A wrong host table can therefore only narrow the
-  window, never open flash. Two more peripheral ranges are refused: the DMA
+  window, never open flash. Three more peripheral ranges are refused: the DMA
   module (F5529: 0x0500–0x053F), since a DMA transfer could copy into the
-  flash controller, and the SYS module (0x0180–0x019F: `SYSCTL.SYSRIVECT`
+  flash controller; the SYS module (0x0180–0x019F: `SYSCTL.SYSRIVECT`
   would move the interrupt vectors into RAM, `SYSBSLC` controls the BSL
-  area's protection).
+  area's protection); and the PMM module (0x0120–0x013F: a byte write to
+  `PMMCTL0` becomes a word write with the read-back password 0x96, which
+  resets the chip).
 - In read-only mode `DBG_WRITE_REG` to the PC is `PROTECTED` unless the new
   PC lies in the identified device's main flash (F5529: 0x4400–0x243FF) or
   equals the current PC (GDB writes all registers back). This keeps jumps
   into the BSL, information memory or host-written RAM out of reach.
 - What read-only mode guarantees: the probe never writes flash, the flash
-  controller, the DMA or the SYS registers for the host, and never moves the PC
+  controller, the PMM, the DMA or the SYS registers for the host, and never moves the PC
   outside main flash. It does not stop the firmware's own code from doing
   what it does when it runs (the firmware may write its own information
   memory), nor code the user places by other means, such as a changed return
   address on the stack.
 - New status `RUNNING` (0x0A): an operation that needs a halted CPU while it
   runs.
+- Reads (host side): GDB's map leaves out the BSL area, vacant memory
+  (0x0000–0x00FF, 0x0940–0x0FFF, 0x1B00–0x1BFF) and everything above main
+  flash. The GDB server also refuses, by default, reads of the registers
+  whose read has a side effect (interrupt-vector registers, serial receive
+  buffers, ADC12MEM, the JTAG mailbox inputs; the list is in the device
+  table), because GDB reads memory on its own (stack unwinding, caches) and
+  a stray read would make the firmware lose an interrupt or a byte;
+  `monitor read` reads one on purpose. The probe itself does not restrict
+  reads.
 
 ## Component Design
 
