@@ -850,3 +850,73 @@ TEST(debugger_read_mem_sets_read_mode_first)
 	CHECK_BYTES(out, want);
 	CHECK(f.t.mem_writes.empty());
 }
+
+TEST(debugger_memory_access_rejects_bad_ranges)
+{
+	Fx f;
+	f.attached();
+	uint8_t buf[4] = {};
+	CHECK(f.d.read_mem(0x2401, 1, buf) == Status::BadArg); /* odd */
+	CHECK(f.d.write_mem(0x2401, 1, buf) == Status::BadArg);
+	CHECK(f.d.read_mem(0x100000, 1, buf) == Status::BadArg); /* above 20 bits */
+	CHECK(f.d.write_mem(0x100000, 1, buf) == Status::BadArg);
+	CHECK(f.d.read_mem(0x200000, 1, buf) == Status::BadArg);
+	CHECK(f.d.write_mem(0x200000, 1, buf) == Status::BadArg);
+	CHECK(f.d.read_mem(0xFFFFE, 2, buf) == Status::BadArg); /* past 0xFFFFF */
+	CHECK(f.d.write_mem(0xFFFFE, 2, buf) == Status::BadArg);
+	CHECK(f.d.read_mem(0x2400, SIZE_MAX, buf) == Status::BadArg);
+	CHECK(f.d.write_mem(0x2400, SIZE_MAX, buf) == Status::BadArg);
+	CHECK(f.t.log.empty());
+}
+
+TEST(debugger_memory_access_of_no_words_does_nothing)
+{
+	Fx f;
+	f.attached();
+	CHECK(f.d.read_mem(0x2400, 0, nullptr) == Status::Ok);
+	CHECK(f.d.write_mem(0x2400, 0, nullptr) == Status::Ok);
+	CHECK(f.t.log.empty());
+}
+
+TEST(debugger_memory_access_reaches_the_last_word)
+{
+	Fx f;
+	f.attached();
+	f.t.memory[0xFFFFE] = 0x441A;
+	uint8_t out[2] = {};
+	REQUIRE(f.d.read_mem(0xFFFFE, 1, out) == Status::Ok);
+	CHECK(contains(f.t.log, Log{ir(0xC1), d20(0xFFFFE)}));
+	const uint8_t want[] = {0x1A, 0x44};
+	CHECK_BYTES(out, want);
+	f.t.log.clear();
+	const uint8_t data[] = {0x34, 0x12};
+	REQUIRE(f.d.write_mem(0xFFFFE, 1, data) == Status::Ok);
+	CHECK_LOG(f.t.log, (Log{"ir:28", "dr16:0000"} + write_word(0xFFFFE, 0x1234) +
+			    Log{"ir:28", "dr16:0000"}));
+	/* a flash address on purpose: write_mem passes on what it is given;
+	 * keeping it off flash is Session's job */
+	CHECK(f.t.flash_write_attempt);
+	f.t.flash_write_attempt = false;
+}
+
+TEST(debugger_memory_access_crosses_a_64k_boundary)
+{
+	Fx f;
+	f.attached();
+	f.t.memory[0x1FFFE] = 0x1111;
+	f.t.memory[0x20000] = 0x2222;
+	uint8_t out[4] = {};
+	REQUIRE(f.d.read_mem(0x1FFFE, 2, out) == Status::Ok);
+	CHECK(contains(f.t.log, Log{ir(0xC1), d20(0x1FFFE)}));
+	CHECK(contains(f.t.log, Log{ir(0xC1), d20(0x20000)}));
+	const uint8_t want[] = {0x11, 0x11, 0x22, 0x22};
+	CHECK_BYTES(out, want);
+	f.t.log.clear();
+	const uint8_t data[] = {0x34, 0x12, 0x78, 0x56};
+	REQUIRE(f.d.write_mem(0x1FFFE, 2, data) == Status::Ok);
+	CHECK_LOG(f.t.log, (Log{"ir:28", "dr16:0000"} + write_word(0x1FFFE, 0x1234) +
+			    write_word(0x20000, 0x5678) + Log{"ir:28", "dr16:0000"}));
+	/* flash addresses on purpose, as in the test above */
+	CHECK(f.t.flash_write_attempt);
+	f.t.flash_write_attempt = false;
+}

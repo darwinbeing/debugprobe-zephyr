@@ -32,6 +32,11 @@
  *    Cpuxv2::read_mem do; ReadMemWordsXv2 relies on the operation before
  *    it having left the CPU in read mode, and in write mode its bus cycles
  *    could be writes;
+ *  - read_mem and write_mem refuse an odd address, an address above 20 bits
+ *    or words past 0xFFFFF with BadArg before any TAP traffic, and do
+ *    nothing for no words. The macros take any address and wrap at 20 bits
+ *    (ReadMemWordsXv2 also clocks TCLK for no words); the DLL widens an odd
+ *    start or end to whole words (RegisterAccessBase.cpp:104-121);
  *  - when the init-state check or the WDTCTL password check fails during a
  *    sync (MSPDS checks neither, in both sync macros), the CPU is already in
  *    full emulation and the operation ends with TargetError. After
@@ -182,6 +187,13 @@ constexpr uint16_t mova_to_abs(unsigned reg) /* MOVA Rn, &abs */
 constexpr uint16_t mova_imm(unsigned reg, uint32_t value) /* MOVA #imm20, Rn */
 {
 	return static_cast<uint16_t>(0x0080u | ((value >> 8) & 0x0F00u) | (reg & 0x000Fu));
+}
+
+/* Not in MSPDS (see the file header): an even address and `nwords` words
+ * that end at or below 0xFFFFF. */
+constexpr bool word_range_ok(uint32_t addr, size_t nwords)
+{
+	return (addr & 1u) == 0 && addr < kAddressSpace && nwords <= (kAddressSpace - addr) / 2u;
 }
 
 } // namespace
@@ -802,6 +814,12 @@ Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
 	if (running_) {
 		return Status::Running;
 	}
+	if (!word_range_ok(addr, nwords)) {
+		return Status::BadArg;
+	}
+	if (nwords == 0) {
+		return Status::Ok;
+	}
 	tap_.clr_tclk();
 	tap_.ir_shift(kIrCntrlSig16Bit); /* read mode; not in MSPDS, see the header */
 	tap_.dr_shift16(0x0501);
@@ -830,6 +848,12 @@ Status Debugger::write_mem(uint32_t addr, size_t nwords, const uint8_t *src)
 	}
 	if (running_) {
 		return Status::Running;
+	}
+	if (!word_range_ok(addr, nwords)) {
+		return Status::BadArg;
+	}
+	if (nwords == 0) {
+		return Status::Ok;
 	}
 	if (!cpu_.in_full_emulation()) {
 		return Status::TargetError;
