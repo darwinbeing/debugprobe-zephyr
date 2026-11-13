@@ -27,7 +27,8 @@ public:
 	 * Running: SyncJtag_Conditional_SaveContextXv2, the program stops where
 	 * it is (stop reason Request). Reset: SyncJtag_AssertPor_SaveContextXv2,
 	 * the CPU stops at the reset vector (stop reason Reset). Then the device
-	 * ID is read and all EEM triggers are cleared. Statuses as
+	 * ID is read, all EEM triggers are cleared and the EEM sequencer is
+	 * turned off (as the DLL's EEM_Init leaves it). Statuses as
 	 * Cpuxv2::connect. On failure the pins are released and the CPU is let
 	 * go: before it reached full emulation with nothing written to its
 	 * memory; in full emulation before its context was saved, at the PC
@@ -38,9 +39,10 @@ public:
 	 * restored, as detach(Run) does. With Reset, system clocks already
 	 * switched to the JTAG clock are switched back before any release. */
 	Status attach(AttachMode mode, uint32_t slot_hz, Identity &id);
-	/* Clear the triggers, then Run: restore the context and let the program
-	 * continue where it stopped; Reset: power-on reset and run. Releases
-	 * the pins. Does nothing when not attached. Expects a halted CPU. */
+	/* Clear the triggers and turn the EEM sequencer off, then Run: restore
+	 * the context and let the program continue where it stopped; Reset:
+	 * power-on reset and run. Releases the pins. Does nothing when not
+	 * attached. Expects a halted CPU. */
 	void detach(DetachAction action);
 
 	bool attached() const { return attached_; }

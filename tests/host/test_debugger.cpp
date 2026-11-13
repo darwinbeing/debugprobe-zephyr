@@ -155,7 +155,21 @@ TEST(debugger_attach_when_the_eem_has_already_stopped_the_cpu)
 	const Log want = identify_log() + Log{"ir:d0", "dr16:0000"} + sync_tail(0x6904, 0x0008);
 	REQUIRE(f.t.log.size() >= want.size());
 	CHECK_LOG(Log(f.t.log.begin(), f.t.log.begin() + static_cast<long>(want.size())), want);
-	CHECK(f.t.eem_writes.size() == 9u); /* only the trigger clearing */
+	CHECK(f.t.eem_writes.size() == 10u); /* only the trigger clearing */
+}
+
+TEST(debugger_attach_and_detach_turn_the_eem_sequencer_off)
+{
+	/* A sequencer left on by an earlier session drives reaction bit 7 in
+	 * place of combination 7 (the F5529's EEM: TriggerManager430(8, 2, 10,
+	 * 7)); the DLL's EEM_Init writes SEQ_CTL 0 every session. */
+	Fx f;
+	f.t.eem[0xA6] = 0x0003; /* SEQ_ENABLE + SEQ_RESET_EN */
+	REQUIRE(f.attach() == Status::Ok);
+	CHECK_EQ(f.t.eem[0xA6], 0u);
+	f.t.eem[0xA6] = 0x0003;
+	f.d.detach(DetachAction::Run);
+	CHECK_EQ(f.t.eem[0xA6], 0u);
 }
 
 TEST(debugger_attach_clocks_through_the_wait_signal)

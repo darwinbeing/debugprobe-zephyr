@@ -182,14 +182,16 @@ inline Log sync_tail(unsigned wdt, unsigned sr)
 	       read_word(0x0144) + read_reg(0x0260) + write_reg(0x0082, sr & 0xFFE7u);
 }
 
-/* Clearing all 8 trigger blocks: CMB = 0 each, BREAKREACT = 0 */
+/* Clearing all 8 trigger blocks: CMB = 0 each, BREAKREACT = 0, then the
+ * sequencer off: SEQ_CTL (0xA6) = 0, which the DLL's EEM_Init writes
+ * (EmulationManager430::writeConfiguration, Sequencer430.cpp:51-53, 97-99) */
 inline Log clear_triggers()
 {
 	Log l = {ir(0xB0)};
 	for (unsigned i = 0; i < 8; ++i) {
 		l = l + eem_write(i * 8 + 6, 0);
 	}
-	return l + eem_write(0x80, 0);
+	return l + eem_write(0x80, 0) + eem_write(0xA6, 0);
 }
 
 /* RestoreContext_ReleaseJtagXv2.c:98-189 (Note 1411 to the release), mdb = 0,

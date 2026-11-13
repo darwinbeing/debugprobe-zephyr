@@ -103,13 +103,20 @@
  *    register is read back to confirm that the trigger block exists; if it
  *    does not read back, the block is disarmed and TargetError returned.
  *    Clearing writes the combination register and BREAKREACT only; the DLL
- *    also zeroes value, control and mask (Trigger430::reset) and rewrites
- *    CCNT1_REACT, STOR_REACT and the sequencer control SEQ_CTL
- *    (TriggerManager430::writeTriggerReactions, Sequencer430), which are
- *    left as found here. Breakpoints change only while the CPU is halted
- *    (the DLL also changes hardware breakpoints of a running CPU), and the
- *    index and address are checked (BadArg; the DLL checks neither). All
- *    trigger blocks are cleared on attach and detach.
+ *    also zeroes value, control and mask (Trigger430::reset). The DLL
+ *    writes EEM registers through a cache (EemRegisterAccess430.cpp):
+ *    CCNT1_REACT, STOR_REACT and the sequencer control SEQ_CTL go out in
+ *    full only at its first configuration, EEM_Init's writeConfiguration
+ *    (TriggerManager430::writeTriggerReactions, Sequencer430), then only on
+ *    change. Here CCNT1_REACT and STOR_REACT are left as found (neither
+ *    stops the CPU); SEQ_CTL is written 0 whenever all trigger blocks are
+ *    cleared (attach, detach, clear_breakpoint(kAllBreakpoints)): on the
+ *    F5529 (TriggerManager430(8, 2, 10, 7)) the sequencer's output is
+ *    reaction bit 7, which a sequencer left on by an earlier session would
+ *    drive in place of breakpoint 7. Breakpoints change only while the CPU
+ *    is halted (the DLL also changes hardware breakpoints of a running
+ *    CPU), and the index and address are checked (BadArg; the DLL checks
+ *    neither).
  *
  * Copyright (C) 2012 Texas Instruments Incorporated - http://www.ti.com/
  *
@@ -184,6 +191,7 @@ constexpr uint8_t kMbTrigCmb = 0x06;
 constexpr uint8_t kTriggerBlockSize = 0x08;
 constexpr uint8_t kBreakReact = 0x80;
 constexpr uint8_t kGenClkCtrl = 0x88;
+constexpr uint8_t kSeqCtl = 0xA6; /* the DLL's sequencer control (Sequencer430.cpp), 0 = off */
 constexpr uint8_t kEemRead = 0x01;
 constexpr uint32_t kCmpEqualFetchMab = 0x0000; /* CMP_EQUAL + TRIG_0 + MAB */
 constexpr uint32_t kMaskAll = 0xFFFFF;
@@ -699,6 +707,8 @@ void Debugger::release_at(uint32_t pc, bool cpuoff, uint16_t eem_control)
 	tap_.ir_shift(kIrCntrlSigRelease);
 }
 
+/* Every trigger block disarmed, then the sequencer off as the DLL's EEM_Init
+ * leaves it (see the header). */
 void Debugger::clear_triggers()
 {
 	tap_.ir_shift(kIrEmexDataExchange32);
@@ -706,6 +716,7 @@ void Debugger::clear_triggers()
 		eem_write(static_cast<uint8_t>(i * kTriggerBlockSize + kMbTrigCmb), 0);
 	}
 	eem_write(kBreakReact, 0);
+	eem_write(kSeqCtl, 0);
 	bp_used_ = 0;
 }
 
