@@ -10,14 +10,21 @@
  *
  * Deliberate differences from MSPDS:
  *  - a sync that does not complete (SyncJtagXv2, wait_for_synch), a CPU pipe
- *    that never empties, or a JTAG ID other than 0x91 where MSPDS reads one
- *    ends the operation with TargetError; before the context is saved the
- *    CPU is then released without anything written (MSPDS carries on);
+ *    that never empties, or a JTAG ID other than 0x91 in the IR capture of
+ *    SyncJtagXv2 (MSPDS discards it there) ends the operation with
+ *    TargetError; the CPU, not yet in full emulation, is then released
+ *    without anything written (MSPDS carries on);
  *  - WDTCTL is checked for its read password 0x69 before it is written, not
  *    afterwards as the DLL does (WatchdogControl::checkRead);
  *  - "check for Init State" after a sync is Cpuxv2::in_full_emulation(),
  *    which also checks the JTAG ID; read_mem, write_mem, read_regs and
  *    write_reg end with the same check;
+ *  - when the init-state check or the WDTCTL password check fails during a
+ *    sync, the CPU is already in full emulation: it is released at the PC
+ *    where it stopped (SetPcXv2 and the release of
+ *    RestoreContext_ReleaseJtagXv2, the PC 2 lower if the control signal
+ *    shows CPUOFF), SR and WDTCTL unwritten, and the operation ends with
+ *    TargetError (MSPDS checks neither);
  *  - before the watchdog is held, the sync waits up to 100 ms for the flash
  *    controller to finish an erase or write the firmware had started
  *    (FCTL3.BUSY; not in MSPDS);
@@ -313,12 +320,24 @@ void Debugger::eem_write(uint8_t reg, uint32_t value)
 
 /* ---- context save and restore ---- */
 
-/* Not in MSPDS: release a CPU whose context was not saved, without writing
- * anything to the target, and let go of the pins. */
+/* Not in MSPDS: release a CPU that has not reached full emulation, without
+ * writing anything to the target, and let go of the pins. */
 void Debugger::abandon()
 {
 	write_control(kEmuClkEn | kClearStop);
 	tap_.ir_shift(kIrCntrlSigRelease);
+	tap_.close();
+	attached_ = false;
+	running_ = false;
+}
+
+/* Not in MSPDS: release a CPU in full emulation whose context was not saved.
+ * SR and WDTCTL have not been written, so only the PC is restored, with the
+ * same low-power correction as a normal release (here from the control
+ * signal's CPUOFF, as SR was not read); EEM off. Lets go of the pins. */
+void Debugger::release_unsaved(uint32_t pc, bool cpuoff)
+{
+	release_at(pc, cpuoff, kEmuClkEn | kClearStop);
 	tap_.close();
 	attached_ = false;
 	running_ = false;
@@ -444,12 +463,12 @@ Status Debugger::sync_conditional()
 
 	write_control(kEmuFeatEn | kEmuClkEn | kClearStop);
 	if (!cpu_.in_full_emulation()) { /* MSPDS: "check for Init State", unchecked */
-		abandon();
+		release_unsaved(pc, cpuoff);
 		return Status::TargetError;
 	}
 	wait_flash_idle();
 	if (!hold_watchdog()) {
-		abandon();
+		release_unsaved(pc, cpuoff);
 		return Status::TargetError;
 	}
 	ctx_.pc = pc;
@@ -463,8 +482,15 @@ void Debugger::restore_and_release(uint16_t eem_control)
 {
 	write_cpu_reg(mova_imm(2, 0), ctx_.sr);
 	write_word(kWdtCtl, static_cast<uint16_t>(kWdtPw | (ctx_.wdtctl & 0x00FFu)));
-	uint32_t pc = ctx_.pc;
-	if ((ctx_.sr & kSrCpuOff) != 0) { /* Note 1411 */
+	release_at(ctx_.pc, (ctx_.sr & kSrCpuOff) != 0, eem_control);
+}
+
+/* RestoreContext_ReleaseJtagXv2.c:98-189, the part after the SR and WDTCTL
+ * writes, with mdb = 0 and ulpDebug = 0: set the PC and release the CPU.
+ * `cpuoff`: the CPU is in a low-power mode (SR.CPUOFF in the macro). */
+void Debugger::release_at(uint32_t pc, bool cpuoff, uint16_t eem_control)
+{
+	if (cpuoff) { /* Note 1411 */
 		pc = (pc - 2u) & 0xFFFFFu;
 	}
 	set_pc(pc);

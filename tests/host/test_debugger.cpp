@@ -206,9 +206,42 @@ TEST(debugger_attach_refuses_a_watchdog_without_its_password)
 	CHECK(f.d.attach(AttachMode::Running, 250000, f.id) == Status::TargetError);
 	CHECK(f.t.mem_writes.empty());
 	CHECK(!f.d.attached());
-	REQUIRE(f.t.log.size() >= 4u);
-	CHECK_LOG(Log(f.t.log.end() - 4, f.t.log.end()),
-		  (Log{"ir:30", "dr16:0006", "ir:a8", "close"}));
+	/* The CPU is in full emulation: it is let go at the PC where it stopped,
+	 * with SR and WDTCTL untouched. */
+	const Log want = read_word(0x015C) + release_at(0x4520, false, 0x0006) + Log{"close"};
+	CHECK_LOG(last(f.t.log, want.size()), want);
+}
+
+TEST(debugger_attach_with_a_failed_init_state_check_releases_at_the_pc)
+{
+	Fx f;
+	f.running_cpu();
+	/* Eight control-signal reads up to the context save (lock check 3,
+	 * CPUOFF check, sync, wait check, CPUSUSP, i_SaveContext); the
+	 * init-state check then sees none of the bits 0x0301. */
+	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301,
+				0x0301, 0x0301, 0x0301, 0x0000};
+	CHECK(f.d.attach(AttachMode::Running, 250000, f.id) == Status::TargetError);
+	CHECK(f.t.cntrl_sig_script.empty());
+	CHECK(f.t.mem_writes.empty());
+	CHECK(!f.d.attached());
+	const Log want = Log{"ir:30", "dr16:000e", "ir:28", "dr16:0000"} +
+			 release_at(0x4520, false, 0x0006) + Log{"close"};
+	CHECK_LOG(last(f.t.log, want.size()), want);
+}
+
+TEST(debugger_attach_failure_in_a_low_power_mode_releases_at_pc_minus_2)
+{
+	Fx f;
+	f.t.cntrl_sig = 0x0321; /* CPUOFF */
+	f.t.eem_control_script = {0x0000};
+	f.t.mab = 0x0453E;
+	f.t.memory[0x015C] = 0x0000;
+	CHECK(f.d.attach(AttachMode::Running, 250000, f.id) == Status::TargetError);
+	CHECK(f.t.mem_writes.empty());
+	/* PC = MAB - 2, released 2 lower as a normal release does (Note 1411) */
+	const Log want = read_word(0x015C) + release_at(0x453C, true, 0x0006) + Log{"close"};
+	CHECK_LOG(last(f.t.log, want.size()), want);
 }
 
 TEST(debugger_attach_without_sync_releases_and_writes_nothing)

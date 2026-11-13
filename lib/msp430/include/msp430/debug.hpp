@@ -27,8 +27,11 @@ public:
 	 * it is (stop reason Request). Reset: SyncJtag_AssertPor_SaveContextXv2,
 	 * the CPU stops at the reset vector (stop reason Reset). Then the device
 	 * ID is read and all EEM triggers are cleared. Statuses as
-	 * Cpuxv2::connect. On failure the pins are released; a failure after
-	 * JTAG took the CPU releases it with nothing written. */
+	 * Cpuxv2::connect. On failure the pins are released and the CPU is let
+	 * go: before it reached full emulation with nothing written; in full
+	 * emulation before its context was saved, at the PC where it stopped
+	 * (SR and WDTCTL unwritten); after that with its context restored, as
+	 * detach(Run) does. */
 	Status attach(AttachMode mode, uint32_t slot_hz, Identity &id);
 	/* Clear the triggers, then Run: restore the context and let the program
 	 * continue where it stopped; Reset: power-on reset and run. Halts a
@@ -89,6 +92,8 @@ private:
 	void save_status_register();
 	void wait_flash_idle();
 	void restore_and_release(uint16_t eem_control);
+	void release_at(uint32_t pc, bool cpuoff, uint16_t eem_control);
+	void release_unsaved(uint32_t pc, bool cpuoff);
 	void abandon();
 	void clear_triggers();
 	void clear_jmb_out();
