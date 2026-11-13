@@ -89,6 +89,11 @@ public:
 	 * address load, with TCLK high at the capture, or with the CPU set to
 	 * write; a write with TCLK low or with the CPU set to read. */
 	bool mem_protocol_error = false;
+	/* Defence in depth: a memory write (IR_DATA_TO_ADDR) to the F5529's BSL,
+	 * information memory and device descriptors (0x1000-0x1BFF), main flash
+	 * (from 0x4400) or the flash controller (0x0140-0x014F). Recorded and
+	 * carried out as any other write. */
+	bool flash_write_attempt = false;
 
 	/* Post a 32-bit value in the target's mailbox output. */
 	void push_jmb_out(uint32_t value) { jmb_out.push_back(value); }
@@ -182,6 +187,9 @@ private:
 			mem_writes.push_back({addr_, value});
 			if (!tclk_ || cntrl_read_) {
 				mem_protocol_error = true;
+			}
+			if (is_flash_or_controller(addr_)) {
+				flash_write_attempt = true;
 			}
 			if (!password_ok(addr_, value)) {
 				password_violation = true; /* a PUC on the chip: no write */
@@ -283,6 +291,11 @@ private:
 		char buf[32];
 		std::snprintf(buf, sizeof(buf), f, v);
 		return buf;
+	}
+	static bool is_flash_or_controller(uint32_t addr)
+	{
+		return (addr >= 0x1000 && addr <= 0x1BFF) || addr >= 0x4400 ||
+		       (addr >= 0x0140 && addr <= 0x014F);
 	}
 	/* the key in the high byte of a password-protected register */
 	static bool password_ok(uint32_t addr, uint16_t value)

@@ -171,6 +171,32 @@ TEST(fake_tap_flags_a_write_without_its_password)
 	}
 }
 
+TEST(fake_tap_flags_a_write_to_flash_or_the_flash_controller)
+{
+	/* BSL, information memory and device descriptors 0x1000-0x1BFF, main
+	 * flash from 0x4400, the flash controller 0x0140-0x014F; each range at
+	 * both ends */
+	const uint32_t flash[] = {0x1000, 0x1BFE, 0x4400, 0x243FE, 0xFFFFE, 0x0140, 0x014E};
+	for (const uint32_t addr : flash) {
+		FakeTap t;
+		write_word(t, addr, 0xA500);
+		CHECK(t.flash_write_attempt);
+	}
+	/* RAM (USB RAM from 0x1C00, RAM up to 0x43FF), WDTCTL, SFRIFG1 and the
+	 * words next to the ranges */
+	const uint32_t other[] = {0x2400, 0x43FE, 0x1C00, 0x015C, 0x0102, 0x0FFE, 0x013E, 0x0150};
+	for (const uint32_t addr : other) {
+		FakeTap t;
+		write_word(t, addr, 0x5A80);
+		CHECK(!t.flash_write_attempt);
+	}
+	/* reads never set it */
+	FakeTap r;
+	read_word(r, 0x4400);
+	read_word(r, 0x0144);
+	CHECK(!r.flash_write_attempt);
+}
+
 TEST(fake_tap_flags_memory_access_out_of_step_with_tclk)
 {
 	FakeTap ok;

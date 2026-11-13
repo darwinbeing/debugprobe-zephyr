@@ -24,13 +24,16 @@ struct Fx {
 
 	/* No test here provokes a protocol error on purpose: whatever the
 	 * Debugger does, the fake's mailbox, EEM exchange, password and
-	 * memory-access rules must hold. */
+	 * memory-access rules must hold, and nothing is written to flash or the
+	 * flash controller. A test that passes write_mem a flash address on
+	 * purpose checks the flag and clears it itself. */
 	~Fx()
 	{
 		CHECK(!t.jmb_protocol_error);
 		CHECK(!t.eem_protocol_error);
 		CHECK(!t.password_violation);
 		CHECK(!t.mem_protocol_error);
+		CHECK(!t.flash_write_attempt);
 	}
 
 	/* The CPU runs and is not in a low-power mode: the first EEM control
