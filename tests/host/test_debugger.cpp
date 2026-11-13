@@ -171,11 +171,38 @@ TEST(debugger_attach_clocks_through_the_wait_signal)
 
 TEST(debugger_attach_reads_the_pc_from_the_reset_vector_at_fffe)
 {
-	Fx f;
-	f.t.mab = 0x00002; /* MAB - 4 = 0xFFFFE: Note 1495, 1637 */
-	REQUIRE(f.attach() == Status::Ok);
-	CHECK_EQ(f.d.pc(), 0x441Au);
-	CHECK(contains(f.t.log, Log{"ir:21", "dr20:00000", "ir:28", "dr16:0000"} + read_word(0xFFFE)));
+	/* MAB - 4 = 0xFFFFE (wrapped below 0) or 0x0FFFE: Note 1495, 1637 */
+	for (uint32_t mab : {0x00002u, 0x10002u}) {
+		Fx f;
+		f.t.mab = mab;
+		REQUIRE(f.attach() == Status::Ok);
+		CHECK_EQ(f.d.pc(), 0x441Au);
+		CHECK(contains(f.t.log, Log{"ir:21", "dr20:00000", "ir:28", "dr16:0000"} +
+						read_word(0xFFFE)));
+	}
+}
+
+TEST(debugger_attach_keeps_a_pc_ending_in_fffe_outside_the_vector)
+{
+	/* 0x1FFFE is in the F5529's main flash; MSPDS would read the reset
+	 * vector for any PC ending in FFFE. */
+	{
+		Fx f;
+		f.t.mab = 0x20002;
+		REQUIRE(f.attach() == Status::Ok);
+		CHECK_EQ(f.d.pc(), 0x1FFFEu);
+		CHECK(!contains(f.t.log, read_word(0xFFFE)));
+	}
+	{
+		Fx f; /* low-power mode: PC = MAB - 2 */
+		f.t.cntrl_sig = 0x0321;
+		f.t.eem_control_script = {0x0000};
+		f.t.captured = {0x0018, 0x0000};
+		f.t.mab = 0x20000;
+		REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
+		CHECK_EQ(f.d.pc(), 0x1FFFEu);
+		CHECK(!contains(f.t.log, read_word(0xFFFE)));
+	}
 }
 
 TEST(debugger_attach_waits_for_the_flash_controller)

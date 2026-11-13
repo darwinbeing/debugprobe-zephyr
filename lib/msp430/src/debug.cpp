@@ -25,6 +25,12 @@
  *    RestoreContext_ReleaseJtagXv2, the PC 2 lower if the control signal
  *    shows CPUOFF), SR and WDTCTL unwritten, and the operation ends with
  *    TargetError (MSPDS checks neither);
+ *  - the PC derived from the MAB (MAB - 4, or - 2 in a low-power mode) is
+ *    kept to 20 bits; MSPDS computes it in 32 bits, so a MAB below 4 wraps
+ *    to 0xFFFFFFFx there and to 0xFFFFx here;
+ *  - that PC is replaced by the reset vector read from 0xFFFE only when it
+ *    is 0x0FFFE or 0xFFFFE (Note 1495, 1637); MSPDS replaces any PC ending
+ *    in FFFE, which includes 0x1FFFE in the F5529's main flash;
  *  - before the watchdog is held, the sync waits up to 100 ms for the flash
  *    controller to finish an erase or write the firmware had started
  *    (FCTL3.BUSY; not in MSPDS);
@@ -457,7 +463,7 @@ Status Debugger::sync_conditional()
 	const bool cpuoff = (sig & kSigCpuOff) != 0;
 	ctx_.irq = static_cast<uint16_t>(sig & kSigIntReq);
 	uint32_t pc = (mab - (cpuoff ? 2u : 4u)) & 0xFFFFFu;
-	if ((pc & 0xFFFFu) == 0xFFFEu) { /* Note 1495, 1637 */
+	if (pc == 0x0FFFEu || pc == 0xFFFFEu) { /* Note 1495, 1637; see the file header */
 		pc = read_word(kResetVector);
 	}
 
