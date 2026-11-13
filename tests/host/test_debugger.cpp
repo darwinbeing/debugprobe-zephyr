@@ -223,6 +223,13 @@ TEST(debugger_attach_waits_for_the_flash_controller)
 	for (const auto &w : f.t.mem_writes) {
 		CHECK(w.first != 0x0144u);
 	}
+	/* the watchdog is held first, so it cannot reset the device during
+	 * the wait */
+	const Log hold = write_word(0x015C, 0x5A84);
+	const auto hold_at = std::search(f.t.log.begin(), f.t.log.end(), hold.begin(), hold.end());
+	const auto first_poll = std::find(f.t.log.begin(), f.t.log.end(), "dr20:00144");
+	REQUIRE(hold_at != f.t.log.end());
+	CHECK(hold_at < first_poll);
 }
 
 TEST(debugger_attach_refuses_a_watchdog_without_its_password)
@@ -234,9 +241,10 @@ TEST(debugger_attach_refuses_a_watchdog_without_its_password)
 	CHECK(f.t.mem_writes.empty());
 	CHECK(!f.d.attached());
 	/* The CPU is in full emulation: it is let go at the PC where it stopped,
-	 * with SR and WDTCTL untouched. */
+	 * with SR and WDTCTL untouched. The flash controller is not polled. */
 	const Log want = read_word(0x015C) + release_at(0x4520, false, 0x0006) + Log{"close"};
 	CHECK_LOG(last(f.t.log, want.size()), want);
+	CHECK(!contains(f.t.log, Log{"dr20:00144"}));
 }
 
 TEST(debugger_attach_with_a_failed_init_state_check_releases_at_the_pc)

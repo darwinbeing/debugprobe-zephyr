@@ -31,9 +31,11 @@
  *  - that PC is replaced by the reset vector read from 0xFFFE only when it
  *    is 0x0FFFE or 0xFFFFE (Note 1495, 1637); MSPDS replaces any PC ending
  *    in FFFE, which includes 0x1FFFE in the F5529's main flash;
- *  - before the watchdog is held, the sync waits up to 100 ms for the flash
- *    controller to finish an erase or write the firmware had started
- *    (FCTL3.BUSY; not in MSPDS);
+ *  - after the watchdog is held and before SR is saved, the sync waits up to
+ *    100 ms for the flash controller to finish an erase or write the
+ *    firmware had started (FCTL3.BUSY; not in MSPDS). The design spec
+ *    (item 14) put this wait before the hold; holding first keeps the
+ *    watchdog from resetting the device during the wait;
  *  - SyncJtag_AssertPor_SaveContextXv2 leaves out the per-module clock
  *    control (ETKEYSEL/ETCLKSEL), whose module codes come from the DLL's
  *    device database; the modules keep their reset defaults. GENCLKCTRL ends
@@ -472,11 +474,11 @@ Status Debugger::sync_conditional()
 		release_unsaved(pc, cpuoff);
 		return Status::TargetError;
 	}
-	wait_flash_idle();
 	if (!hold_watchdog()) {
 		release_unsaved(pc, cpuoff);
 		return Status::TargetError;
 	}
+	wait_flash_idle(); /* after the hold: the watchdog cannot bite meanwhile */
 	ctx_.pc = pc;
 	save_status_register();
 	return Status::Ok;

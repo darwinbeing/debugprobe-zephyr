@@ -158,8 +158,8 @@ inline Log eem_stop(unsigned polls, const unsigned tb0[5])
 
 /* SyncJtag_Conditional_SaveContextXv2.c:172-329 from "enable clock control
  * before sync" on, with sync, wait bit and CPUSUSP present at the first
- * look, followed by the FCTL3 check, the watchdog hold and the SR save.
- * `wdt` is the WDTCTL value read, `sr` the SR value read. */
+ * look, followed by the watchdog hold, the FCTL3 check (not in MSPDS) and
+ * the SR save. `wdt` is the WDTCTL value read, `sr` the SR value read. */
 inline Log sync_tail(unsigned wdt, unsigned sr)
 {
 	return Log{ir(0x30), d16(0x0005),
@@ -172,9 +172,8 @@ inline Log sync_tail(unsigned wdt, unsigned sr)
 		   ir(0xC8), d16(0x0501)} +
 	       kTclk + Log{ir(0x21), d20(0), ir(0x28), d16(0), ir(0x30), d16(0x000E),
 			   ir(0x28), d16(0)} +
-	       read_word(0x0144) + read_word(0x015C) +
-	       write_word(0x015C, 0x5A80u | (wdt & 0xFFu)) + read_reg(0x0260) +
-	       write_reg(0x0082, sr & 0xFFE7u);
+	       read_word(0x015C) + write_word(0x015C, 0x5A80u | (wdt & 0xFFu)) +
+	       read_word(0x0144) + read_reg(0x0260) + write_reg(0x0082, sr & 0xFFE7u);
 }
 
 /* Clearing all 8 trigger blocks: CMB = 0 each, BREAKREACT = 0 */
