@@ -8,7 +8,8 @@
  * The debugger never erases or programs flash: it uses only identify(),
  * in_full_emulation() and disconnect() of Cpuxv2, none of the funclet,
  * erase or flash-write code. write_mem, though, writes any address it is
- * given; keeping it off flash and the flash controller is Session's job.
+ * given; keeping it off flash, the flash controller, the SYS and DMA
+ * registers is Session's job.
  */
 #include <cstddef>
 #include <cstdint>
@@ -122,7 +123,8 @@ public:
 	 * does). BadState and Running as read_regs; BadArg for an index above
 	 * 15, R3, a value above 20 bits, an odd PC or an SR above 16 bits;
 	 * TargetError if the CPU is no longer under JTAG control after a write
-	 * to the CPU. */
+	 * to the CPU. Any even 20-bit PC is accepted; in a read-only session,
+	 * keeping the PC inside main flash is Session's job. */
 	Status write_reg(unsigned index, uint32_t value);
 	/* `nwords` words from `addr` on, little-endian byte pairs, one per word.
 	 * Plain bus accesses: reading interrupt-vector registers, RXBUF or
@@ -139,8 +141,9 @@ public:
 	 * write_mem has sent every word, but those after the link died did not
 	 * arrive. write_mem makes the same check before its first write and
 	 * returns TargetError without writing anything if it fails. Other
-	 * address checks are the caller's (Session): write_mem writes any
-	 * address it is given, flash and the flash controller included. */
+	 * address checks are the caller's: write_mem writes any address it is
+	 * given, flash, the flash controller, the SYS and DMA registers
+	 * included; keeping it off them is Session's job. */
 	Status read_mem(uint32_t addr, size_t nwords, uint8_t *dst);
 	Status write_mem(uint32_t addr, size_t nwords, const uint8_t *src);
 

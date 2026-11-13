@@ -714,6 +714,47 @@ TEST(session_dbg_write_reg_moves_the_pc_only_into_main_flash)
 	}
 }
 
+/* The PC DBG_WRITE_REG may leave unchanged is the one the CPU stopped at
+ * last: after a step, a halt and a breakpoint stop, not only after the
+ * attach. Here the CPU runs from RAM, outside main flash, so only that
+ * exception lets R0 be written back. */
+TEST(session_dbg_write_reg_current_pc_follows_every_stop)
+{
+	Fx f;
+	f.tap.mab = 0x2404;
+	f.attach(); /* PC 0x2400 */
+
+	f.cpu_runs(); /* DBG_STEP to 0x2404 */
+	f.tap.eem_control_script = {0x0080, 0x0080};
+	f.tap.mab = 0x2408;
+	CHECK_BYTES(f.run({0x90, 0x0E}), (Bytes{0x90, 0x00, 0x04, 0x24, 0x00, 0x00}));
+	f.tap.log.clear();
+	CHECK_BYTES(f.run(reg_req(0, 0x2404)), kOk);
+	CHECK_BYTES(f.run(reg_req(0, 0x2400)), kProtected);
+	CHECK(f.tap.log.empty());
+
+	CHECK_BYTES(f.run({0x90, 0x0C}), kOk); /* DBG_RESUME, DBG_HALT at 0x2408 */
+	f.cpu_runs();
+	f.tap.eem_control_script.push_front(0x0000); /* the halt's own look */
+	f.tap.mab = 0x240C;
+	CHECK_BYTES(f.run({0x90, 0x0B}), (Bytes{0x90, 0x00, 0x08, 0x24, 0x00, 0x00}));
+	f.tap.log.clear();
+	CHECK_BYTES(f.run(reg_req(0, 0x2408)), kOk);
+	CHECK_BYTES(f.run(reg_req(0, 0x2404)), kProtected);
+	CHECK(f.tap.log.empty());
+
+	CHECK_BYTES(f.run({0x90, 0x0C}), kOk); /* DBG_RESUME, a stop DBG_STATUS sees at 0x240C */
+	f.tap.eem_control_script = {0x0080, 0x0080};
+	f.tap.captured = {0x0008, 0x0000};
+	f.tap.mab = 0x2410;
+	CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x02, 0xFF, 0x0C, 0x24, 0, 0}));
+	f.tap.log.clear();
+	CHECK_BYTES(f.run(reg_req(0, 0x240C)), kOk);
+	CHECK_BYTES(f.run(reg_req(0, 0x2408)), kProtected);
+	CHECK(f.tap.log.empty());
+	CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x02, 0xFF, 0x0C, 0x24, 0, 0}));
+}
+
 TEST(session_dbg_step_returns_the_new_pc)
 {
 	Fx f;
