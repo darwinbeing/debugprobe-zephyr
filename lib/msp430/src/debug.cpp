@@ -91,10 +91,20 @@
  *    odd PC or an SR above 16 bits with BadArg; the macro drops bits 20-23.
  *    It clears bit 0 of SP, which the DLL does (CpuMemoryAccess::write)
  *    and the macro does not;
- *  - SingleStepXv2 polls up to 496 times as MSPDS does (its counter starts
- *    at 4); if the CPU has not stopped by then, it is stopped as halt()
- *    does, trigger block 0 is restored and Timeout returned (MSPDS returns
- *    an error and leaves trigger block 0 set up for the step);
+ *  - SingleStepXv2 reads the EEM control register up to 496 times as MSPDS
+ *    does: its counter starts at 4 and ends the poll at 500, and its
+ *    `i < 500` fails then even if that last read showed the stop, as here.
+ *    Without the stop MSPDS returns an error and leaves the CPU running
+ *    with trigger block 0 set up for the step; here
+ *    SyncJtag_Conditional_SaveContextXv2 stops the CPU as halt() does (at
+ *    once if the instruction put it to sleep), trigger block 0 is restored
+ *    and Timeout returned (design spec item 17). MSPDS restores trigger
+ *    block 0 after the sync whatever the sync returned; here a failed sync
+ *    lets the CPU go (above), so trigger block 0 goes back as part of that
+ *    release, with the EEM off. After a release without a trigger (CPU
+ *    off, no interrupt pending) MSPDS takes a JTAG ID it does not know for
+ *    LPMx.5 and returns success; here an ID other than 0x91 ends the
+ *    session with TargetError as in poll() (below);
  *  - breakpoints: one trigger block per breakpoint, set up as the trigger
  *    SyncJtag_Conditional_SaveContextXv2 uses for "next instruction fetch"
  *    (lines 130-137), with the exact address and no mask, as the DLL's code
@@ -445,12 +455,14 @@ void Debugger::eem_write(uint8_t reg, uint32_t value)
 /* Not in MSPDS: release a CPU that is not in full emulation (not yet
  * synchronized, or running when its JTAG ID was lost), without writing
  * anything to the target's memory, and let go of the pins. EEM
- * registers only: the EEM is turned off (once the reset path has switched
- * the system clocks to JCK, the caller switches them back first,
+ * registers only: the EEM is turned off, then trigger block 0 goes back if
+ * step() has borrowed it (once the reset path has switched the system
+ * clocks to JCK, the caller switches them back first,
  * restore_system_clocks()). */
 void Debugger::abandon()
 {
 	write_control(kEmuClkEn | kClearStop);
+	give_back_trigger_block_0();
 	tap_.ir_shift(kIrCntrlSigRelease);
 	tap_.close();
 	attached_ = false;
@@ -460,9 +472,12 @@ void Debugger::abandon()
 /* Not in MSPDS: release a CPU in full emulation whose context was not saved.
  * SR and WDTCTL have not been written, so only the PC is restored, with the
  * same low-power correction as a normal release (here from the control
- * signal's CPUOFF, as SR was not read); EEM off. Lets go of the pins. */
+ * signal's CPUOFF, as SR was not read); EEM off. Trigger block 0 goes back
+ * first if step() has borrowed it (the sync has turned the EEM off).
+ * Lets go of the pins. */
 void Debugger::release_unsaved(uint32_t pc, bool cpuoff)
 {
+	give_back_trigger_block_0();
 	release_at(pc, cpuoff, kEmuClkEn | kClearStop);
 	tap_.close();
 	attached_ = false;
@@ -1068,6 +1083,101 @@ Status Debugger::poll(bool &halted)
 			break;
 		}
 	}
+	return Status::Ok;
+}
+
+/* SingleStepXv2.c:114-144: trigger block 0 and BREAKREACT back as step()
+ * found them. Nothing when step() has not borrowed them. */
+void Debugger::give_back_trigger_block_0()
+{
+	if (!tb0_borrowed_) {
+		return;
+	}
+	tb0_borrowed_ = false;
+	tap_.ir_shift(kIrEmexDataExchange32);
+	eem_write(kMbTrigVal, tb0_[0]);
+	eem_write(kMbTrigCtl, tb0_[1]);
+	eem_write(kMbTrigMsk, tb0_[2]);
+	eem_write(kMbTrigCmb, tb0_[3]);
+	eem_write(kBreakReact, tb0_[4]);
+}
+
+/* SingleStepXv2.c:57-164 with the parameters the DLL passes
+ * (DebugManagerMSP430::singleStep, DebugManagerMSP430.cpp:578-596):
+ * RestoreContext_ReleaseJtagXv2 with EEM control 0x0007, mdb = 0,
+ * releaseJtag = 0, ulpDebug = 0; irRequest from the last sync. The timeout,
+ * the JTAG ID check after a release without a trigger and trigger block 0
+ * after a failed sync differ from MSPDS (see the header). */
+Status Debugger::step()
+{
+	if (!attached_) {
+		return Status::BadState;
+	}
+	if (running_) {
+		return Status::Running;
+	}
+	/* lines 88-93: unless the CPU is off with no interrupt pending, trigger
+	 * block 0 stops it on the next instruction fetch (the MyIn table) */
+	const bool use_eem = (ctx_.sr & kSrCpuOff) == 0 || (ctx_.irq & kSigIntReq) != 0;
+	if (use_eem) {
+		tap_.ir_shift(kIrEmexDataExchange32);
+		tb0_[0] = eem_read(kMbTrigVal);
+		tb0_[1] = eem_read(kMbTrigCtl);
+		tb0_[2] = eem_read(kMbTrigMsk);
+		tb0_[3] = eem_read(kMbTrigCmb);
+		tb0_[4] = eem_read(kBreakReact);
+		tb0_borrowed_ = true;
+		eem_write(kMbTrigCtl, kCmpEqualFetchMab);
+		eem_write(kMbTrigMsk, kMaskAll);
+		eem_write(kMbTrigCmb, 0x0001); /* EN0 */
+		eem_write(kBreakReact, 0x0001);
+	}
+	restore_and_release(kEmuClkEn | kClearStop | kEemEn); /* lines 94-96 */
+	running_ = true;
+	reason_ = StopReason::None;
+	bp_hit_ = kNoBreakpoint;
+
+	if (!use_eem) {
+		/* lines 147-162: the CPU stays off and executes nothing. "First
+		 * Check if we did not go into LPMx.5": MSPDS returns success for an
+		 * invalid ID; here the target is lost (see the header). */
+		if (tap_.ir_shift(kIrCntrlSigCapture) != kJtagId91) {
+			abandon();
+			return Status::TargetError;
+		}
+		const Status st = sync_conditional();
+		if (st != Status::Ok) {
+			return st; /* the CPU has been let go */
+		}
+		running_ = false;
+		reason_ = StopReason::Step;
+		return Status::Ok;
+	}
+
+	/* lines 98-108: poll for the CPU stop reaction. MSPDS's counter starts
+	 * at 4 and ends the poll at 500 (kStepPolls reads); `i < 500` then
+	 * fails even if the last read showed the stop. */
+	tap_.ir_shift(kIrEmexReadControl);
+	unsigned reads = 0;
+	bool stopped = false;
+	do {
+		++reads;
+		stopped = (tap_.dr_shift16(0x0000) & kEemStopped) != 0;
+	} while (!stopped && reads < kStepPolls);
+	const bool stepped = reads < kStepPolls;
+	/* lines 110-113; without the stop not in MSPDS: the sync stops the CPU
+	 * as halt() does (see the header) */
+	const Status st = sync_conditional();
+	if (st != Status::Ok) {
+		return st; /* the CPU has been let go */
+	}
+	running_ = false;
+	give_back_trigger_block_0();
+	if (!stepped) {
+		reason_ = StopReason::Request;
+		return Status::Timeout;
+	}
+	reason_ = StopReason::Step;
 	return Status::Ok;
 }
 

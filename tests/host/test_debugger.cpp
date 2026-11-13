@@ -1616,6 +1616,7 @@ TEST(debugger_run_control_needs_an_attached_cpu)
 	CHECK(f.d.resume() == Status::BadState);
 	CHECK(f.d.poll(halted) == Status::BadState);
 	CHECK(halted); /* as documented: true when not attached */
+	CHECK(f.d.step() == Status::BadState);
 	CHECK(f.t.log.empty());
 	f.attached();
 	f.d.detach(DetachAction::Run);
@@ -1625,6 +1626,7 @@ TEST(debugger_run_control_needs_an_attached_cpu)
 	halted = false;
 	CHECK(f.d.poll(halted) == Status::BadState);
 	CHECK(halted);
+	CHECK(f.d.step() == Status::BadState);
 	CHECK(f.t.log.empty());
 	CHECK(!f.d.running());
 }
@@ -1704,7 +1706,8 @@ TEST(debugger_halt_racing_a_breakpoint_stop_reports_a_request)
 				   sync_tail(0x6904, 0x0008));
 }
 
-/* Task 12's test of the same name, without step() (Task 11) */
+/* Task 12's test of the same name, with a breakpoint set and all of them
+ * cleared as well */
 TEST(debugger_halted_only_operations_refuse_a_running_cpu)
 {
 	Fx f;
@@ -1719,10 +1722,474 @@ TEST(debugger_halted_only_operations_refuse_a_running_cpu)
 	CHECK(f.d.write_reg(4, 0) == Status::Running);
 	CHECK(f.d.read_mem(0x2400, 1, buf) == Status::Running);
 	CHECK(f.d.write_mem(0x2400, 1, buf) == Status::Running);
+	CHECK(f.d.step() == Status::Running);
 	CHECK(f.d.set_breakpoint(0, 0x4400) == Status::Running);
 	CHECK(f.d.clear_breakpoint(1) == Status::Running);
 	CHECK(f.d.clear_breakpoint(msp430::kAllBreakpoints) == Status::Running);
 	CHECK(f.t.log.empty());
 	CHECK(f.t.mem_writes.empty());
 	CHECK(f.d.running());
+}
+
+TEST(debugger_step_follows_mspds_single_step)
+{
+	Fx f;
+	f.attached();
+	f.t.eem[0x00] = 0x4600; /* a breakpoint lives in trigger block 0 */
+	f.t.eem[0x06] = 0x0001;
+	f.t.eem[0x80] = 0x0001;
+	f.t.eem_control_script = {0x0000, 0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	f.t.mab = 0x4526;
+	REQUIRE(f.d.step() == Status::Ok);
+	const Log want = Log{ir(0xB0)} + eem_read(0x00) + eem_read(0x02) + eem_read(0x04) +
+			 eem_read(0x06) + eem_read(0x80) + eem_write(0x02, 0) +
+			 eem_write(0x04, 0xFFFFF) + eem_write(0x06, 1) + eem_write(0x80, 1) +
+			 restore_release(0x4520, 0x0008, 0x6904, 0x0007) +
+			 Log{ir(0xD0), d16(0), d16(0)} +
+			 /* stopped: the sync sees EEM_STOPPED and does not request a stop */
+			 Log{ir(0xD0), d16(0)} + sync_tail(0x6904, 0x0008) + Log{ir(0xB0)} +
+			 eem_write(0x00, 0x4600) + eem_write(0x02, 0) + eem_write(0x04, 0) +
+			 eem_write(0x06, 1) + eem_write(0x80, 1);
+	CHECK_LOG(f.t.log, want);
+	CHECK(f.d.stop_reason() == StopReason::Step);
+	CHECK_EQ(f.d.pc(), 0x4522u);
+	CHECK(!f.d.running());
+}
+
+TEST(debugger_step_in_a_low_power_mode_without_interrupt_uses_no_trigger)
+{
+	Fx f;
+	f.t.cntrl_sig = 0x0321;
+	f.t.eem_control_script = {0x0000};
+	f.t.captured = {0x00D8, 0x0000};
+	REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
+	f.t.log.clear();
+	f.t.eem_writes.clear();
+	f.t.eem_control_script = {0x0000};
+	f.t.captured = {0x00D8, 0x0000};
+	REQUIRE(f.d.step() == Status::Ok);
+	CHECK(f.t.eem_writes.empty());
+	REQUIRE(f.t.log.size() > 2u);
+	CHECK(f.t.log[0] == "tclk:0"); /* straight to RestoreContext */
+	CHECK(contains(f.t.log, Log{"ir:a8", "ir:28", "ir:d0", "dr16:0000", "ir:28", "dr16:0000"}));
+	CHECK(f.d.stop_reason() == StopReason::Step);
+	/* SingleStepXv2.c:94-96, 147-156 in full: released with the EEM on
+	 * (Note 1411: the PC 2 lower), the JTAG ID checked, the CPU taken again
+	 * with no stop request, as it is off */
+	CHECK(f.scripts_consumed());
+	CHECK_LOG(f.t.log, restore_release(0x4522, 0x00D8, 0x6904, 0x0007) + Log{ir(0x28)} +
+				   Log{ir(0xD0), d16(0), ir(0x28), d16(0)} + sync_tail(0x6904, 0x00D8));
+	CHECK_EQ(f.d.pc(), 0x4522u); /* MAB - 2 */
+	CHECK(f.d.attached());
+	CHECK(!f.d.running());
+}
+
+TEST(debugger_step_that_does_not_stop_halts_and_times_out)
+{
+	Fx f;
+	f.attached();
+	f.t.eem_control = 0x0000; /* never stops by itself */
+	f.t.eem_control_script.clear();
+	/* after 496 polls: the sync's stop request, which stops at once */
+	for (int i = 0; i < 496 + 1; ++i) {
+		f.t.eem_control_script.push_back(0x0000);
+	}
+	f.t.eem_control_script.push_back(0x0080);
+	f.t.captured = {0x0008, 0x0000};
+	CHECK(f.d.step() == Status::Timeout);
+	CHECK(!f.d.running());
+	CHECK(f.d.attached());
+	CHECK(f.d.stop_reason() == StopReason::Request);
+	/* trigger block 0 restored last */
+	REQUIRE(f.t.eem_writes.size() >= 5u);
+	CHECK_EQ(f.t.eem_writes.back().first, 0x80);
+}
+
+namespace {
+
+/* SingleStepXv2.c:88-93 with the MyIn table (lines 62-72): trigger block 0
+ * and BREAKREACT read, then set to stop on the next instruction fetch. Unlike
+ * the sync's EEM stop, the value register and GENCLKCTRL are not written. */
+Log step_borrow()
+{
+	return Log{ir(0xB0)} + eem_read(0x00) + eem_read(0x02) + eem_read(0x04) +
+	       eem_read(0x06) + eem_read(0x80) + eem_write(0x02, 0) +
+	       eem_write(0x04, 0xFFFFF) + eem_write(0x06, 1) + eem_write(0x80, 1);
+}
+
+/* SingleStepXv2.c:101-106: the stop poll, `reads` control reads */
+Log step_poll(unsigned reads)
+{
+	Log l = {ir(0xD0)};
+	for (unsigned i = 0; i < reads; ++i) {
+		l.push_back(d16(0));
+	}
+	return l;
+}
+
+/* SingleStepXv2.c:114-144: trigger block 0 and BREAKREACT written back */
+Log step_give_back(const unsigned tb0[5])
+{
+	return Log{ir(0xB0)} + eem_write(0x00, tb0[0]) + eem_write(0x02, tb0[1]) +
+	       eem_write(0x04, tb0[2]) + eem_write(0x06, tb0[3]) + eem_write(0x80, tb0[4]);
+}
+
+/* A breakpoint in trigger block 0 with a different value in each of its
+ * five registers (value, control, mask, combination 0, BREAKREACT), so that
+ * each must come back from its own read. */
+const unsigned kTb0Bp[5] = {0x14600, 0x0040, 0x00003, 0x0005, 0x00A1};
+
+void set_tb0(FakeTap &t, const unsigned tb0[5])
+{
+	t.eem[0x00] = tb0[0];
+	t.eem[0x02] = tb0[1];
+	t.eem[0x04] = tb0[2];
+	t.eem[0x06] = tb0[3];
+	t.eem[0x80] = tb0[4];
+}
+
+bool tb0_holds(FakeTap &t, const unsigned tb0[5])
+{
+	return t.eem[0x00] == tb0[0] && t.eem[0x02] == tb0[1] && t.eem[0x04] == tb0[2] &&
+	       t.eem[0x06] == tb0[3] && t.eem[0x80] == tb0[4];
+}
+
+size_t ir_shifts(const Log &l)
+{
+	return static_cast<size_t>(std::count_if(l.begin(), l.end(), [](const std::string &s) {
+		return s.compare(0, 3, "ir:") == 0;
+	}));
+}
+
+/* Attached to a CPU in LPM3 (CPUOFF, GIE) with no interrupt pending; the
+ * transcript and recordings cleared. PC 0x4522 (MAB - 2). */
+void attached_in_lpm3(Fx &f)
+{
+	f.t.cntrl_sig = 0x0321;
+	f.t.eem_control_script = {0x0000};
+	f.t.captured = {0x00D8, 0x0000};
+	REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
+	REQUIRE(f.scripts_consumed());
+	f.t.log.clear();
+	f.t.mem_writes.clear();
+	f.t.eem_writes.clear();
+	f.t.eem_control_writes.clear();
+}
+
+} // namespace
+
+TEST(debugger_step_gives_back_each_register_of_trigger_block_0)
+{
+	Fx f;
+	f.attached();
+	set_tb0(f.t, kTb0Bp);
+	f.t.eem_control_script = {0x0080, 0x0080}; /* stopped at the first read; the sync's look */
+	f.t.captured = {0x0008, 0x0000};
+	REQUIRE(f.d.step() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK_LOG(f.t.log, step_borrow() + restore_release(0x4520, 0x0008, 0x6904, 0x0007) +
+				   step_poll(1) + Log{ir(0xD0), d16(0)} + sync_tail(0x6904, 0x0008) +
+				   step_give_back(kTb0Bp));
+	CHECK(tb0_holds(f.t, kTb0Bp));
+	CHECK(f.d.stop_reason() == StopReason::Step);
+	CHECK_EQ(f.d.breakpoint_hit(), msp430::kNoBreakpoint);
+}
+
+TEST(debugger_breakpoint_0_survives_a_step)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.set_breakpoint(0, 0x4600) == Status::Ok);
+	REQUIRE(f.d.set_breakpoint(5, 0x4A00) == Status::Ok);
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	REQUIRE(f.d.step() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	/* breakpoints 0 and 5 armed in BREAKREACT again */
+	const unsigned tb0[5] = {0x4600, 0, 0, 1, 0x21};
+	CHECK(tb0_holds(f.t, tb0));
+	/* and the debugger still counts it */
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	f.t.mab = 0x4604;
+	bool halted = false;
+	REQUIRE(f.d.poll(halted) == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(halted);
+	CHECK_EQ(f.d.breakpoint_hit(), 0);
+}
+
+TEST(debugger_step_counts_a_stop_seen_by_the_495th_read)
+{
+	/* SingleStepXv2.c:101-108: the counter starts at 4 (left there by the
+	 * loop over stream_in_sync) and the poll ends when it reaches 500: 496
+	 * reads at most, and the step counts only if the stop showed while the
+	 * counter was below 500, by the 495th read. Either way the stopped CPU
+	 * is taken without a stop request; only the result differs. */
+	for (const unsigned reads : {495u, 496u}) {
+		Fx f;
+		f.attached();
+		set_tb0(f.t, kTb0Bp);
+		f.t.eem_control_script.assign(reads - 1, 0x0000);
+		f.t.eem_control_script.push_back(0x0080); /* stopped at this read */
+		f.t.eem_control_script.push_back(0x0080); /* the sync's look */
+		f.t.captured = {0x0008, 0x0000};
+		const Status st = f.d.step();
+		CHECK(f.scripts_consumed());
+		CHECK_LOG(f.t.log, step_borrow() + restore_release(0x4520, 0x0008, 0x6904, 0x0007) +
+					   step_poll(reads) + Log{ir(0xD0), d16(0)} +
+					   sync_tail(0x6904, 0x0008) + step_give_back(kTb0Bp));
+		CHECK(f.d.attached());
+		CHECK(!f.d.running());
+		CHECK(tb0_holds(f.t, kTb0Bp));
+		if (reads == 495u) {
+			CHECK(st == Status::Ok);
+			CHECK(f.d.stop_reason() == StopReason::Step);
+		} else {
+			CHECK(st == Status::Timeout);
+			CHECK(f.d.stop_reason() == StopReason::Request);
+		}
+	}
+}
+
+TEST(debugger_step_timeout_halts_through_the_eem_and_gives_trigger_block_0_back)
+{
+	/* Not in MSPDS, which returns an error and leaves the CPU running with
+	 * the step trigger set: the sync stops it as halt() does, borrowing
+	 * trigger block 0 in turn (it finds the step trigger there and puts it
+	 * back), then the step gives back breakpoint 0. */
+	Fx f;
+	f.attached();
+	set_tb0(f.t, kTb0Bp);
+	f.t.eem_control_script.assign(496 + 1, 0x0000); /* the poll, then the sync's look */
+	f.t.eem_control_script.push_back(0x0080);         /* the sync's stop request */
+	f.t.captured = {0x0009, 0x0000};
+	f.t.mab = 0x4A04;
+	CHECK(f.d.step() == Status::Timeout);
+	CHECK(f.scripts_consumed());
+	const unsigned step_tb0[5] = {0x14600, 0, 0xFFFFF, 1, 1};
+	CHECK_LOG(f.t.log, step_borrow() + restore_release(0x4520, 0x0008, 0x6904, 0x0007) +
+				   step_poll(496) + eem_stop(1, step_tb0) + sync_tail(0x6904, 0x0009) +
+				   step_give_back(kTb0Bp));
+	CHECK(tb0_holds(f.t, kTb0Bp));
+	CHECK(f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::Request);
+	CHECK_EQ(f.d.breakpoint_hit(), msp430::kNoBreakpoint);
+	CHECK_EQ(f.d.pc(), 0x4A00u);
+	/* halted with the EEM off (the sync's last control write) */
+	REQUIRE(!f.t.eem_control_writes.empty());
+	CHECK_EQ(f.t.eem_control_writes.back(), 0x000E);
+}
+
+TEST(debugger_step_into_a_low_power_mode_times_out_halted_there)
+{
+	/* The instruction sends the CPU to sleep: no further fetch, the trigger
+	 * never fires. The sync finds the CPU off and takes it without a stop
+	 * request; the next resume puts it back to sleep. */
+	Fx f;
+	f.attached();
+	set_tb0(f.t, kTb0Bp);
+	f.t.eem_control_script.assign(496 + 1, 0x0000);
+	f.t.has_cntrl_sig_after_release = true;
+	f.t.cntrl_sig_after_release = 0x0321; /* CPUOFF */
+	f.t.captured = {0x00D8, 0x0000};      /* LPM3 + GIE */
+	f.t.mab = 0x4526;
+	CHECK(f.d.step() == Status::Timeout);
+	CHECK(f.scripts_consumed());
+	CHECK_LOG(f.t.log, step_borrow() + restore_release(0x4520, 0x0008, 0x6904, 0x0007) +
+				   step_poll(496) + Log{ir(0xD0), d16(0), ir(0x28), d16(0)} +
+				   sync_tail(0x6904, 0x00D8) + step_give_back(kTb0Bp));
+	CHECK(tb0_holds(f.t, kTb0Bp));
+	CHECK(f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::Request);
+	CHECK_EQ(f.d.pc(), 0x4524u); /* MAB - 2 */
+	f.t.log.clear();
+	REQUIRE(f.d.resume() == Status::Ok);
+	CHECK_LOG(f.t.log, restore_release(0x4524, 0x00D8, 0x6904, 0x0007));
+}
+
+TEST(debugger_step_with_an_interrupt_pending_in_a_low_power_mode_uses_the_trigger)
+{
+	/* SingleStepXv2.c:88: the CPU is off, but the sync saw an interrupt
+	 * request (CNTRL_SIG 0x0004): it wakes up and runs, so the trigger is
+	 * set up as for a running CPU */
+	Fx f;
+	f.t.cntrl_sig = 0x0325; /* CPUOFF + INTREQ */
+	f.t.eem_control_script = {0x0000};
+	f.t.captured = {0x00D8, 0x0000};
+	REQUIRE(f.d.attach(AttachMode::Running, 250000, f.id) == Status::Ok);
+	REQUIRE(f.scripts_consumed());
+	CHECK_EQ(f.d.pc(), 0x4522u);
+	f.t.log.clear();
+	f.t.cntrl_sig = 0x0301; /* awake, in the interrupt handler */
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.captured = {0x0000, 0x0000};
+	f.t.mab = 0x4A04;
+	REQUIRE(f.d.step() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	/* released as it was saved: SR with CPUOFF, the PC 2 lower (Note 1411) */
+	CHECK_LOG(f.t.log, step_borrow() + restore_release(0x4522, 0x00D8, 0x6904, 0x0007) +
+				   step_poll(1) + Log{ir(0xD0), d16(0)} + sync_tail(0x6904, 0x0000) +
+				   step_give_back(kTb0Zero));
+	CHECK(f.d.stop_reason() == StopReason::Step);
+	CHECK_EQ(f.d.pc(), 0x4A00u);
+}
+
+TEST(debugger_step_from_a_low_power_mode_ends_the_session_on_a_lost_jtag_id)
+{
+	/* SingleStepXv2.c:149-161: after a release without a trigger MSPDS
+	 * checks the JTAG ID and, if it is not valid, takes the device for gone
+	 * into LPMx.5 and returns success. Here, as in poll(), an ID other than
+	 * 0x91 (0x98 and 0x99 are valid for MSPDS, not the F5529's) ends the
+	 * session: EEM off, released, pins let go; nothing written after the
+	 * release. */
+	for (const uint8_t id : {0xFF, 0x00, 0x98, 0x99}) {
+		Fx f;
+		attached_in_lpm3(f);
+		const Log release = restore_release(0x4522, 0x00D8, 0x6904, 0x0007);
+		f.t.jtag_id_script.assign(ir_shifts(release), 0x91);
+		f.t.jtag_id_script.push_back(id);
+		CHECK(f.d.step() == Status::TargetError);
+		CHECK(f.t.jtag_id_script.empty());
+		CHECK(!f.d.attached());
+		CHECK(!f.d.running());
+		CHECK(f.d.stop_reason() == StopReason::None);
+		CHECK_LOG(f.t.log, release + Log{ir(0x28)} + kAbandon);
+		CHECK(f.t.mem_writes.size() == 1u); /* the release's WDTCTL */
+		CHECK(f.t.eem_writes.empty());
+	}
+}
+
+TEST(debugger_step_from_a_low_power_mode_with_a_failed_sync)
+{
+	Fx f;
+	attached_in_lpm3(f);
+	f.t.has_cntrl_sig_after_release = true;
+	f.t.cntrl_sig_after_release = 0x0121; /* still off; the sync bit never comes */
+	f.t.eem_control_script = {0x0000};
+	CHECK(f.d.step() == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::None);
+	/* the CPU, not in full emulation, is let go with nothing written */
+	CHECK_LOG(last(f.t.log, kAbandon.size()), kAbandon);
+	CHECK(f.t.mem_writes.size() == 1u); /* the release's WDTCTL */
+	CHECK(f.t.eem_writes.empty());
+}
+
+TEST(debugger_step_with_a_failed_sync_gives_trigger_block_0_back)
+{
+	/* MSPDS restores trigger block 0 after the sync whatever the sync
+	 * returned; here a failed sync lets the CPU go, so trigger block 0 goes
+	 * back first, after the EEM is turned off */
+	Fx f;
+	f.attached();
+	set_tb0(f.t, kTb0Bp);
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.has_cntrl_sig_after_release = true;
+	f.t.cntrl_sig_after_release = 0x0101; /* running; the sync bit never comes */
+	CHECK(f.d.step() == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::None);
+	CHECK(tb0_holds(f.t, kTb0Bp));
+	const Log tail = Log{ir(0x30), d16(0x0006)} + step_give_back(kTb0Bp) + Log{ir(0xA8), "close"};
+	CHECK_LOG(last(f.t.log, tail.size()), tail);
+	CHECK(f.t.mem_writes.size() == 1u); /* the release's WDTCTL */
+}
+
+TEST(debugger_step_with_a_failed_init_state_check_gives_trigger_block_0_back)
+{
+	Fx f;
+	f.attached();
+	set_tb0(f.t, kTb0Bp);
+	f.t.eem_control_script = {0x0080, 0x0080};
+	/* control-signal reads: the release (SetPcXv2, the release clock), the
+	 * sync, the wait check, CPUSUSP, i_SaveContext; the init-state check
+	 * then sees none of the bits 0x0301 */
+	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301, 0x0301, 0x0000};
+	CHECK(f.d.step() == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::None);
+	CHECK(tb0_holds(f.t, kTb0Bp));
+	/* in full emulation with the EEM off (0x000E): trigger block 0 back,
+	 * then released at the PC where it stopped, SR and WDTCTL unwritten */
+	const Log tail = Log{ir(0x30), d16(0x000E), ir(0x28), d16(0)} + step_give_back(kTb0Bp) +
+			 release_at(0x4520, false, 0x0006) + Log{"close"};
+	CHECK_LOG(last(f.t.log, tail.size()), tail);
+	CHECK(f.t.mem_writes.size() == 1u); /* the release's WDTCTL */
+}
+
+TEST(debugger_step_timeout_with_a_failed_sync_gives_trigger_block_0_back)
+{
+	Fx f;
+	f.attached();
+	set_tb0(f.t, kTb0Bp);
+	f.t.eem_control_script.assign(496 + 1, 0x0000);
+	f.t.eem_control_script.push_back(0x0080); /* the sync's stop request */
+	f.t.has_cntrl_sig_after_release = true;
+	f.t.cntrl_sig_after_release = 0x0101; /* running; the sync bit never comes */
+	CHECK(f.d.step() == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.attached());
+	CHECK(!f.d.running());
+	CHECK(f.d.stop_reason() == StopReason::None);
+	CHECK(tb0_holds(f.t, kTb0Bp));
+	const unsigned step_tb0[5] = {0x14600, 0, 0xFFFFF, 1, 1};
+	CHECK(contains(f.t.log, eem_stop(1, step_tb0)));
+	const Log tail = Log{ir(0x30), d16(0x0006)} + step_give_back(kTb0Bp) + Log{ir(0xA8), "close"};
+	CHECK_LOG(last(f.t.log, tail.size()), tail);
+}
+
+TEST(debugger_step_after_a_breakpoint_stop_reports_the_step)
+{
+	Fx f;
+	f.attached();
+	REQUIRE(f.d.set_breakpoint(2, 0x4600) == Status::Ok);
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	f.t.mab = 0x4604;
+	bool halted = false;
+	REQUIRE(f.d.poll(halted) == Status::Ok);
+	REQUIRE(halted);
+	REQUIRE(f.d.breakpoint_hit() == 2);
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	f.t.mab = 0x4608;
+	REQUIRE(f.d.step() == Status::Ok);
+	CHECK(f.scripts_consumed());
+	CHECK(f.d.stop_reason() == StopReason::Step);
+	CHECK_EQ(f.d.breakpoint_hit(), msp430::kNoBreakpoint);
+	CHECK_EQ(f.d.pc(), 0x4604u);
+}
+
+TEST(debugger_failure_after_a_step_leaves_trigger_block_0_alone)
+{
+	/* Trigger block 0 went back at the end of the step; a later failure must
+	 * not write the values the step saved over a breakpoint set since. */
+	Fx f;
+	f.attached();
+	set_tb0(f.t, kTb0Bp);
+	f.t.eem_control_script = {0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	REQUIRE(f.d.step() == Status::Ok);
+	REQUIRE(f.d.set_breakpoint(0, 0x4800) == Status::Ok);
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	f.t.eem_writes.clear();
+	f.t.jtag_id = 0xFF; /* the target is lost */
+	bool halted = true;
+	CHECK(f.d.poll(halted) == Status::TargetError);
+	CHECK_LOG(f.t.log, Log{"ir:28"} + kAbandon);
+	CHECK(f.t.eem_writes.empty());
+	CHECK_EQ(f.t.eem[0x00], 0x4800u);
 }

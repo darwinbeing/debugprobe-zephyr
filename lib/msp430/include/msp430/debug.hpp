@@ -82,8 +82,25 @@ public:
 	 * to it, the pins are released; or the sync after a stop failed: the
 	 * CPU is let go as attach(Running) describes for its failures. */
 	Status poll(bool &halted);
-	/* Execute one instruction (stop reason Step). Timeout if the CPU did not
-	 * stop by itself; it is halted anyway. */
+	/* Execute one instruction (SingleStepXv2). Unless the CPU is off (SR
+	 * CPUOFF) with no interrupt pending at the last sync, trigger block 0
+	 * and BREAKREACT are borrowed to stop it on the next instruction fetch;
+	 * the context is restored and the CPU released with the EEM on (as
+	 * resume()); once the EEM has stopped it, its context is saved again
+	 * (SyncJtag_Conditional_SaveContextXv2) and trigger block 0 and
+	 * BREAKREACT are written back as they were. A CPU that is off with no
+	 * interrupt pending executes nothing: it is released and taken again
+	 * without a trigger. Ok: stop reason Step. BadState when not attached,
+	 * Running when it runs (nothing sent). Timeout: the stop did not show
+	 * within 495 reads of the EEM control register (the instruction may
+	 * have put the CPU to sleep); the CPU is stopped and its context saved
+	 * as halt() does, trigger block 0 written back, stop reason Request.
+	 * TargetError, the debugger detached: after a release without a
+	 * trigger the JTAG ID is not 0x91 (the target reset, lost power or went
+	 * into LPMx.5): the EEM is turned off, the CPU released where it is
+	 * with nothing written to it, the pins released; or the sync after the
+	 * release failed: the CPU is let go as attach(Running) describes for
+	 * its failures, trigger block 0 written back before. */
 	Status step();
 
 	/* R0 (PC) and R2 (SR) come from the saved context, R3 reads 0. Values
@@ -162,6 +179,7 @@ private:
 	void release_with_reset();
 	void abandon();
 	void clear_triggers();
+	void give_back_trigger_block_0();
 	void clear_jmb_out();
 
 	uint16_t read_word(uint32_t addr);
@@ -183,6 +201,10 @@ private:
 	uint8_t bp_hit_ = kNoBreakpoint;
 	uint32_t bp_addr_[kHwBreakpoints] = {};
 	uint32_t bp_used_ = 0; /* bit i: trigger block i is a breakpoint */
+	/* While step() has borrowed trigger block 0: its value, control, mask
+	 * and combination registers and BREAKREACT as step() found them. */
+	uint32_t tb0_[5] = {};
+	bool tb0_borrowed_ = false;
 };
 
 } // namespace msp430
