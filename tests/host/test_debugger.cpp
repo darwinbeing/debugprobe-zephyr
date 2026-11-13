@@ -27,7 +27,9 @@ struct Fx {
 	 * Debugger does, the fake's mailbox, EEM exchange, password and
 	 * memory-access rules must hold, and nothing is written to flash or the
 	 * flash controller. A test that passes write_mem a flash address on
-	 * purpose checks the flag and clears it itself. */
+	 * purpose checks the flag false right before that write, so that no
+	 * earlier flash write goes unnoticed, then checks it set and clears
+	 * it. */
 	~Fx()
 	{
 		CHECK(!t.jmb_protocol_error);
@@ -890,6 +892,7 @@ TEST(debugger_memory_access_reaches_the_last_word)
 	const uint8_t want[] = {0x1A, 0x44};
 	CHECK_BYTES(out, want);
 	f.t.log.clear();
+	CHECK(!f.t.flash_write_attempt); /* nothing before the intended write */
 	const uint8_t data[] = {0x34, 0x12};
 	REQUIRE(f.d.write_mem(0xFFFFE, 1, data) == Status::Ok);
 	CHECK_LOG(f.t.log, (Log{"ir:28", "dr16:0000"} + write_word(0xFFFFE, 0x1234) +
@@ -913,6 +916,7 @@ TEST(debugger_memory_access_crosses_a_64k_boundary)
 	const uint8_t want[] = {0x11, 0x11, 0x22, 0x22};
 	CHECK_BYTES(out, want);
 	f.t.log.clear();
+	CHECK(!f.t.flash_write_attempt); /* nothing before the intended write */
 	const uint8_t data[] = {0x34, 0x12, 0x78, 0x56};
 	REQUIRE(f.d.write_mem(0x1FFFE, 2, data) == Status::Ok);
 	CHECK_LOG(f.t.log, (Log{"ir:28", "dr16:0000"} + write_word(0x1FFFE, 0x1234) +
