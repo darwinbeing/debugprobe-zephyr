@@ -33,7 +33,11 @@ public:
 	 * length, or 0 if the request is not addressed to this handler or the
 	 * response buffer has fewer than 2 bytes. Fixed-size requests with
 	 * missing or extra bytes are BAD_ARG. DISCONNECT in Idle is BAD_STATE
-	 * (clients that disconnect as cleanup ignore it).
+	 * (clients that disconnect as cleanup ignore it). DBG_ATTACH is
+	 * BAD_STATE in Connected and Flashing; in a debug session it ends that
+	 * session as DBG_DETACH with DetachAction::Run does, then attaches as
+	 * from Idle (a malformed one is BAD_ARG and leaves the session as it
+	 * was).
 	 * A command that ends with Status::TargetError while a session is open
 	 * closes the session (the target is in an unknown state and the pins are
 	 * released); the host has to connect again. In a debug session the

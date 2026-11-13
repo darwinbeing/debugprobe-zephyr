@@ -387,10 +387,10 @@ Status Session::op_flash_end(In args)
 
 Status Session::op_dbg_attach(In args, Out out, size_t &n)
 {
-	/* From Idle only: in Connected and Flashing a Phase A funclet may still
-	 * be running on the target, and Cpuxv2::identify() with the normal
-	 * entry would not stop it; a debug session ends with DBG_DETACH. */
-	if (state_ != State::Idle) {
+	/* Not in Connected and Flashing: a Phase A funclet may still be running
+	 * on the target, and Cpuxv2::identify() with the normal entry would not
+	 * stop it. */
+	if (state_ == State::Connected || state_ == State::Flashing) {
 		return Status::BadState;
 	}
 	if (args.size() != 12 || out.size() < 15) {
@@ -407,6 +407,9 @@ Status Session::op_dbg_attach(In args, Out out, size_t &n)
 		return Status::BadArg;
 	}
 
+	/* In DebugHalted and DebugRunning, Debugger::attach first ends the open
+	 * session with DetachAction::Run (a running CPU is halted first; the
+	 * program continues where it stopped), then attaches as from Idle. */
 	Identity id;
 	const Status st = dbg_.attach(static_cast<AttachMode>(mode), speed_khz * 1000u, id);
 	if (st == Status::NoTarget) {
@@ -414,7 +417,9 @@ Status Session::op_dbg_attach(In args, Out out, size_t &n)
 		n = 1;
 	}
 	if (st != Status::Ok) {
-		return st; /* the debugger has released the pins */
+		state_ = State::Idle; /* the debugger has released the pins */
+		ram_lo_ = ram_hi_ = 0;
+		return st;
 	}
 	state_ = State::DebugHalted;
 	/* The writable RAM: the intersection of the host's range and the RAM

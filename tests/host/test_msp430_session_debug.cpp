@@ -3,6 +3,7 @@
 #include "debug_logs.hpp"
 #include "msp430/session.hpp"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -167,6 +168,19 @@ struct Fx {
 		REQUIRE(s.state() == State::DebugRunning);
 		tap.log.clear();
 	}
+
+	/* A debug session with breakpoint 5 at 0x4600, halted or running; then
+	 * forget the transcript. */
+	void open_session(bool running)
+	{
+		attach();
+		REQUIRE(run(bp_req(5, 0x4600))[1] == 0x00);
+		if (running) {
+			resume();
+		}
+		tap.log.clear();
+		tap.mem_writes.clear();
+	}
 };
 
 } // namespace
@@ -246,10 +260,10 @@ TEST(session_dbg_attach_no_target_carries_the_id)
 }
 
 /* Cpuxv2::identify() with the normal entry does not stop a Phase A funclet
- * that may still be running on the target, so DBG_ATTACH is accepted in Idle
- * only; a debug session ends with DBG_DETACH. The state error wins over the
+ * that may still be running on the target, so DBG_ATTACH is refused in
+ * Connected and Flashing, with nothing sent. The state error wins over the
  * size error. */
-TEST(session_dbg_attach_only_from_idle)
+TEST(session_dbg_attach_refused_while_connected_or_flashing)
 {
 	{
 		Fx f; /* Connected */
@@ -276,21 +290,147 @@ TEST(session_dbg_attach_only_from_idle)
 		CHECK(f.tap.mem_writes.empty());
 		CHECK(f.s.state() == State::Flashing);
 	}
-	{
-		Fx f; /* DebugHalted */
-		f.attach();
-		CHECK_BYTES(f.run(attach_req()), kBadState);
-		CHECK_BYTES(f.run(attach_req(1)), kBadState);
-		CHECK(f.tap.log.empty());
+}
+
+/* DBG_ATTACH in a debug session ends it as DBG_DETACH 0 does (a running CPU
+ * is halted first; the program continues where it stopped), then attaches as
+ * from Idle: the transcript is DBG_DETACH 0's followed by a fresh
+ * DBG_ATTACH's, the RAM window comes from the new request, and the old
+ * session's breakpoints are gone. */
+TEST(session_dbg_attach_in_a_debug_session_detaches_it_first)
+{
+	const Bytes req = attach_req(0, 0, 0x2400, 0x3000);
+	const Bytes want = {0x90, 0x00,
+			    0x91, 0x06, 0x01, 0x00, 0x1A, 0x00, 0x00, 0x55, 0x29, /* identity */
+			    0x20, 0x45, 0x00, 0x00,                               /* PC 0x4520 */
+			    0x01,                                                 /* stopped on request */
+			    0x08};                                                /* 8 breakpoints */
+	for (const bool running : {false, true}) {
+		/* The reference: DBG_DETACH 0 from the same session, then DBG_ATTACH
+		 * from Idle. */
+		Log detach;
+		Log fresh;
+		{
+			Fx g;
+			g.open_session(running);
+			if (running) {
+				g.cpu_runs();
+				g.tap.eem_control_script.push_front(0x0000); /* the halt's own look */
+			}
+			REQUIRE(g.run({0x90, 0x0A, 0x00}) == kOk);
+			detach = g.tap.log;
+			g.tap.log.clear();
+			g.cpu_runs();
+			CHECK_BYTES(g.run(req), want);
+			fresh = g.tap.log;
+		}
+		REQUIRE(!detach.empty());
+		CHECK(detach.back() == "close");
+		CHECK(std::find(detach.begin(), detach.end(), "ir:a8") != detach.end());
+		CHECK(std::find(detach.begin(), detach.end(), "dr16:0c01") == detach.end()); /* no reset */
+		REQUIRE(!fresh.empty());
+		CHECK(fresh.front() == "speed:250000");
+
+		Fx f;
+		f.open_session(running);
+		if (running) {
+			/* the halt: WaitForEem's look, the sync's look, the stop poll;
+			 * then the new session's look and stop poll */
+			f.tap.eem_control_script = {0x0000, 0x0000, 0x0080, 0x0000, 0x0080};
+			f.tap.captured = {0x0008, 0x0000, 0x0008, 0x0000};
+		} else {
+			f.cpu_runs();
+		}
+		CHECK_BYTES(f.run(req), want);
+		CHECK_LOG(f.tap.log, detach + fresh); /* the old session's release first */
+		CHECK(f.tap.eem_control_script.empty());
+		CHECK(f.tap.captured.empty());
 		CHECK(f.s.state() == State::DebugHalted);
+		CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x01, 0xFF, 0x20, 0x45, 0, 0}));
+
+		/* the RAM window of the new request, not the old session's */
+		CHECK_BYTES(f.run(write_req(0x2400, 2)), kOk);
+		CHECK_BYTES(f.run(write_req(0x2FFE, 2)), kOk);
+		CHECK_BYTES(f.run(write_req(0x1C00, 2)), kProtected);
+		CHECK_BYTES(f.run(write_req(0x3000, 2)), kProtected);
+
+		/* breakpoint 5 is gone: a stop at its address reports no
+		 * breakpoint (the fake's EEM stops the CPU there anyway) */
+		CHECK_BYTES(f.run({0x90, 0x0C}), kOk);
+		f.tap.eem_control_script = {0x0080, 0x0080};
+		f.tap.captured = {0x0008, 0x0000};
+		f.tap.mab = 0x4604;
+		CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x02, 0xFF, 0x00, 0x46, 0, 0}));
 	}
-	{
-		Fx f; /* DebugRunning */
-		f.attach();
-		f.resume();
-		CHECK_BYTES(f.run(attach_req()), kBadState);
+}
+
+/* A re-attach that fails after the old session's release leaves Idle: the
+ * Debugger has released the pins, nothing more is sent. */
+TEST(session_dbg_attach_failing_in_a_debug_session_leaves_idle)
+{
+	Fx f;
+	f.open_session(false);
+	f.tap.jtag_id = 0xFF;
+	CHECK_BYTES(f.run(attach_req()), (Bytes{0x90, 0x04, 0xFF}));
+	CHECK(f.s.state() == State::Idle);
+	CHECK(log_has(f.tap, "ir:a8"));         /* the old session's release */
+	CHECK_EQ(count_log(f.tap, "close"), 2u); /* the release's and the failed entry's */
+	REQUIRE(!f.tap.log.empty());
+	CHECK(f.tap.log.back() == "close");
+	f.tap.log.clear();
+	CHECK_BYTES(f.run({0x90, 0x0D}), kBadState);
+	CHECK(f.tap.log.empty());
+}
+
+/* A malformed DBG_ATTACH in a debug session is BAD_ARG before anything is
+ * sent: the open session stays as it was (state, RAM window, breakpoints). */
+TEST(session_dbg_attach_bad_arg_leaves_the_debug_session_untouched)
+{
+	Bytes shortreq = attach_req();
+	shortreq.pop_back();
+	Bytes longreq = attach_req();
+	longreq.push_back(0);
+	const Bytes bad[] = {
+		attach_req(2),                          /* mode */
+		attach_req(0, 1),                       /* full mode: B2 */
+		attach_req(0, 2),                       /* unknown flag */
+		attach_req(0, 0x80),                    /* unknown flag */
+		attach_req(0, 0, 0x1C01),               /* odd RAM start */
+		attach_req(0, 0, 0x4400, 0x1C00),       /* empty RAM range */
+		attach_req(0, 0, 0x2400, 0x2400),       /* empty RAM range */
+		attach_req(0, 0, 0x1C00, 0x100002),     /* past 1 MB */
+		attach_req(0, 0, 0x2400, 0x3000, 99),   /* speed, narrower RAM */
+		attach_req(0, 0, 0x1C00, 0x4400, 1001), /* speed */
+		shortreq,
+		longreq,
+		{0x90, 0x09},                           /* no arguments */
+	};
+	for (const bool running : {false, true}) {
+		Fx f;
+		f.open_session(running);
+		for (const Bytes &req : bad) {
+			CHECK_BYTES(f.run(req), kBadArg);
+		}
+		uint8_t small[16] = {}; /* 2 + 15 bytes needed */
+		CHECK_EQ(f.s.handle(attach_req(), small), 2u);
+		CHECK_EQ(small[1], 0x01);
 		CHECK(f.tap.log.empty());
-		CHECK(f.s.state() == State::DebugRunning);
+		CHECK(f.tap.mem_writes.empty());
+		CHECK(f.s.state() == (running ? State::DebugRunning : State::DebugHalted));
+
+		if (!running) {
+			CHECK_BYTES(f.run({0x90, 0x0D}),
+				    (Bytes{0x90, 0x00, 0x01, 0x01, 0xFF, 0x20, 0x45, 0, 0}));
+			CHECK_BYTES(f.run({0x90, 0x0C}), kOk);
+		}
+		/* breakpoint 5 still set: a stop at its address reports it */
+		f.tap.eem_control_script = {0x0080, 0x0080};
+		f.tap.captured = {0x0008, 0x0000};
+		f.tap.mab = 0x4604;
+		CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x02, 0x05, 0x00, 0x46, 0, 0}));
+		/* the RAM window of the first attach */
+		CHECK_BYTES(f.run(write_req(0x1C00, 2)), kOk);
+		CHECK_BYTES(f.run(write_req(0x43FE, 2)), kOk);
 	}
 }
 
