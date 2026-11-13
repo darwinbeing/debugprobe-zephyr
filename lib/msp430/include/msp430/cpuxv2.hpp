@@ -27,6 +27,14 @@ public:
 	 * NoTarget; it is 0 when the magic-pattern entry got no mailbox access
 	 * and no ID was read. */
 	Status connect(EntryMode mode, uint32_t slot_hz, Identity &id);
+	/* The first half of connect(): entry, JTAG ID, lock check, core ID and
+	 * device-ID pointer (`id.device_id` stays 0). Does not touch the CPU:
+	 * no sync, no reset. On Ok the pins stay taken and the TAP is ready;
+	 * on failure they are released (same statuses as connect()). */
+	Status identify(EntryMode mode, uint32_t slot_hz, Identity &id);
+	/* "Check Init State": the CPU is under JTAG control and synchronized
+	 * (JTAG ID 0x91 captured, and a control-signal bit set). */
+	bool in_full_emulation();
 	/* Reset the target through JTAG and release the pins. */
 	void disconnect();
 
@@ -59,7 +67,6 @@ public:
 	Status flash_end(bool complete);
 
 private:
-	bool in_full_emulation();
 	bool write_word(uint32_t addr, uint16_t data);
 	bool set_pc(uint32_t addr);
 	bool execute_por();

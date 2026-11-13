@@ -275,9 +275,9 @@ bool Cpuxv2::jmb_write16(uint16_t value)
 	return true;
 }
 
-/* GetDevice_430Xv2 = GetCoreID (one attempt) + IsLockKeyProgrammed +
- * GetCoreipIdXv2 + SyncJtag_AssertPor + read of the device ID. */
-Status Cpuxv2::connect(EntryMode mode, uint32_t slot_hz, Identity &id)
+/* GetDevice_430Xv2, first half: GetCoreID (one attempt) +
+ * IsLockKeyProgrammed + GetCoreipIdXv2. */
+Status Cpuxv2::identify(EntryMode mode, uint32_t slot_hz, Identity &id)
 {
 	funclet_words_ = 0;
 	write_active_ = false;
@@ -322,10 +322,22 @@ Status Cpuxv2::connect(EntryMode mode, uint32_t slot_hz, Identity &id)
 	 * result: convert it back. */
 	const uint32_t scrambled = tap_.dr_shift20(0);
 	id.device_id_ptr = ((scrambled & 0xFFFFu) << 4) | (scrambled >> 16);
+	if (id.core_id == 0) {
+		tap_.close();
+		return Status::TargetError;
+	}
+	return Status::Ok;
+}
 
+/* GetDevice_430Xv2 = identify() + SyncJtag_AssertPor + read of the device ID. */
+Status Cpuxv2::connect(EntryMode mode, uint32_t slot_hz, Identity &id)
+{
+	const Status st = identify(mode, slot_hz, id);
+	if (st != Status::Ok) {
+		return st;
+	}
 	uint8_t raw[2] = {};
-	if (id.core_id == 0 || !sync_por() ||
-	    read_mem(id.device_id_ptr + 4u, 1, raw) != Status::Ok) {
+	if (!sync_por() || read_mem(id.device_id_ptr + 4u, 1, raw) != Status::Ok) {
 		tap_.close();
 		return Status::TargetError;
 	}

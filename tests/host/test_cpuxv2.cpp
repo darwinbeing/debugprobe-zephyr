@@ -736,3 +736,61 @@ TEST(cpuxv2_erase_detects_a_floating_data_line)
 	Cpuxv2 cpu{t};
 	CHECK(cpu.erase(msp430::EraseMode::Main, 0x4400, 0x2400) == Status::TargetError);
 }
+
+TEST(cpuxv2_identify_stops_before_the_sync)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	msp430::Identity id;
+	CHECK(cpu.identify(msp430::EntryMode::Normal, 250000, id) == Status::Ok);
+	CHECK_EQ(id.jtag_id, 0x91);
+	CHECK_EQ(id.core_id, 0x0106);
+	CHECK_EQ(id.device_id_ptr, 0x1A00u);
+	CHECK_EQ(id.device_id, 0);
+	/* GetCoreID + IsLockKeyProgrammed + GetCoreipIdXv2, nothing else: no
+	 * control-signal write, so the CPU is neither synchronized nor reset. */
+	CHECK_LOG(t.log, (Log{"speed:250000", "open", "enter:high", "ir:28",
+			      "ir:28", "dr16:aaaa", "ir:28", "dr16:aaaa", "ir:28", "dr16:aaaa",
+			      "ir:e8", "dr16:0000", "ir:e1", "dr20:00000"}));
+	CHECK(t.mem_writes.empty());
+}
+
+TEST(cpuxv2_identify_failures_release_the_pins)
+{
+	{
+		FakeTap t;
+		t.jtag_id = 0xFF;
+		Cpuxv2 cpu{t};
+		msp430::Identity id;
+		CHECK(cpu.identify(msp430::EntryMode::Normal, 250000, id) == Status::NoTarget);
+		CHECK(t.log.back() == "close");
+	}
+	{
+		FakeTap t;
+		t.cntrl_sig_script = {0x5555};
+		Cpuxv2 cpu{t};
+		msp430::Identity id;
+		CHECK(cpu.identify(msp430::EntryMode::Normal, 250000, id) == Status::Locked);
+		CHECK(t.log.back() == "close");
+	}
+	{
+		FakeTap t;
+		t.core_id = 0;
+		Cpuxv2 cpu{t};
+		msp430::Identity id;
+		CHECK(cpu.identify(msp430::EntryMode::Normal, 250000, id) == Status::TargetError);
+		CHECK(t.log.back() == "close");
+	}
+}
+
+TEST(cpuxv2_in_full_emulation_is_public)
+{
+	FakeTap t;
+	Cpuxv2 cpu{t};
+	CHECK(cpu.in_full_emulation());
+	t.cntrl_sig = 0x0000;
+	CHECK(!cpu.in_full_emulation());
+	t.cntrl_sig = 0x0301;
+	t.jtag_id = 0x89;
+	CHECK(!cpu.in_full_emulation());
+}
