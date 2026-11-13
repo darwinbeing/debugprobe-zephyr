@@ -375,8 +375,9 @@ void Debugger::eem_write(uint8_t reg, uint32_t value)
 
 /* Not in MSPDS: release a CPU that has not reached full emulation, without
  * writing anything to the target's memory, and let go of the pins. EEM
- * registers only: the EEM is turned off (and on the reset path the caller
- * has first switched the system clocks back, restore_system_clocks()). */
+ * registers only: the EEM is turned off (once the reset path has switched
+ * the system clocks to JCK, the caller switches them back first,
+ * restore_system_clocks()). */
 void Debugger::abandon()
 {
 	write_control(kEmuClkEn | kClearStop);

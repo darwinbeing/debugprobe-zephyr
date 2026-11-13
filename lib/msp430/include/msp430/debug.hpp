@@ -31,7 +31,8 @@ public:
 	 * go: before it reached full emulation with nothing written to its
 	 * memory; in full emulation before its context was saved, at the PC
 	 * where it stopped (SR and WDTCTL unwritten), except that with Reset,
-	 * whose power-on reset left the CPU at a safe address, it gets another
+	 * whose power-on reset left the CPU at a safe address (or, after a
+	 * failed init-state check, in an unknown state), it gets another
 	 * power-on reset as detach(Reset) does; after that with its context
 	 * restored, as detach(Run) does. With Reset, system clocks already
 	 * switched to the JTAG clock are switched back before any release. */
