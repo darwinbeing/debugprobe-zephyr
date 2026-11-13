@@ -24,7 +24,7 @@
  *    where it stopped (SetPcXv2 and the release of
  *    RestoreContext_ReleaseJtagXv2, the PC 2 lower if the control signal
  *    shows CPUOFF), SR and WDTCTL unwritten, and the operation ends with
- *    TargetError (MSPDS checks neither);
+ *    TargetError (SyncJtag_Conditional_SaveContextXv2 checks neither);
  *  - the PC derived from the MAB (MAB - 4, or - 2 in a low-power mode) is
  *    kept to 20 bits; MSPDS computes it in 32 bits, so a MAB below 4 wraps
  *    to 0xFFFFFFFx there and to 0xFFFFx here;
