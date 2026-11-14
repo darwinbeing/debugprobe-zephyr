@@ -96,12 +96,49 @@ GUARDED_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", 
 
 
 @contextlib.contextmanager
+def _signals_blocked():
+    """The guarded signals are blocked for this thread inside, where
+    pthread_sigmask exists: one that arrives meanwhile waits and is handled
+    when they are unblocked on the way out."""
+    if not hasattr(signal, "pthread_sigmask"):
+        yield
+        return
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, GUARDED_SIGNALS)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old)
+
+
+def _put_back(previous: dict) -> None:
+    """Put every handler in `previous` back (one not installed from Python,
+    which cannot be put back, becomes the default). The signals are blocked
+    meanwhile, so that one arriving now runs its own handler once all are
+    back instead of cutting the loop short and leaving the rest ignored. An
+    interrupt that gets in anyway (a signal delivered to another thread is
+    handled here at the next chance) does not stop it either: the loop
+    starts over, putting a handler back twice does no harm, and the
+    interrupt is raised once all are back."""
+    interrupt = None
+    with _signals_blocked():
+        while True:
+            try:
+                for signum, handler in previous.items():
+                    signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+                break
+            except KeyboardInterrupt as e:
+                if interrupt is None:
+                    interrupt = e
+        if interrupt is not None:
+            raise interrupt
+
+
+@contextlib.contextmanager
 def _signals_ignored():
     """Ctrl-C, SIGTERM and SIGHUP are ignored inside (on the main thread,
     where Python delivers them; elsewhere nothing changes): the detach that
     lets the target's program run again must not be cut off. Their handlers
-    are put back afterwards; one not installed from Python, which cannot be
-    put back, becomes the default."""
+    are put back afterwards (_put_back)."""
     if threading.current_thread() is not threading.main_thread():
         yield
         return
@@ -111,8 +148,7 @@ def _signals_ignored():
             previous[signum] = signal.signal(signum, signal.SIG_IGN)
         yield
     finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+        _put_back(previous)
 
 
 def _reg_value(text: str) -> int:
@@ -179,7 +215,8 @@ class GdbServer:
         except SessionEnded:
             ended = True
         finally:
-            self._detach()
+            # also when a Ctrl-C lands between here and _detach's own loop
+            self._detach_surely()
         if ended:
             self._let_gdb_close()
 
@@ -336,33 +373,65 @@ class GdbServer:
 
     def _detach(self) -> None:
         """DBG_DETACH with Run, if the probe may have a session for us.
-        Ctrl-C, SIGTERM and SIGHUP do not cut it off: ignored on the main
-        thread, and the detach is sent once more if a KeyboardInterrupt comes
-        through anyway. `attached` stays set until the probe has answered
-        DBG_DETACH or the detach has failed for good, so a detach cut off
-        twice is still due (serve_connection detaches on its way out)."""
-        if not self.attached:
-            return
-        for attempt in (1, 2):
+        Ctrl-C, SIGTERM and SIGHUP do not cut it off: they are ignored on the
+        main thread while it is sent. One that comes through anyway (while
+        the guard goes up or comes down) is kept and raised once the detach
+        is over and reported. `attached` stays set until the probe has
+        answered DBG_DETACH or the detach has failed for good, and until
+        then it is sent again; once the probe has answered it is never sent
+        again (a second one would only answer BAD_STATE)."""
+        interrupt = None
+        outcome = None
+        while self.attached:
             try:
-                # inside the try: a Ctrl-C while the guard is put up retries
                 with _signals_ignored():
-                    self.probe.dbg_detach(probe_mod.DETACH_RUN)
-                    self.attached = False
-                self.say("detached; the program continues where it stopped")
-                return
-            except KeyboardInterrupt:
-                if attempt == 2:
-                    raise
-            except StatusError as e:
-                self.attached = False
-                self.say(DETACH_RESET if e.status == probe_mod.STATUS_TARGET_ERROR
-                         else f"detach failed: {e}")
-                return
-            except ProbeError as e:
-                self.attached = False
-                self.say(f"detach failed: {e}")
-                return
+                    try:
+                        self.probe.dbg_detach(probe_mod.DETACH_RUN)
+                    except StatusError as e:
+                        self.attached = False
+                        outcome = (DETACH_RESET if e.status == probe_mod.STATUS_TARGET_ERROR
+                                   else f"detach failed: {e}")
+                    except ProbeError as e:
+                        self.attached = False
+                        outcome = f"detach failed: {e}"
+                    else:
+                        self.attached = False
+                        outcome = "detached; the program continues where it stopped"
+            except KeyboardInterrupt as e:
+                if interrupt is None:
+                    interrupt = e
+        if outcome is not None:
+            self.say(outcome)
+        if interrupt is not None:
+            raise interrupt
+
+    def _detach_surely(self) -> None:
+        """_detach, also when an interrupt lands on the way into it, before
+        its own loop has started (raised afterwards, as _detach does)."""
+        interrupt = None
+        while self.attached:
+            try:
+                self._detach()
+            except KeyboardInterrupt as e:
+                if interrupt is None:
+                    interrupt = e
+        if interrupt is not None:
+            raise interrupt
+
+    def _end_session(self, packet: bytes, reply) -> None:
+        """D, vKill, k: detach, send the session's last reply (`reply`; None
+        for k, which gets none) and end the session. An interrupt kept
+        during the detach is raised after the reply."""
+        try:
+            self._detach_surely()
+        except KeyboardInterrupt:
+            if reply is not None:
+                with contextlib.suppress(Disconnected):
+                    self._reply(reply, packet)
+            raise
+        if reply is not None:
+            self._reply(reply, packet)
+        raise SessionEnded()
 
     def _lost(self, e) -> None:
         """The probe answered TARGET_ERROR: it has ended the session itself."""
@@ -435,14 +504,9 @@ class GdbServer:
         if s.startswith("vFlash"):
             raise Refused("flash programming (load) is not allowed in read-only mode")
         if s == "D" or s.startswith("D;"):
-            self._detach()
-            self._reply("OK", p)
-            raise SessionEnded()
+            self._end_session(p, "OK")
         if s in ("k", "vKill") or s.startswith("vKill;"):
-            self._detach()
-            if s != "k":
-                self._reply("OK", p)
-            raise SessionEnded()
+            self._end_session(p, None if s == "k" else "OK")
         if s.startswith("qRcmd,"):
             return self._monitor(bytes.fromhex(s[6:]).decode("utf-8", "replace"))
         if s.startswith("qXfer:memory-map:read::"):

@@ -1,3 +1,4 @@
+import contextlib
 import io
 import os
 import signal
@@ -968,11 +969,14 @@ class LeavingTest(ServerFixture):
         self.assertEqual(self.fw.detaches, [0])  # the probe had attached
 
     def test_a_detach_interrupted_once_is_sent_again(self):
+        """The interrupt is kept: GDB gets its OK once the detach is done,
+        then the server stops."""
         self.start()
         self.fw.interrupt_on_op = probe_mod.OP_DBG_DETACH
         self.assertEqual(self.gdb.cmd("D"), "OK")
         self.thread.join(5)
         self.assertEqual(self.fw.detaches, [0])
+        self.assertIsInstance(self.error, KeyboardInterrupt)
 
     def test_a_socket_read_error_while_running_detaches(self):
         flaky = self.server_sock = FlakySocket(self.server_sock)
@@ -1109,6 +1113,7 @@ class ReviewTwoTest(ServerFixture):
             gdbserver._signals_ignored = real
         self.assertEqual(self.fw.detaches, [0])
         self.assertEqual(len(calls), 2)
+        self.assertIsInstance(self.error, KeyboardInterrupt)  # raised once the detach is done
 
 
 GUARDED = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP")
@@ -1167,14 +1172,20 @@ class DetachSignalTest(unittest.TestCase):
                          [(n, signal.SIG_DFL) for n in GUARDED])
 
     def test_attached_is_cleared_only_once_dbg_detach_was_answered(self):
+        """Attempts cut off before DBG_DETACH is sent are made again until it
+        is answered; the interrupt comes afterwards."""
         fw = FakeFirmware()
         during = []
         server = self.server(fw, lambda s: during.append(s.attached))
         server._attach(probe_mod.ATTACH_RUNNING)
         real = gdbserver._signals_ignored
+        cut = []
 
         def interrupted():
-            raise KeyboardInterrupt  # each attempt cut off before DBG_DETACH is sent
+            if len(cut) < 3:
+                cut.append(server.attached)
+                raise KeyboardInterrupt  # cut off before DBG_DETACH is sent
+            return real()
 
         gdbserver._signals_ignored = interrupted
         try:
@@ -1182,14 +1193,178 @@ class DetachSignalTest(unittest.TestCase):
                 server._detach()
         finally:
             gdbserver._signals_ignored = real
-        self.assertTrue(server.attached)  # the detach is still due
-        self.assertEqual(fw.detaches, [])
-        server._detach()  # e.g. serve_connection's own, on the way out
+        self.assertEqual(cut, [True, True, True])  # the detach was still due each time
         self.assertEqual(during, [True])
         self.assertFalse(server.attached)
         self.assertEqual(fw.detaches, [0])
         server._detach()  # nothing more is sent
         self.assertEqual(fw.detaches, [0])
+
+    def test_an_interrupt_while_the_guard_comes_down_follows_one_detach(self):
+        """A Ctrl-C (or SIGTERM, SIGHUP) that lands while or just after the
+        guard puts the handlers back, after the probe answered DBG_DETACH:
+        no second DBG_DETACH (which would answer BAD_STATE and swallow the
+        interrupt); the interrupt is raised once the detach is reported."""
+        fw = FakeFirmware()
+        server = self.server(fw)
+        server._attach(probe_mod.ATTACH_RUNNING)
+        real = gdbserver._signals_ignored
+
+        @contextlib.contextmanager
+        def guard():
+            with real():
+                yield
+            raise KeyboardInterrupt
+
+        gdbserver._signals_ignored = guard
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                server._detach()
+        finally:
+            gdbserver._signals_ignored = real
+        out = server.out.getvalue()
+        self.assertEqual((fw.detaches, server.attached), ([0], False))
+        self.assertEqual(out.count("detached; the program continues where it stopped"), 1)
+        self.assertNotIn("detach failed", out)
+
+    def test_a_ctrl_c_on_the_way_into_the_detach_still_detaches(self):
+        """serve_connection's own detach, interrupted before _detach's loop
+        starts: it is made all the same, then the interrupt goes on."""
+        fw = FakeFirmware()
+        server = self.server(fw)
+        real = server._detach
+        calls = []
+
+        def detach():
+            calls.append(server.attached)
+            if len(calls) == 1:
+                raise KeyboardInterrupt  # lands between finally: and the loop
+            real()
+
+        server._detach = detach
+        mine, gdb = socket.socketpair()
+        gdb.close()  # GDB went away at once
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                server.serve_connection(mine)
+        finally:
+            mine.close()
+        self.assertEqual(calls, [True, True])
+        self.assertEqual((fw.detaches, fw.state, server.attached), ([0], 0, False))
+
+    def signal_proxy(self, on_signal=None, calls=None):
+        """Stands in for the signal module inside gdbserver: forwards to it,
+        records signal() and pthread_sigmask() calls in `calls`, and calls
+        on_signal(signum, handler) after each signal()."""
+        class Proxy:
+            def __getattr__(self, name):
+                return getattr(signal, name)
+
+            def signal(self, signum, handler):
+                if calls is not None:
+                    calls.append(("signal", signum, handler))
+                previous = signal.signal(signum, handler)
+                if on_signal is not None:
+                    on_signal(signum, handler)
+                return previous
+
+            def pthread_sigmask(self, how, mask):
+                if calls is not None:
+                    calls.append(("mask", how, set(mask)))
+                return signal.pthread_sigmask(how, mask)
+
+        return Proxy()
+
+    def stand_ins(self):
+        """Python handlers for the guarded signals, which raise
+        KeyboardInterrupt and record the handlers in place when they run;
+        returns (handlers, record, previous)."""
+        seen = []
+
+        def stand_in(signo, frame):
+            seen.append((signo, [signal.getsignal(n) for n in GUARDED]))
+            raise KeyboardInterrupt
+
+        previous = {n: signal.getsignal(n) for n in GUARDED}
+        for n in GUARDED:
+            signal.signal(n, stand_in)
+        return stand_in, seen, previous
+
+    @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "needs pthread_sigmask")
+    def test_the_handlers_go_back_with_the_three_signals_blocked(self):
+        calls = []
+        real = gdbserver.signal
+        gdbserver.signal = self.signal_proxy(calls=calls)
+        try:
+            before = {n: signal.getsignal(n) for n in GUARDED}
+            with gdbserver._signals_ignored():
+                pass
+        finally:
+            gdbserver.signal = real
+        self.assertEqual({n: signal.getsignal(n) for n in GUARDED}, before)
+        guarded = set(GUARDED)
+        self.assertEqual(calls[:len(GUARDED)],
+                         [("signal", n, signal.SIG_IGN) for n in GUARDED])
+        self.assertEqual(calls[len(GUARDED)], ("mask", signal.SIG_BLOCK, guarded))
+        self.assertEqual(calls[len(GUARDED) + 1:2 * len(GUARDED) + 1],
+                         [("signal", n, before[n]) for n in GUARDED])
+        self.assertEqual(calls[-1][:2], ("mask", signal.SIG_SETMASK))
+        self.assertTrue(guarded.isdisjoint(calls[-1][2]))  # unblocked again
+        self.assertEqual(len(calls), 2 * len(GUARDED) + 2)
+
+    @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "needs pthread_sigmask")
+    def test_a_signal_while_the_handlers_go_back_waits_until_all_are_back(self):
+        """A real SIGINT right after SIGINT's own handler is back: it runs
+        once every handler is back, not between them, so SIGTERM and SIGHUP
+        are not left ignored."""
+        stand_in, seen, previous = self.stand_ins()
+        raised = []
+
+        def on_signal(signum, handler):
+            if signum == signal.SIGINT and handler is stand_in and not raised:
+                raised.append(signum)
+                signal.raise_signal(signal.SIGINT)
+
+        real = gdbserver.signal
+        gdbserver.signal = self.signal_proxy(on_signal)
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                with gdbserver._signals_ignored():
+                    pass
+            after = {n: signal.getsignal(n) for n in GUARDED}
+        finally:
+            gdbserver.signal = real
+            for n, handler in previous.items():
+                signal.signal(n, handler)
+        self.assertEqual(raised, [signal.SIGINT])
+        self.assertEqual(seen, [(signal.SIGINT, [stand_in] * len(GUARDED))])
+        self.assertEqual(after, {n: stand_in for n in GUARDED})
+
+    def test_an_interrupt_between_two_handlers_still_puts_all_back(self):
+        """However an interrupt gets in between (a handler run from another
+        thread's delivery, say): every handler is put back, then it is
+        raised."""
+        before = {n: signal.getsignal(n) for n in GUARDED}
+        hit = []
+
+        def on_signal(signum, handler):
+            if handler is not signal.SIG_IGN and not hit:
+                hit.append(signum)
+                raise KeyboardInterrupt  # right after the first handler is back
+
+        real = gdbserver.signal
+        gdbserver.signal = self.signal_proxy(on_signal)
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                with gdbserver._signals_ignored():
+                    pass
+        finally:
+            gdbserver.signal = real
+            after = {n: signal.getsignal(n) for n in GUARDED}
+            for n, handler in before.items():
+                signal.signal(n, handler)
+        self.assertEqual(hit, [GUARDED[0]])
+        self.assertEqual(after, before)
 
     def test_a_detach_that_reset_the_target_says_so(self):
         """DBG_DETACH answered TARGET_ERROR: the session is over, but the

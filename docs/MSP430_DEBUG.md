@@ -95,7 +95,8 @@ resets the target instead (the firmware restarts), and the server says so
 (Troubleshooting). Stop the server with Ctrl-C;
 SIGTERM and SIGHUP do the same. It detaches first, and exits with status 130
 (Ctrl-C) or 128 plus the signal number. While it detaches, these three
-signals are ignored, so that nothing cuts the detach off.
+signals are ignored, so that nothing cuts the detach off; one that arrives
+just as the detach ends takes effect once it is over.
 
 **Do not unplug the probe, power it off, or kill the host tool without a
 detach while the target runs with breakpoints set.** If the link dies while

@@ -416,8 +416,10 @@ already worked into the text above; the others take precedence over it.
     session from an earlier command, debugs only with the protocol versions
     it knows (2), and takes no abbreviated options. SIGTERM and SIGHUP stop
     it as Ctrl-C does, after a detach. While it detaches, Ctrl-C, SIGTERM and
-    SIGHUP are ignored, and a detach that was cut off anyway is sent again on
-    the way out.
+    SIGHUP are ignored, and a detach that was cut off anyway is sent again
+    until the probe has answered it, never after; a signal that gets through
+    while the handlers are put back (with the three signals blocked) is
+    handled once the detach is over and reported.
 23. `monitor reset` sets the hardware breakpoints GDB holds again after the
     reset's attach, which clears every trigger, and asks the user to run
     `flushregs`: GDB keeps its register cache across a monitor command.
