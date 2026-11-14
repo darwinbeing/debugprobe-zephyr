@@ -9,6 +9,8 @@ Each table is tab-separated with a header row. Columns used:
   kind      optional: func (the default when the column is missing), var,
             const, data; struct, union and member rows are skipped
   size      optional, decimal or 0x hex; 0 when missing
+A name may appear once; an exact repeat of a row counts once, and a name that
+appears again with another address, kind or size is an error.
 
 The file is an ELF32 for the MSP430X (EM_MSP430) with the attributes
 msp430-elf-gdb reads to choose the MSP430X instruction set and the large code
@@ -117,11 +119,14 @@ def attributes() -> bytes:
 
 def build(symbols: list, device, text_data: bytes | None = None, entry: int = 0) -> bytes:
     """The ELF file as bytes. text_data: main-flash contents, or None."""
+    def describe(addr, size, stype):
+        return f"0x{addr:05X} ({'function' if stype == STT_FUNC else 'object'}, size {size})"
+
     seen = {}
-    for name, addr, _, _ in symbols:
-        if name in seen and seen[name] != addr:
-            raise SymbolError(f"duplicate symbol '{name}' at 0x{seen[name]:05X} and 0x{addr:05X}")
-        seen[name] = addr
+    for name, *rest in symbols:
+        if name in seen and seen[name] != tuple(rest):
+            raise SymbolError(f"duplicate symbol '{name}': {describe(*seen[name])} and {describe(*rest)}")
+        seen[name] = tuple(rest)
     symbols = sorted({(n, a, s, t) for n, a, s, t in symbols}, key=lambda x: (x[1], x[0]))
 
     text_lo, text_hi = device.main_start, device.main_end

@@ -7,7 +7,6 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import devices  # noqa: E402
 import image  # noqa: E402
 import symelf  # noqa: E402
 from image import Segment  # noqa: E402
@@ -142,6 +141,19 @@ class SymElfTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("already exists", err)
         self.assertEqual(self.run_tool(self.names, "-o", out, "--force")[0], 0)
+
+    def test_same_name_with_other_kind_or_size_is_a_duplicate(self):
+        out = self.path("x.elf")
+        func = self.path("func.tsv", "address\tnew_name\n4400\tf\n")
+        var = self.path("var.tsv", "address\tnew_name\tkind\n4400\tf\tvar\n")
+        code, _, err = self.run_tool(func, var, "-o", out)
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate symbol 'f': 0x04400 (function, size 0) and 0x04400 (object, size 0)", err)
+        sized = self.path("sized.tsv", "address\tnew_name\tsize\n4400\tf\t2\n")
+        code, _, err = self.run_tool(func, sized, "-o", out)
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate symbol 'f': 0x04400 (function, size 0) and 0x04400 (function, size 2)", err)
+        self.assertFalse(os.path.exists(out))
 
     def test_same_symbol_twice_is_kept_once(self):
         out = self.path("x.elf")
