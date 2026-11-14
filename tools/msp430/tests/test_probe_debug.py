@@ -242,6 +242,16 @@ class DebugClientTest(unittest.TestCase):
         self.assertEqual(len(sent), 5)
         self.assertEqual(self.fw.breakpoints, {})
 
+    def test_a_detach_that_resets_names_itself(self):
+        self.attach()
+        self.fw.detach_unrestored = True
+        with self.assertRaisesRegex(StatusError, r"^DBG_DETACH failed: TARGET_ERROR \(the program "
+                                                 r"does not continue where it stopped: the probe "
+                                                 r"reset the target, whose firmware restarts, or "
+                                                 r"had lost it\)$") as cm:
+            self.probe.dbg_detach()
+        self.assertEqual((cm.exception.status, self.fw.state), (TARGET_ERROR, 0))
+
     def test_status_errors_that_mean_something_particular(self):
         self.attach()
         self.fw.fail_op = {14: TIMEOUT, 15: TIMEOUT}
@@ -909,11 +919,23 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
         fw.lost_on_poll = True
         self.assertEqual(self.cmd(fw, 11), reply(TARGET_ERROR))
         self.assertEqual((fw.state, fw.detaches), (0, []))
-        fw = self.attached()  # DBG_DETACH of a lost running target: OK
+        fw = self.attached()  # DBG_DETACH of a lost running target: TARGET_ERROR, Idle
         self.cmd(fw, 12)
         fw.lost_on_poll = True
-        self.assertEqual(self.cmd(fw, 10, b"\x00"), reply(OK))
+        self.assertEqual(self.cmd(fw, 10, b"\x00"), reply(TARGET_ERROR))
         self.assertEqual((fw.state, fw.detaches), (0, [0]))
+
+    def test_a_detach_that_cannot_restore_the_context(self):
+        """Debugger::detach(Run) whose link check before the restore fails:
+        the probe resets the target instead and answers TARGET_ERROR; the
+        session is over (correction 26). With action 1 the reset is what was
+        asked for: OK."""
+        for action, want in ((0, TARGET_ERROR), (1, OK)):
+            fw = self.attached()
+            fw.detach_unrestored = True
+            self.assertEqual(self.cmd(fw, 10, bytes([action])), reply(want), action)
+            self.assertEqual((fw.state, fw.detaches), (0, [action]))
+            self.assertEqual(self.status(fw), reply(BAD_STATE))
 
     def test_detach_arguments_and_running(self):
         fw = self.attached()

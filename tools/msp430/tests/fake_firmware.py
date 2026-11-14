@@ -8,7 +8,8 @@ addressed to flash or anywhere else.
 Fault injection knobs: version, features, connect_status, fail_op,
 interrupt_on_op, fail_flash_after, stuck, no_target, has_handler, also_erase,
 skip_segment_erases, read_shift; for debugging: attach_status, run_polls,
-stop_at, halt_pc, step_size, step_timeout_pc, lost_on_poll, hw_breakpoints;
+stop_at, halt_pc, step_size, step_timeout_pc, lost_on_poll, detach_unrestored,
+hw_breakpoints;
 for DBG_EEM_PEEK: eem, peek_glitch, peek_status, peek_no_target.
 `polls` counts the looks at the running CPU since the last DBG_RESUME.
 
@@ -109,8 +110,12 @@ class FakeFirmware:
         self.step_size = 2           # bytes DBG_STEP advances the PC
         self.step_timeout_pc = None  # PC after a DBG_STEP that answers TIMEOUT
                                      # (fail_op {14: TIMEOUT}); None: unchanged
-        self.lost_on_poll = False    # the target is lost while running: DBG_STATUS and
-                                     # DBG_HALT answer TARGET_ERROR, the session ends
+        self.lost_on_poll = False    # the target is lost while running: DBG_STATUS,
+                                     # DBG_HALT and DBG_DETACH answer TARGET_ERROR, the
+                                     # session ends
+        self.detach_unrestored = False  # DBG_DETACH 0's link check before the restore
+                                        # fails: the probe resets the target instead and
+                                        # answers TARGET_ERROR (correction 26)
         self.hw_breakpoints = HW_BREAKPOINTS  # EEM triggers INFO and DBG_ATTACH report
         self.stop_reason = STOP_NONE
         self.bp_hit = NO_BREAKPOINT
@@ -484,9 +489,14 @@ class FakeFirmware:
 
     def _dbg_op(self, op, a):
         """Ops 10-18 once _debug_check has passed them."""
-        if op == 10:  # DBG_DETACH
+        if op == 10:  # DBG_DETACH: the session ends whatever it answers
+            # TARGET_ERROR: the program does not continue where it stopped
+            # (Debugger::detach: a running CPU lost by the halt, or action 0
+            # resetting the CPU because the link check before the restore failed)
+            lost = self.state == RUNNING_STATE and self.lost_on_poll
+            unrestored = a[0] == 0 and self.detach_unrestored
             self._end_debug(a[0])
-            return OK, b""
+            return (TARGET_ERROR if lost or unrestored else OK), b""
         if op == 11:  # DBG_HALT
             if self.state == RUNNING_STATE:
                 status = self._poll()  # Debugger::halt looks as poll() does first

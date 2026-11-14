@@ -12,7 +12,9 @@ touch a register whose read has a side effect (the device table lists them):
 
 One GDB connection at a time, on 127.0.0.1 only. The server attaches when
 GDB connects and detaches when GDB detaches, kills, disconnects, or the
-server is stopped: the target's program then continues where it stopped.
+server is stopped: the target's program then continues where it stopped
+(unless the link failed: then the probe resets the target, and the server
+says so).
 
 The register layout is msp430-elf-gdb's built-in one (gdb/msp430-tdep.c):
 16 raw registers R0 (PC), R1 (SP), R2 (SR), R3 (CG), R4..R15, 4 bytes each,
@@ -44,6 +46,10 @@ SIGINT, SIGTRAP, SIGLOST = 2, 5, 0x1D  # GDB's signal numbers (gdb/signals.def)
 REG_CG = 3            # R3, the constant generator: never written
 SR_CPUOFF = 0x0010
 MONITOR_READ_WORDS = 256
+# DBG_DETACH answered TARGET_ERROR: the session is over all the same
+DETACH_RESET = ("detached, but the program does not continue where it stopped: the probe could "
+                "not restore its context and reset the target (its firmware restarts), or had "
+                "lost it")
 
 HELP = """monitor commands:
   monitor reset              reset the target and halt at the reset vector
@@ -348,6 +354,11 @@ class GdbServer:
             except KeyboardInterrupt:
                 if attempt == 2:
                     raise
+            except StatusError as e:
+                self.attached = False
+                self.say(DETACH_RESET if e.status == probe_mod.STATUS_TARGET_ERROR
+                         else f"detach failed: {e}")
+                return
             except ProbeError as e:
                 self.attached = False
                 self.say(f"detach failed: {e}")

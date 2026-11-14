@@ -1191,6 +1191,24 @@ class DetachSignalTest(unittest.TestCase):
         server._detach()  # nothing more is sent
         self.assertEqual(fw.detaches, [0])
 
+    def test_a_detach_that_reset_the_target_says_so(self):
+        """DBG_DETACH answered TARGET_ERROR: the session is over, but the
+        program does not continue where it stopped (correction 26)."""
+        fw = FakeFirmware()
+        server = self.server(fw)
+        server._attach(probe_mod.ATTACH_RUNNING)
+        fw.detach_unrestored = True
+        server._detach()
+        out = server.out.getvalue()
+        self.assertFalse(server.attached)
+        self.assertIn("detached, but the program does not continue where it stopped: the probe "
+                      "could not restore its context and reset the target (its firmware "
+                      "restarts), or had lost it", out)
+        self.assertNotIn("continues where it stopped", out)
+        self.assertNotIn("detach failed", out)
+        server._detach()  # not sent again
+        self.assertEqual((fw.detaches, fw.state), ([0], 0))
+
     def test_a_failed_detach_is_final(self):
         fw = FakeFirmware()
         server = self.server(fw)

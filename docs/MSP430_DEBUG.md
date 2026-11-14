@@ -89,7 +89,10 @@ Attaching without reset stops the program where it is. Nothing is reset and
 the target's other state (watchdog setting, low-power mode, peripherals) is
 kept as TI's debug stack keeps it. When GDB detaches (`detach`, `kill`,
 `quit`, or the connection drops) the server detaches too and the program
-continues where it stopped, without a reset. Stop the server with Ctrl-C;
+continues where it stopped, without a reset. The one exception: if the
+probe's link check before it gives the program its context back fails, it
+resets the target instead (the firmware restarts), and the server says so
+(Troubleshooting). Stop the server with Ctrl-C;
 SIGTERM and SIGHUP do the same. It detaches first, and exits with status 130
 (Ctrl-C) or 128 plus the signal number. While it detaches, these three
 signals are ignored, so that nothing cuts the detach off.
@@ -306,6 +309,7 @@ flash, and `load` (`Load failed`).
 | `refused: read of NAME (...) clears ...` | See "Reads with side effects"; use `monitor read`. |
 | `refused: byte write at ... would read ...; write the whole word` | See "Using GDB", byte writes. |
 | `target lost (...); the debug session has ended` | The target was reset, lost power or the wires came off. While it ran, GDB says `Program terminated with signal SIGLOST, Resource lost.` The session is over (`detach` says `The program is not being run.`); start `target remote` again. |
+| `detached, but the program does not continue where it stopped: ...` | The detach could not give the program its context back: the link failed its check, so the probe reset the target and its firmware restarts from the reset vector (it is not left halted or hanging); or the target had been lost while it ran. Check the wiring and the target supply before attaching again. |
 | `unexpected device: ID bytes ...` | The target is not an MSP430F5529. The target was left running. |
 | `no MSP430 found (JTAG ID read as 0x..)` | See `docs/MSP430_SBW.md`, Troubleshooting; try a lower `--speed`. |
 | `the device's JTAG lock key is programmed; it cannot be debugged` | The device is locked. |

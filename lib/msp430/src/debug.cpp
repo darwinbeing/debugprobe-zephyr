@@ -69,12 +69,22 @@
  *    0x0301: a link check) is made once more: in detach(Run) before the
  *    context (SR, WDTCTL, PC) is restored, and before the release at the PC
  *    after a failed sync (above). If it fails, nothing is fed over the
- *    link: EEM control 0x0006, IR_CNTRL_SIG_RELEASE and the pins released,
- *    nothing written to the target's memory (abandon(), as for a lost
- *    target below). Session::abort ends a debug session with detach(Run)
- *    after a memory, register or breakpoint access returned TargetError, so
- *    the link that failed there gets no restore fed over it. MSPDS and the
- *    DLL check nothing before RestoreContext_ReleaseJtagXv2;
+ *    link. After a failed sync (the context not saved): EEM control 0x0006,
+ *    IR_CNTRL_SIG_RELEASE and the pins released, nothing written to the
+ *    target's memory (abandon(), as for a lost target below). In
+ *    detach(Run) the context is saved: the CPU has been fed instructions,
+ *    holds the watchdog (WDTHOLD) and has GIE cleared, and its PC is
+ *    wherever JTAG left it (0x0004 after read_regs' safe-PC step, for
+ *    example); let go there, it would hang until reset if only the link's
+ *    reads had failed while its writes arrived. So it gets a power-on reset
+ *    instead (EEM off, ReleaseDevice_430Xv2(V_RESET), as detach(Reset):
+ *    control-signal writes with R/W read and no TCLK, so no memory write and
+ *    no instruction fed), the firmware restarts, and detach returns
+ *    TargetError (design spec correction 26). Session::abort ends a debug
+ *    session with detach(Run) after a memory, register or breakpoint access
+ *    returned TargetError, so the link that failed there gets no restore fed
+ *    over it. MSPDS and the DLL check nothing before
+ *    RestoreContext_ReleaseJtagXv2;
  *  - detach(Run) of a CPU that is already halted disarms every trigger
  *    block and turns the sequencer off, restores SR, WDTCTL and the PC and
  *    releases the CPU with EEM control 0x0006, as the DLL's run() does
@@ -796,7 +806,7 @@ void Debugger::clear_triggers()
 
 Status Debugger::attach(AttachMode mode, uint32_t slot_hz, Identity &id)
 {
-	detach(DetachAction::Run);
+	(void)detach(DetachAction::Run); /* an open session ends first */
 	const Status st = cpu_.identify(EntryMode::Normal, slot_hz, id);
 	if (st != Status::Ok) {
 		return st;
@@ -810,7 +820,7 @@ Status Debugger::attach(AttachMode mode, uint32_t slot_hz, Identity &id)
 	id.device_id = read_word(id.device_id_ptr + 4u);
 	clear_triggers();
 	if (!cpu_.in_full_emulation()) {
-		detach(DetachAction::Run);
+		(void)detach(DetachAction::Run);
 		return Status::TargetError;
 	}
 	reason_ = (mode == AttachMode::Reset) ? StopReason::Reset : StopReason::Request;
@@ -824,19 +834,28 @@ Status Debugger::attach(AttachMode mode, uint32_t slot_hz, Identity &id)
  * way, and every trigger is disarmed; neither is in the DLL's Close (see the
  * header). Before the restore, the link check (not in MSPDS, see the
  * header): after a TargetError the link may have failed. */
-void Debugger::detach(DetachAction action)
+Status Debugger::detach(DetachAction action)
 {
 	if (!attached_) {
-		return;
+		return Status::BadState;
 	}
 	if (running_ && halt() != Status::Ok) {
-		return; /* halt() failed and has let the CPU go */
+		return Status::TargetError; /* halt() failed and has let the CPU go */
 	}
 	clear_triggers();
+	Status st = Status::Ok;
 	if (action == DetachAction::Reset) {
 		release_with_reset();
 	} else if (!cpu_.in_full_emulation()) {
-		abandon(); /* nothing fed over a failed link */
+		/* Nothing restored over a link that fails its check: SR, WDTCTL and
+		 * the PC are not fed. The context is saved, so the CPU has been
+		 * fed instructions and holds the watchdog with GIE cleared; let go
+		 * where it is, it would run on from whatever PC JTAG left if only
+		 * the link's reads had failed. A power-on reset through the control
+		 * signal instead (no memory write, no instruction fed): the
+		 * firmware restarts. Not in MSPDS; design spec correction 26. */
+		release_with_reset();
+		st = Status::TargetError;
 	} else {
 		/* EEM off (0x0006), as the DLL's run() without breakpoints to poll,
 		 * DebugManagerMSP430.cpp:291 */
@@ -846,6 +865,7 @@ void Debugger::detach(DetachAction action)
 	attached_ = false;
 	running_ = false;
 	reason_ = StopReason::None;
+	return st;
 }
 
 /* Not in MSPDS (design spec correction 25): the kind of EEM read that

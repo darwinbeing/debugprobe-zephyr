@@ -121,7 +121,7 @@ are 20-bit numbers in 32-bit fields.
 |---|---|---|---|
 | 0x00 | INFO | – | as before; `version` = 2, new `state` values 3 DebugHalted, 4 DebugRunning; `features` bit 1: debugging; ninth byte `u8 hw_breakpoints` (the F5529's 8 EEM triggers; B1 supports only the F5529) |
 | 0x09 | DBG_ATTACH | `u8 mode` (0 attach without reset, 1 reset and halt at the reset vector), `u8 flags` (bit 0: full mode, B2 only), `u16 speed_khz`, `u32 ram_lo`, `u32 ram_hi` (the device's RAM range from the host's device table) | the CONNECT identity block, then `u32 pc`, `u8 stop_reason`, `u8 hw_breakpoints` |
-| 0x0A | DBG_DETACH | `u8 action` (0 restore context and run, 1 reset and run) | – |
+| 0x0A | DBG_DETACH | `u8 action` (0 restore context and run, 1 reset and run) | – (`TARGET_ERROR`: the session is over, but the program does not continue where it stopped; correction 26) |
 | 0x0B | DBG_HALT | – | `u32 pc` |
 | 0x0C | DBG_RESUME | – | – (breakpoints armed, CPU runs) |
 | 0x0D | DBG_STATUS | – | `u8 state` (running / halted), `u8 stop_reason` (request, breakpoint, step, reset), `u8 breakpoint_index`, `u32 pc` (0 while running) |
@@ -402,8 +402,13 @@ already worked into the text above; the others take precedence over it.
     the PC after a failed sync) first checks the link again (JTAG ID 0x91
     and a control-signal bit of 0x0301). If the check fails, nothing is fed
     over the link: the EEM is turned off and the CPU released where it is,
-    nothing written to its memory. This refines "after it, a failure
-    releases with the saved context" under Error Handling Principles.
+    nothing written to its memory (for detach with action 0, correction 26
+    replaces this with a reset). This refines "after it, a failure releases
+    with the saved context" under Error Handling Principles, and it refines
+    correction 16 too: after a failed init-state check the link check
+    before the release usually fails as well, so the release now usually
+    lets the CPU go where it is (context not yet saved) or resets it
+    (context saved, correction 26) instead of restoring its PC or context.
 21. The peripheral write window is the device's own: F5529 0x0100–0x093F
     (`SFRIE1` to `USBFUNADR`) minus the refused blocks; the vacant
     0x0000–0x00FF and 0x0940–0x0FFF are refused.
@@ -459,3 +464,22 @@ already worked into the text above; the others take precedence over it.
     TAP state (Shift-DR instead of Run-Test/Idle) and the level held on
     SBWTDIO (data bit 3 of the scan instead of the TCLK level) differ; SBW
     limits only the low phase of SBWTCK.
+26. **A detach that cannot restore the context resets the target.** When
+    the link check before the restore of a detach with action 0 fails
+    (correction 20), the CPU's context is saved: it has been fed
+    instructions, holds the watchdog (WDTHOLD) and has GIE cleared, and its
+    PC is wherever JTAG left it (0x0004 after a register read's safe-PC
+    step, for example). Let go there, it would hang until a reset if only
+    the link's reads had failed while its writes still arrived. So it gets
+    a power-on reset instead, as with action 1 (EEM off,
+    `ReleaseDevice_430Xv2(V_RESET)`: control-signal writes with the R/W bit
+    on read and no TCLK, so nothing is written to memory and no instruction
+    is fed), and the firmware restarts. The same applies wherever the probe
+    detaches with action 0: `Session::abort` after a memory, register or
+    breakpoint access returned `TARGET_ERROR`, and an attach whose final
+    check fails after the sync. `DBG_DETACH` then answers `TARGET_ERROR`,
+    as it does when a running CPU is lost while it is halted for the detach;
+    the session is over either way. The host does not report "the program
+    continues where it stopped" then: `sbw.py gdbserver` prints that the
+    probe could not restore the context and reset the target (its firmware
+    restarts), or had lost it.

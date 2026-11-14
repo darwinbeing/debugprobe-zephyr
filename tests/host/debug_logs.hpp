@@ -234,6 +234,13 @@ inline Log link_check(bool id_ok = true)
  * the pins released; nothing fed to the CPU or written to its memory. */
 inline const Log kAbandon = {"ir:30", "dr16:0006", "ir:a8", "close"};
 
+/* Debugger::release_with_reset(): EEM off, then ReleaseDevice_430Xv2(V_RESET)
+ * (Cpuxv2::disconnect): a power-on reset through the control signal (R/W
+ * read, no TCLK: no memory write, no instruction fed), the CPU released, the
+ * pins released. */
+inline const Log kResetRelease = {"ir:30", "dr16:0006", "ir:c8", "dr16:0c01", "dr16:0401",
+				  "ir:a8", "close"};
+
 /* detach(Run) of a halted CPU on a healthy link: the triggers cleared, the
  * link check, the context restored with the EEM off (0x0006), the pins
  * released. `halt` as for release_at. */

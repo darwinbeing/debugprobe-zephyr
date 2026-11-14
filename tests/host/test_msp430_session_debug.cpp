@@ -1105,6 +1105,33 @@ TEST(session_dbg_detach)
 		REQUIRE(!f.tap.log.empty());
 		CHECK(f.tap.log.back() == "close");
 	}
+	{
+		/* the link check before the restore fails: the probe resets the
+		 * target instead (its firmware restarts) and answers TARGET_ERROR,
+		 * so the host does not report a program that continues where it
+		 * stopped (design spec correction 26); the session is over */
+		Fx f;
+		f.attach();
+		f.tap.cpu_words.clear();
+		f.tap.cntrl_sig = 0x0000;
+		CHECK_BYTES(f.run({0x90, 0x0A, 0x00}), kTargetError);
+		CHECK(f.s.state() == State::Idle);
+		CHECK_LOG(f.tap.log, clear_triggers() + link_check() + kResetRelease);
+		CHECK(f.tap.mem_writes.empty()); /* no WDTCTL restore */
+		CHECK(f.tap.cpu_words.empty());  /* no SR or PC fed */
+		f.tap.log.clear();
+		CHECK_BYTES(f.run({0x90, 0x0A, 0x00}), kBadState);
+		CHECK(f.tap.log.empty());
+	}
+	{
+		/* with action 1 a reset is what was asked for: OK, no link check */
+		Fx f;
+		f.attach();
+		f.tap.cntrl_sig = 0x0000;
+		CHECK_BYTES(f.run({0x90, 0x0A, 0x01}), kOk);
+		CHECK(f.s.state() == State::Idle);
+		CHECK_LOG(f.tap.log, clear_triggers() + kResetRelease);
+	}
 }
 
 TEST(session_abort_detaches_a_debug_session)
@@ -1192,11 +1219,13 @@ TEST(session_target_error_from_a_lost_running_target_sends_nothing_more)
 		CHECK_LOG(f.tap.log, abandon);
 	}
 	{
-		Fx f; /* DBG_DETACH of a lost running target: Ok, nothing more sent */
+		/* DBG_DETACH of a lost running target: TARGET_ERROR (the program
+		 * does not continue where it stopped), nothing more sent */
+		Fx f;
 		f.attach();
 		f.resume();
 		f.tap.jtag_id = 0xFF;
-		CHECK_BYTES(f.run({0x90, 0x0A, 0x00}), kOk);
+		CHECK_BYTES(f.run({0x90, 0x0A, 0x00}), kTargetError);
 		CHECK(f.s.state() == State::Idle);
 		CHECK_LOG(f.tap.log, abandon);
 	}
@@ -1233,7 +1262,9 @@ TEST(session_target_error_from_a_lost_running_target_sends_nothing_more)
 /* A TargetError from a memory, register or breakpoint operation leaves the
  * Debugger attached (the link check failed afterwards): the Session detaches
  * with Run, as Debugger::attach does for the same failure, so the pins are
- * released and the CPU is not left halted; no reset. */
+ * released and the CPU is not left halted. Here the link stays dead, so the
+ * link check before the restore fails as well and the CPU gets a power-on
+ * reset instead of its context (correction 26). */
 TEST(session_target_error_while_halted_ends_the_session)
 {
 	{
@@ -1243,7 +1274,7 @@ TEST(session_target_error_while_halted_ends_the_session)
 		CHECK_BYTES(f.run(read_req(0x2400, 1)), kTargetError);
 		CHECK(f.s.state() == State::Idle);
 		CHECK(log_has(f.tap, "ir:a8"));
-		CHECK(!log_has(f.tap, "dr16:0c01"));
+		CHECK(log_has(f.tap, "dr16:0c01")); /* the reset in place of the restore */
 		REQUIRE(!f.tap.log.empty());
 		CHECK(f.tap.log.back() == "close");
 		CHECK_EQ(count_log(f.tap, "close"), 1u);
@@ -1286,7 +1317,7 @@ TEST(session_target_error_while_halted_ends_the_session)
 		CHECK_BYTES(f.run(reg_req(4, 0x1234)), kTargetError);
 		CHECK(f.s.state() == State::Idle);
 		CHECK(log_has(f.tap, "ir:a8"));
-		CHECK(!log_has(f.tap, "dr16:0c01"));
+		CHECK(log_has(f.tap, "dr16:0c01")); /* the reset in place of the restore */
 		REQUIRE(!f.tap.log.empty());
 		CHECK(f.tap.log.back() == "close");
 		CHECK_EQ(count_log(f.tap, "close"), 1u);
@@ -1301,7 +1332,7 @@ TEST(session_target_error_while_halted_ends_the_session)
 		CHECK_BYTES(f.run({0x90, 0x12, 0x05}), kTargetError);
 		CHECK(f.s.state() == State::Idle);
 		CHECK(log_has(f.tap, "ir:a8"));
-		CHECK(!log_has(f.tap, "dr16:0c01"));
+		CHECK(log_has(f.tap, "dr16:0c01")); /* the reset in place of the restore */
 		REQUIRE(!f.tap.log.empty());
 		CHECK(f.tap.log.back() == "close");
 		CHECK_EQ(count_log(f.tap, "close"), 1u);
@@ -1311,9 +1342,11 @@ TEST(session_target_error_while_halted_ends_the_session)
 
 /* The detach that follows such a TargetError makes the link check again
  * before it restores SR, WDTCTL and PC: on a dead link it feeds nothing and
- * writes nothing (EEM off, released, pins released); on a healthy link (the
- * access's own check alone failed) it restores the context as before. */
-TEST(session_target_error_on_a_dead_link_restores_nothing)
+ * writes nothing to memory but resets the CPU (EEM off, power-on reset
+ * through the control signal, released, pins released; correction 26); on a
+ * healthy link (the access's own check alone failed) it restores the context
+ * as before. */
+TEST(session_target_error_on_a_dead_link_resets_instead_of_restoring)
 {
 	for (const bool id_lost : {true, false}) {
 		Fx f;
@@ -1328,7 +1361,7 @@ TEST(session_target_error_on_a_dead_link_restores_nothing)
 		CHECK(f.s.state() == State::Idle);
 		CHECK(f.tap.mem_writes.empty());
 		CHECK(f.tap.cpu_words.empty()); /* no SR or PC fed */
-		const Log tail = clear_triggers() + link_check(!id_lost) + kAbandon;
+		const Log tail = clear_triggers() + link_check(!id_lost) + kResetRelease;
 		CHECK_LOG(last(f.tap.log, tail.size()), tail);
 		CHECK_EQ(count_log(f.tap, "close"), 1u);
 		f.tap.log.clear();

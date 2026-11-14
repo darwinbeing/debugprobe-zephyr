@@ -430,7 +430,7 @@ TEST(debugger_detach_restores_the_context_and_lets_the_program_run)
 {
 	Fx f;
 	f.attached();
-	f.d.detach(DetachAction::Run);
+	CHECK(f.d.detach(DetachAction::Run) == Status::Ok);
 	CHECK_LOG(f.t.log, detach_run(0x4520, 0x0008, 0x6904));
 	CHECK(!f.d.attached());
 	/* the watchdog gets its original bits back, without HOLD */
@@ -460,7 +460,7 @@ TEST(debugger_detach_clocks_a_cpu_in_halt_with_0403)
 	/* the control-signal reads of the link check, of SetPcXv2 and of the
 	 * release clock; the third shows HALT (0x0002) */
 	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0303};
-	f.d.detach(DetachAction::Run);
+	CHECK(f.d.detach(DetachAction::Run) == Status::Ok);
 	CHECK(f.t.cntrl_sig_script.empty());
 	CHECK_LOG(f.t.log, detach_run(0x4520, 0x0008, 0x6904, true));
 }
@@ -469,9 +469,8 @@ TEST(debugger_detach_with_reset)
 {
 	Fx f;
 	f.attached();
-	f.d.detach(DetachAction::Reset);
-	CHECK_LOG(f.t.log, clear_triggers() + Log{"ir:30", "dr16:0006", "ir:c8", "dr16:0c01",
-						  "dr16:0401", "ir:a8", "close"});
+	CHECK(f.d.detach(DetachAction::Reset) == Status::Ok);
+	CHECK_LOG(f.t.log, clear_triggers() + kResetRelease);
 	CHECK(!f.d.attached());
 }
 
@@ -511,10 +510,6 @@ Log assert_por_log(unsigned wdt)
 	       read_word(0x015C) + write_word(0x015C, 0x5A80u | (wdt & 0xFFu)) +
 	       Log{ir(0x21), d20(0)} + read_word(0xFFFE) + restore_clocks() + read_word(0x0102);
 }
-
-/* EEM off, then ReleaseDevice_430Xv2(V_RESET) (Cpuxv2::disconnect) */
-const Log kResetRelease = {"ir:30", "dr16:0006", "ir:c8", "dr16:0c01", "dr16:0401", "ir:a8",
-			   "close"};
 
 } // namespace
 
@@ -656,16 +651,19 @@ TEST(debugger_reset_and_halt_with_a_late_init_state_failure_releases_at_the_rese
 	CHECK_EQ(f.t.eem[0x88], 0x000Eu);
 }
 
-TEST(debugger_reset_and_halt_with_a_late_dead_link_feeds_nothing)
+/* As above, but the control signal stays at 0 from attach's check on: the
+ * link check before the restore fails too, and the CPU, whose context is
+ * saved, gets a power-on reset instead of its context (design spec
+ * correction 26): nothing fed to it, nothing written to its memory. */
+TEST(debugger_reset_and_halt_with_a_late_dead_link_resets_again)
 {
 	Fx f;
-	/* as above, but the control signal stays at 0 from attach's check on */
 	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301};
 	f.t.cntrl_sig = 0x0000;
 	CHECK(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::TargetError);
 	CHECK(f.scripts_consumed());
 	CHECK(!f.d.attached());
-	const Log want = Log{"ir:28", "dr16:0000"} + clear_triggers() + link_check() + kAbandon;
+	const Log want = Log{"ir:28", "dr16:0000"} + clear_triggers() + link_check() + kResetRelease;
 	CHECK_LOG(last(f.t.log, want.size()), want);
 	/* the only memory writes are the sync's: the watchdog hold */
 	for (const auto &w : f.t.mem_writes) {
@@ -929,9 +927,12 @@ TEST(debugger_write_mem_reports_a_link_that_dies_during_the_transfer)
 /* Session::abort follows a TargetError from a memory, register or breakpoint
  * access with detach(Run). Its restore (SR, WDTCTL, PC) would go over the link
  * that just failed: the link check is made again first, and if it fails the
- * CPU is let go as abandon() does, nothing fed to it or written to its memory
- * (not in MSPDS). */
-TEST(debugger_detach_after_a_dead_link_restores_nothing)
+ * CPU gets a power-on reset (EEM off, ReleaseDevice_430Xv2(V_RESET)) instead
+ * of its context, nothing fed to it or written to its memory, and detach
+ * returns TargetError (not in MSPDS; design spec correction 26). Letting it go
+ * where it is, as before, left it at whatever PC JTAG had last given it, with
+ * the watchdog held and GIE cleared, if only the link's reads had failed. */
+TEST(debugger_detach_after_a_dead_link_resets_instead_of_restoring)
 {
 	for (const bool id_lost : {true, false}) {
 		Fx f;
@@ -946,13 +947,13 @@ TEST(debugger_detach_after_a_dead_link_restores_nothing)
 		REQUIRE(f.d.attached());
 		f.t.log.clear();
 		f.t.cpu_words.clear();
-		f.d.detach(DetachAction::Run);
+		CHECK(f.d.detach(DetachAction::Run) == Status::TargetError);
 		CHECK(!f.d.attached());
 		CHECK(!f.d.running());
 		CHECK(f.d.stop_reason() == StopReason::None);
 		CHECK(f.t.mem_writes.empty());
 		CHECK(f.t.cpu_words.empty()); /* no SR or PC fed */
-		CHECK_LOG(f.t.log, clear_triggers() + link_check(!id_lost) + kAbandon);
+		CHECK_LOG(f.t.log, clear_triggers() + link_check(!id_lost) + kResetRelease);
 	}
 }
 
@@ -965,11 +966,33 @@ TEST(debugger_detach_after_a_failed_check_on_a_healthy_link_restores_the_context
 	REQUIRE(f.d.read_mem(0x2400, 1, buf) == Status::TargetError);
 	CHECK(f.scripts_consumed());
 	f.t.log.clear();
-	f.d.detach(DetachAction::Run);
+	CHECK(f.d.detach(DetachAction::Run) == Status::Ok);
 	CHECK(!f.d.attached());
 	CHECK_LOG(f.t.log, detach_run(0x4520, 0x0008, 0x6904));
 	REQUIRE(f.t.mem_writes.size() == 1u);
 	CHECK(f.t.mem_writes[0] == (std::pair<uint32_t, uint16_t>{0x015C, 0x5A04}));
+}
+
+/* attach() without reset whose final check fails after the context was
+ * saved, and whose link check before the restore fails as well: the
+ * firmware is restarted by a power-on reset, not let go at the PC JTAG left
+ * with its watchdog held (correction 26). */
+TEST(debugger_attach_with_a_late_dead_link_resets)
+{
+	Fx f;
+	f.running_cpu();
+	/* lock check 3, the sync's 5 and its CPUOFF look: then 0 for good */
+	f.t.cntrl_sig_script.assign(9, 0x0301);
+	f.t.cntrl_sig = 0x0000;
+	CHECK(f.d.attach(AttachMode::Running, 250000, f.id) == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.attached());
+	const Log want = clear_triggers() + link_check() + clear_triggers() + link_check() +
+			 kResetRelease;
+	CHECK_LOG(last(f.t.log, want.size()), want);
+	/* the only memory write is the sync's watchdog hold */
+	REQUIRE(f.t.mem_writes.size() == 1u);
+	CHECK(f.t.mem_writes[0] == (std::pair<uint32_t, uint16_t>{0x015C, 0x5A84}));
 }
 
 TEST(debugger_memory_access_needs_an_attached_cpu)
@@ -1700,7 +1723,7 @@ TEST(debugger_detach_halts_a_running_cpu_first)
 	f.t.log.clear();
 	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
 	f.t.captured = {0x0008, 0x0000};
-	f.d.detach(DetachAction::Run);
+	CHECK(f.d.detach(DetachAction::Run) == Status::Ok);
 	CHECK(f.scripts_consumed());
 	CHECK(!f.d.attached());
 	CHECK(!f.d.running());
@@ -1719,7 +1742,7 @@ TEST(debugger_detach_with_reset_halts_a_running_cpu_first)
 	f.t.log.clear();
 	f.t.eem_control_script = {0x0000, 0x0000, 0x0080};
 	f.t.captured = {0x0008, 0x0000};
-	f.d.detach(DetachAction::Reset);
+	CHECK(f.d.detach(DetachAction::Reset) == Status::Ok);
 	CHECK(f.scripts_consumed());
 	CHECK(!f.d.attached());
 	CHECK(!f.d.running());
@@ -1736,7 +1759,8 @@ TEST(debugger_detach_of_a_lost_running_target_only_lets_go)
 		f.t.log.clear();
 		f.t.mem_writes.clear();
 		f.t.jtag_id = 0xFF;
-		f.d.detach(action);
+		/* the program does not continue where it stopped: TargetError */
+		CHECK(f.d.detach(action) == Status::TargetError);
 		CHECK(!f.d.attached());
 		CHECK(!f.d.running());
 		/* the halt found no target and let go: no trigger clearing, nothing
@@ -1746,7 +1770,8 @@ TEST(debugger_detach_of_a_lost_running_target_only_lets_go)
 	}
 }
 
-/* detach does nothing either, before any attach and a second time */
+/* detach does nothing either (BadState), before any attach and a second
+ * time */
 TEST(debugger_run_control_needs_an_attached_cpu)
 {
 	Fx f;
@@ -1756,8 +1781,8 @@ TEST(debugger_run_control_needs_an_attached_cpu)
 	CHECK(f.d.poll(halted) == Status::BadState);
 	CHECK(halted); /* as documented: true when not attached */
 	CHECK(f.d.step() == Status::BadState);
-	f.d.detach(DetachAction::Run);
-	f.d.detach(DetachAction::Reset);
+	CHECK(f.d.detach(DetachAction::Run) == Status::BadState);
+	CHECK(f.d.detach(DetachAction::Reset) == Status::BadState);
 	CHECK(f.t.log.empty());
 	f.attached();
 	f.d.detach(DetachAction::Run);
@@ -1769,8 +1794,8 @@ TEST(debugger_run_control_needs_an_attached_cpu)
 	CHECK(f.d.poll(halted) == Status::BadState);
 	CHECK(halted);
 	CHECK(f.d.step() == Status::BadState);
-	f.d.detach(DetachAction::Run);
-	f.d.detach(DetachAction::Reset);
+	CHECK(f.d.detach(DetachAction::Run) == Status::BadState);
+	CHECK(f.d.detach(DetachAction::Reset) == Status::BadState);
 	CHECK(f.t.log.empty());
 	CHECK(f.t.mem_writes.empty());
 	CHECK(!f.d.running());

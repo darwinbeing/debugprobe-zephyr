@@ -52,7 +52,10 @@ public:
 	 * BAD_STATE in Connected and Flashing; in a debug session it ends that
 	 * session as DBG_DETACH with DetachAction::Run does, then attaches as
 	 * from Idle (a malformed one is BAD_ARG and leaves the session as it
-	 * was).
+	 * was). DBG_DETACH ends the debug session whatever it returns;
+	 * TARGET_ERROR means the program does not continue where it stopped
+	 * (the CPU was lost while running, or with action 0 the link check
+	 * before the restore failed and the CPU was reset instead).
 	 * A command that ends with Status::TargetError while a session is open
 	 * closes the session (the target is in an unknown state and the pins are
 	 * released); the host has to connect again. In a debug session the
@@ -69,7 +72,7 @@ public:
 	 * first, which takes a few hundred milliseconds. A debug session is
 	 * detached with DetachAction::Run: a running CPU is halted first, then
 	 * the program continues where it stopped (if the link check before the
-	 * restore fails, the CPU is let go where it is with nothing restored;
+	 * restore fails, nothing is restored and the CPU gets a power-on reset;
 	 * see Debugger::detach). */
 	void abort();
 

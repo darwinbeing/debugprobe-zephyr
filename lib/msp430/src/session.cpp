@@ -184,8 +184,8 @@ size_t Session::handle(std::span<const uint8_t> request, std::span<uint8_t> resp
 	 * debugger still attached here (the link check failed after a memory,
 	 * register or breakpoint access) is detached with Run, as
 	 * Debugger::attach does for the same failure: it makes the link check
-	 * again and restores the context only if it passes; otherwise it feeds
-	 * nothing over the link and lets the CPU go where it is. */
+	 * again and restores the context only if it passes; otherwise it
+	 * restores nothing over the link and resets the CPU (correction 26). */
 	if (st == Status::TargetError && state_ != State::Idle) {
 		abort();
 	}
@@ -200,7 +200,7 @@ void Session::abort()
 		cpu_.flash_end(false);
 	}
 	if (debugging()) {
-		dbg_.detach(DetachAction::Run);
+		(void)dbg_.detach(DetachAction::Run); /* the session ends either way */
 	} else if (state_ != State::Idle) {
 		cpu_.disconnect();
 	}
@@ -509,10 +509,13 @@ Status Session::op_dbg_detach(In args)
 	if (args.size() != 1 || args[0] > 1) {
 		return Status::BadArg;
 	}
-	dbg_.detach(static_cast<DetachAction>(args[0]));
+	/* TargetError: the session is over all the same, but the program does
+	 * not continue where it stopped (the CPU was lost while running, or the
+	 * link check before the restore failed and the CPU was reset). */
+	const Status st = dbg_.detach(static_cast<DetachAction>(args[0]));
 	state_ = State::Idle;
 	clear_windows();
-	return Status::Ok;
+	return st;
 }
 
 Status Session::op_dbg_halt(In args, Out out, size_t &n)

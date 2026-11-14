@@ -645,6 +645,15 @@ class GdbServerCliTest(unittest.TestCase):
         self.assertIn("attached to MSP430F5529 without reset", out)
         self.assertTrue(fw.closed)
 
+    def test_a_detach_that_reset_the_target_is_reported(self):
+        fw = FakeFirmware()
+        fw.detach_unrestored = True
+        code, out, err, _ = self.run_session(["gdbserver"], fw, ScriptedGdb("D"))
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("detached, but the program does not continue where it stopped", out)
+        self.assertNotIn("continues where it stopped", out)
+        self.assertEqual((fw.detaches, fw.state), ([probe_mod.DETACH_RUN], 0))
+
     def test_reset_warns_once_that_the_firmware_restarts(self):
         fw = FakeFirmware()
         code, out, err, _ = self.run_session(["gdbserver", "--reset"], fw, ScriptedGdb("D"))

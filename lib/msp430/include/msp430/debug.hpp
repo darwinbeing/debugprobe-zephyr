@@ -45,23 +45,27 @@ public:
 	 * power-on reset as detach(Reset) does; after that with its context
 	 * restored, as detach(Run) does. Before the CPU gets its PC or its
 	 * context back, the link check is made again; if it fails, nothing is
-	 * fed over the link: an attempt is made to turn the EEM off, and the CPU
-	 * is released where it is with nothing written to it. With Reset,
-	 * system clocks already switched to the JTAG clock are switched back
-	 * before any release. */
+	 * fed over the link: before the context was saved, an attempt is made
+	 * to turn the EEM off, and the CPU is released where it is with nothing
+	 * written to it; after, detach(Run) resets it instead (correction 26).
+	 * With Reset, system clocks already switched to the JTAG clock are
+	 * switched back before any release. */
 	Status attach(AttachMode mode, uint32_t slot_hz, Identity &id);
 	/* A running CPU is halted first (halt()); if that fails, the CPU has
 	 * been let go as halt() describes and nothing more is done: with Reset,
-	 * no reset happens and the program keeps running as it is. Then the
-	 * triggers are cleared and the EEM sequencer is turned off, and Run:
-	 * the link check, then the context (SR, WDTCTL, PC) is restored and the
-	 * program continues where it stopped, EEM off; if the link check fails
-	 * (after a TargetError from a memory, register or breakpoint access,
-	 * for example), nothing is restored over the link: an attempt is made to
-	 * turn the EEM off, and the CPU is released where it is with nothing
-	 * written to it. Reset: power-on reset and run. Releases the pins. Does
-	 * nothing when not attached. */
-	void detach(DetachAction action);
+	 * no reset happens and the program keeps running as it is; TargetError.
+	 * Then the triggers are cleared and the EEM sequencer is turned off, and
+	 * Run: the link check, then the context (SR, WDTCTL, PC) is restored and
+	 * the program continues where it stopped, EEM off; Ok. If the link check
+	 * fails (after a TargetError from a memory, register or breakpoint
+	 * access, for example), nothing is restored over the link: the EEM is
+	 * turned off and the CPU gets a power-on reset through the control
+	 * signal (as with Reset; nothing written to its memory, no instruction
+	 * fed), so the firmware restarts instead of running on from wherever
+	 * JTAG left the PC with its watchdog held; TargetError (design spec
+	 * correction 26). Reset: power-on reset and run; Ok. Releases the pins.
+	 * BadState, nothing sent, when not attached. */
+	Status detach(DetachAction action);
 
 	bool attached() const { return attached_; }
 	bool running() const { return running_; }
