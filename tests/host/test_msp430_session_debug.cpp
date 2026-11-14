@@ -235,7 +235,7 @@ TEST(session_dbg_attach_validates_arguments)
 	CHECK_BYTES(f.run(attach_req(0, 0, 0x2400, 0x2400)), kBadArg);       /* empty RAM range */
 	CHECK_BYTES(f.run(attach_req(0, 0, 0x1C00, 0x100002)), kBadArg);     /* past 1 MB */
 	CHECK_BYTES(f.run(attach_req(0, 0, 0x1C00, 0x4400, 99)), kBadArg);   /* speed */
-	CHECK_BYTES(f.run(attach_req(0, 0, 0x1C00, 0x4400, 1001)), kBadArg); /* speed */
+	CHECK_BYTES(f.run(attach_req(0, 0, 0x1C00, 0x4400, 10001)), kBadArg); /* speed */
 	Bytes shortreq = attach_req();
 	shortreq.pop_back();
 	CHECK_BYTES(f.run(shortreq), kBadArg);
@@ -422,7 +422,7 @@ TEST(session_dbg_attach_bad_arg_leaves_the_debug_session_untouched)
 		attach_req(0, 0, 0x2400, 0x2400),       /* empty RAM range */
 		attach_req(0, 0, 0x1C00, 0x100002),     /* past 1 MB */
 		attach_req(0, 0, 0x2400, 0x3000, 99),   /* speed, narrower RAM */
-		attach_req(0, 0, 0x1C00, 0x4400, 1001), /* speed */
+		attach_req(0, 0, 0x1C00, 0x4400, 10001), /* speed */
 		shortreq,
 		longreq,
 		{0x90, 0x09},                           /* no arguments */
@@ -1482,7 +1482,7 @@ TEST(session_dbg_eem_peek_validates_arguments)
 {
 	Fx f;
 	CHECK_BYTES(f.run(peek_req(0x00, 99)), kBadArg);   /* speed */
-	CHECK_BYTES(f.run(peek_req(0x00, 1001)), kBadArg); /* speed */
+	CHECK_BYTES(f.run(peek_req(0x00, 10001)), kBadArg); /* speed */
 	CHECK_BYTES(f.run(peek_req(0x00, 0)), kBadArg);    /* speed */
 	CHECK_BYTES(f.run(peek_req(0x01)), kBadArg);       /* odd: the read bit is the probe's */
 	CHECK_BYTES(f.run(peek_req(0x3F)), kBadArg);
@@ -1511,10 +1511,10 @@ TEST(session_dbg_eem_peek_validates_arguments)
 	CHECK(f.tap.log.front() == "speed:100000");
 	CHECK(log_has(f.tap, "dr32:0000003f"));
 	f.tap.log.clear();
-	CHECK_BYTES(f.run(peek_req(0x00, 1000)),
+	CHECK_BYTES(f.run(peek_req(0x00, 10000)),
 		    (Bytes{0x90, 0x00, 0x91, 0, 0, 0, 0, 0, 0, 0, 0}));
 	REQUIRE(!f.tap.log.empty());
-	CHECK(f.tap.log.front() == "speed:1000000");
+	CHECK(f.tap.log.front() == "speed:10000000");
 }
 
 /* The identify phase's statuses as DBG_ATTACH reports them (NO_TARGET with

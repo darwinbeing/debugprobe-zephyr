@@ -130,7 +130,7 @@ are 20-bit numbers in 32-bit fields.
 | 0x10 | DBG_WRITE_REG | `u8 index`, `u32 value` | – |
 | 0x11 | DBG_BP_SET | `u8 index`, `u32 address` | – |
 | 0x12 | DBG_BP_CLEAR | `u8 index` (0xFF: all) | – |
-| 0x13 | DBG_EEM_PEEK | `u16 speed_khz` (100–1000), `u8 eem_addr` (even, 0x00–0x3E) | `u8 jtag_id`, `u32 first`, `u32 second` (correction 25; Idle only, no session opened) |
+| 0x13 | DBG_EEM_PEEK | `u16 speed_khz` (100–10000, correction 29), `u8 eem_addr` (even, 0x00–0x3E) | `u8 jtag_id`, `u32 first`, `u32 second` (correction 25; Idle only, no session opened) |
 
 - `READ_MEM` / `WRITE_MEM` (Phase A ops) work in DebugHalted through the
   debug layer, which preserves the halted context. In DebugRunning they
@@ -447,7 +447,7 @@ already worked into the text above; the others take precedence over it.
     through that path, so `DBG_EEM_PEEK` (0x13, in the table above; protocol
     version and feature bits unchanged) checks it first without writing
     anything. It is accepted in Idle only (`BAD_STATE` elsewhere, nothing
-    sent) and leaves the session Idle; `u16 speed_khz` must be 100–1000 and
+    sent) and leaves the session Idle; `u16 speed_khz` must be 100–10000 (1000 before correction 29) and
     `u8 eem_addr` even and 0x00–0x3E (the value, control, mask and
     combination registers of trigger blocks 0–7, whose reads have no side
     effects), else `BAD_ARG` with nothing sent. It runs `Cpuxv2::identify()`
@@ -546,3 +546,18 @@ already worked into the text above; the others take precedence over it.
     transcripts; on the board the change is checked read-only (main flash
     against its image, information memory against the backup, RAM read
     twice and a pattern written to free RAM read back).
+29. **The SBW clock may be set up to 10 MHz (2026-11-14).** The limit was
+    1 MHz, chosen with the transport, not from the target: the F551x/F552x
+    datasheet (JTAG and Spy-Bi-Wire interface) allows an SBW input frequency
+    of 0–20 MHz and a low phase of at least 25 ns. `kMaxSpeedKhz`, the
+    driver's clamp (`SBW_MAX_SLOT_HZ`), the host tool (`sbw.py --speed`,
+    `monitor speed`, `probe.MAX_SPEED_KHZ`) and the fake firmware now accept
+    100–10000 kHz; the default stays 250 kHz. 10 MHz keeps half of the
+    target's margin and is reachable by `sbw.pio` (8 ticks a slot): 80 MHz
+    ticks need a fractional divider of 1.5625 at 125 MHz (1.875 at 150 MHz),
+    so a tick lasts one or two system clocks and the shortest low phase
+    (4 ticks) is 32 ns (26.7 ns on the RP2350). What a board carries above
+    1 MHz depends on its RST/SBWTDIO circuit (pull-up, capacitor) and the
+    wiring; it is measured on the board read-only (the EEM peek, debug-mode
+    reads of main flash against its image, RAM read twice) before a speed is
+    used for writing.

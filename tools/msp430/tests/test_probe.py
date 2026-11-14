@@ -106,8 +106,14 @@ class SbwProbeTest(unittest.TestCase):
         self.probe.connect(500, probe_mod.ENTRY_MAGIC_PATTERN)
         self.assertEqual((self.fw.speeds, self.fw.connects), ([250, 500], [0, 1]))
 
+    def test_connect_accepts_up_to_10_mhz(self):
+        for speed in (1001, 10000):
+            self.probe.connect(speed, 0)
+            self.probe.disconnect()
+        self.assertEqual(self.fw.speeds[-2:], [1001, 10000])
+
     def test_connect_rejects_bad_speed_and_mode(self):
-        for speed, mode in ((50, 0), (1001, 0), (250, 2)):
+        for speed, mode in ((50, 0), (10001, 0), (250, 2)):
             with self.assertRaisesRegex(StatusError, "CONNECT failed: BAD_ARG"):
                 self.probe.connect(speed, mode)
         self.assertEqual(self.fw.connects, [])

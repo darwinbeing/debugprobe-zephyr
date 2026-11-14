@@ -34,7 +34,7 @@ import time
 
 import probe as probe_mod
 import rsp
-from probe import ProbeError, StatusError
+from probe import MAX_SPEED_KHZ, MIN_SPEED_KHZ, ProbeError, StatusError
 
 HOST = "127.0.0.1"    # GDB connects from this machine only
 PACKET_SIZE = 0x1000  # rsp.MAX_UNFINISHED is sized for it
@@ -58,7 +58,7 @@ HELP = """monitor commands:
   monitor reset              reset the target and halt at the reset vector
   monitor read ADDR [WORDS]  read words on purpose, also registers whose read has a side effect
   monitor mode readonly      the only mode of this version: flash is never written
-  monitor speed KHZ          SBW clock (100-1000) from the next attach
+  monitor speed KHZ          SBW clock (100-10000) from the next attach
   monitor status             device, mode, speed, state, hardware breakpoints
 """
 READ_USAGE = (f"usage: monitor read ADDR [WORDS]: ADDR even (0x... or decimal), "
@@ -835,12 +835,12 @@ class GdbServer:
                 khz = int(words[1])
             except ValueError:
                 khz = 0
-            if 100 <= khz <= 1000:
+            if MIN_SPEED_KHZ <= khz <= MAX_SPEED_KHZ:
                 self.speed_khz = khz
                 text = (f"SBW clock {khz} kHz from the next attach "
                         "(monitor reset, or the next connection)\n")
             else:
-                text = "speed must be 100-1000 kHz\n"
+                text = f"speed must be {MIN_SPEED_KHZ}-{MAX_SPEED_KHZ} kHz\n"
         elif words == ["status"]:
             used = sum(1 for s in self.slots if s is not None)
             state = "running" if self.running else f"halted at 0x{self._regs()[0]:05X}"

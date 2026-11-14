@@ -104,11 +104,26 @@ TEST(session_connect_returns_identity)
 	CHECK(f.tap.log.front() == "speed:250000");
 }
 
+/* 100 kHz to 10 MHz (design spec, timing rules): the F552x accepts SBW
+ * clocks up to 20 MHz; 1 MHz was the limit before. */
+TEST(session_connect_accepts_up_to_10_mhz)
+{
+	for (const uint16_t khz : {1001, 4000, 10000}) {
+		Fx f;
+		f.tap.quick_words = {0x2955};
+		CHECK_BYTES(f.run({0x90, 0x01, static_cast<uint8_t>(khz), static_cast<uint8_t>(khz >> 8), 0x00}),
+			    kIdentity);
+		CHECK(f.s.state() == State::Connected);
+		REQUIRE(!f.tap.log.empty());
+		CHECK(f.tap.log.front() == "speed:" + std::to_string(khz * 1000u));
+	}
+}
+
 TEST(session_connect_validates_arguments)
 {
 	Fx f;
 	CHECK_BYTES(f.run({0x90, 0x01, 0x63, 0x00, 0x00}), kBadArg); /* 99 kHz */
-	CHECK_BYTES(f.run({0x90, 0x01, 0xE9, 0x03, 0x00}), kBadArg); /* 1001 kHz */
+	CHECK_BYTES(f.run({0x90, 0x01, 0x11, 0x27, 0x00}), kBadArg); /* 10001 kHz */
 	CHECK_BYTES(f.run({0x90, 0x01, 0xFA, 0x00, 0x02}), kBadArg); /* entry mode 2 */
 	CHECK_BYTES(f.run({0x90, 0x01, 0xFA, 0x00}), kBadArg);       /* truncated */
 	CHECK(f.tap.log.empty());

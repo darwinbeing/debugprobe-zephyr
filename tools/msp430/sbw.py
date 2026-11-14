@@ -35,7 +35,7 @@ import image
 import probe as probe_mod
 from flasher import FlashError
 from image import ImageError, Segment
-from probe import ProbeError, SbwProbe
+from probe import MAX_SPEED_KHZ, MIN_SPEED_KHZ, ProbeError, SbwProbe
 
 
 ADDR_LIMIT = 0x100000  # 20-bit address space
@@ -50,8 +50,8 @@ def _speed(text: str) -> int:
         value = int(text)
     except ValueError:
         raise argparse.ArgumentTypeError(f"invalid speed {text!r}") from None
-    if not 100 <= value <= 1000:
-        raise argparse.ArgumentTypeError("must be between 100 and 1000 kHz")
+    if not MIN_SPEED_KHZ <= value <= MAX_SPEED_KHZ:
+        raise argparse.ArgumentTypeError(f"must be between {MIN_SPEED_KHZ} and {MAX_SPEED_KHZ} kHz")
     return value
 
 
@@ -81,7 +81,7 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sbw.py", description="MSP430F5529 Spy-Bi-Wire programmer "
                                                            "and GDB server for debugging")
     p.add_argument("--speed", type=_speed, default=250, metavar="KHZ",
-                   help="SBW clock in kHz, 100-1000 (default 250)")
+                   help="SBW clock in kHz, 100-10000 (default 250)")
     p.add_argument("--serial", help="USB serial number of the probe")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -128,7 +128,7 @@ def _parser() -> argparse.ArgumentParser:
     how.add_argument("--reset", action="store_true",
                      help="reset the target and halt at the reset vector")
     g.add_argument("--speed", type=_speed, dest="gdb_speed", metavar="KHZ",
-                   help="SBW clock in kHz, 100-1000 (same as the global --speed)")
+                   help="SBW clock in kHz, 100-10000 (same as the global --speed)")
     g.add_argument("--allow-flash-write", action="store_true",
                    help="full mode (phase B2; not available in this version)")
 
@@ -138,7 +138,7 @@ def _parser() -> argparse.ArgumentParser:
                    help="EEM address, even, 0x00-0x3E: trigger blocks 0-7's value, control, "
                         "mask and combination registers (default 0x00)")
     k.add_argument("--speed", type=_speed, dest="peek_speed", metavar="KHZ",
-                   help="SBW clock in kHz, 100-1000 (same as the global --speed)")
+                   help="SBW clock in kHz, 100-10000 (same as the global --speed)")
     return p
 
 

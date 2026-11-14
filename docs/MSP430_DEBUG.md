@@ -66,7 +66,7 @@ Options (`python3 tools/msp430/sbw.py gdbserver --help`):
 | `--port PORT` | TCP port on 127.0.0.1, default 3333; 0 picks a free one. The server never listens on another address. |
 | `--attach` | Attach to the running program without reset (the default). |
 | `--reset` | Reset the target and halt at the reset vector each time GDB connects. Excludes `--attach`. |
-| `--speed KHZ` | SBW clock, 100-1000, default 250. The global `--speed` before the command works too. |
+| `--speed KHZ` | SBW clock, 100-10000, default 250. The global `--speed` before the command works too. Above 1000 the board's RST/SBWTDIO circuit sets the limit; see `docs/MSP430_SBW.md`. |
 
 `--allow-flash-write` belongs to a later version and is refused. Abbreviated
 options are not accepted either.
@@ -270,7 +270,7 @@ error, according to the comments in TI's USB API.
 | `monitor reset` | reset the target and halt at the reset vector; then run `flushregs` so GDB reads the registers again (GDB keeps them across a monitor command). Newer GDB versions also take `maintenance flush register-cache`; GDB 9 does not have it and runs `maintenance flush-symbol-cache` for it, which leaves the registers alone. The program continues for a moment first: the open session is detached before the new attach. Breakpoints stay set: GDB inserts them again when it resumes, and the server sets again those GDB keeps inserted (`set breakpoint always-inserted on`); one it cannot set again is named in the reply (delete it and set it again). |
 | `monitor read ADDR [WORDS]` | read 1-256 words (default 1) from an even address, including registers with side effects |
 | `monitor status` | device, mode, speed, state, hardware breakpoints in use |
-| `monitor speed KHZ` | SBW clock, 100-1000, for the next attach (`monitor reset` or the next connection) |
+| `monitor speed KHZ` | SBW clock, 100-10000, for the next attach (`monitor reset` or the next connection) |
 | `monitor mode readonly` | the only mode of this version; `monitor mode full` says it is not available |
 
 ## While the CPU is halted

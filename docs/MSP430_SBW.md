@@ -58,8 +58,11 @@ sbw erase                             # erases ALL main flash
 ```
 
 Global options go before the command: `--speed KHZ` sets the SBW clock
-(100–1000 kHz, default 250; 500 kHz is the rate of TI's reference
-implementation), `--serial SERIAL` selects one of several probes.
+(100–10000 kHz, default 250; 500 kHz is the rate of TI's reference
+implementation), `--serial SERIAL` selects one of several probes. Above
+1000 kHz the limit is usually the target board's RST/SBWTDIO circuit (pull-up,
+capacitor, wire length), not the MSP430 (up to 20 MHz): try a speed with a
+read-only `sbw --speed KHZ verify image.hex` before writing at it.
 
 Images are Intel HEX or TI-TXT. Convert an ELF file with
 `msp430-elf-objcopy -O ihex firmware.elf firmware.hex`.

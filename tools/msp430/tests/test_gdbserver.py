@@ -345,7 +345,8 @@ class MonitorTest(ServerFixture):
         self.assertIn("not available in this version", self.monitor("mode full"))
         self.assertIn("read-only mode", self.monitor("mode readonly"))
         self.assertIn("500 kHz from the next attach", self.monitor("speed 500"))
-        self.assertIn("100-1000", self.monitor("speed 5000"))
+        self.assertIn("5000 kHz from the next attach", self.monitor("speed 5000"))
+        self.assertIn("100-10000", self.monitor("speed 20000"))
         self.assertIn("unknown monitor command", self.monitor("frobnicate"))
 
     def test_reset(self):

@@ -79,8 +79,13 @@ static_assert(kHwBreakpoints < kNoBreakpoint, "a real breakpoint index is never 
  * have no side effects. */
 inline constexpr uint8_t kEemPeekLastAddr = 0x3E;
 
+/* SBW clock (slot rate). The F552x accepts 0-20 MHz with a low phase of at
+ * least 25 ns (datasheet, JTAG and Spy-Bi-Wire interface); 10 MHz keeps half
+ * of that margin and is reachable by sbw.pio on both RP2040 and RP2350 (see
+ * SBW_MAX_SLOT_HZ). What a board's RST/SBWTDIO wiring carries reliably is
+ * found on the board (design spec, timing rules). */
 inline constexpr uint16_t kMinSpeedKhz = 100;
-inline constexpr uint16_t kMaxSpeedKhz = 1000;
+inline constexpr uint16_t kMaxSpeedKhz = 10000;
 inline constexpr uint32_t kAddressSpace = 0x100000; /* 20-bit addresses */
 
 /* JTAG instructions, already bit-reversed so they can be shifted MSB first

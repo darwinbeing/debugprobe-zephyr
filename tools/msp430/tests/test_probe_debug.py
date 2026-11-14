@@ -305,7 +305,7 @@ class DebugClientTest(unittest.TestCase):
         sent = []
         transfer = self.fw.transfer
         self.fw.transfer = lambda req, timeout_ms=3000: sent.append(bytes(req)) or transfer(req)
-        for speed, addr in ((99, 0), (1001, 0), (0, 0), (250, 1), (250, 0x3F), (250, 0x40),
+        for speed, addr in ((99, 0), (10001, 0), (0, 0), (250, 1), (250, 0x3F), (250, 0x40),
                             (250, 0x80), (250, -2), (250, 0x100)):
             with self.assertRaises(ProbeError, msg=(speed, addr)) as cm:
                 self.probe.dbg_eem_peek(speed, addr)
@@ -558,7 +558,7 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
         bad = (attach_args(2), attach_args(flags=1), attach_args(flags=2), attach_args(flags=0x80),
                attach_args(lo=0x1C01), attach_args(lo=0x4400, hi=0x1C00),
                attach_args(lo=0x2400, hi=0x2400), attach_args(hi=0x100002),
-               attach_args(lo=0x2400, hi=0x3000, speed=99), attach_args(speed=1001),
+               attach_args(lo=0x2400, hi=0x3000, speed=99), attach_args(speed=10001),
                attach_args()[:-1], attach_args() + b"\x00", b"")
         for running in (False, True):
             fw = self.attached()
@@ -872,7 +872,7 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
 
     def test_eem_peek_arguments(self):
         fw = FakeFirmware()
-        for args in (struct.pack("<HB", 99, 0), struct.pack("<HB", 1001, 0),
+        for args in (struct.pack("<HB", 99, 0), struct.pack("<HB", 10001, 0),
                      struct.pack("<HB", 250, 1), struct.pack("<HB", 250, 0x3F),
                      struct.pack("<HB", 250, 0x40), struct.pack("<HB", 250, 0x88),
                      struct.pack("<HB", 250, 0)[:-1], struct.pack("<HB", 250, 0) + b"\x00", b""):

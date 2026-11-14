@@ -78,7 +78,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(fw.state, 0)   # disconnected despite the error
 
     def test_speed_is_validated_by_argparse(self):
-        for speed in ("50", "1001", "fast"):
+        for speed in ("50", "10001", "fast"):
             fw = FakeFirmware()
             argparse_err = io.StringIO()
             with contextlib.redirect_stderr(argparse_err):
@@ -193,11 +193,11 @@ class CliTest(unittest.TestCase):
         self.assertIn("verify failed", err)
 
     def test_speed_limits(self):
-        for speed in (100, 500, 1000):
+        for speed in (100, 500, 1000, 4000, 10000):
             fw = FakeFirmware()
             self.assertEqual(run(["--speed", str(speed), "info"], fw)[0], 0)
             self.assertEqual(fw.speeds, [speed])
-        for speed in ("99", "1001"):
+        for speed in ("99", "10001"):
             with contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as cm:
                     run(["--speed", speed, "info"], FakeFirmware())
@@ -563,8 +563,8 @@ class GdbServerCliTest(unittest.TestCase):
         self.assertEqual((t.commands, gdb.calls), ([], []), argv)
         return argparse_err.getvalue()
 
-    def test_speed_outside_100_to_1000_khz_is_refused_before_anything_is_sent(self):
-        for argv in (["gdbserver", "--speed", "99"], ["gdbserver", "--speed", "1001"],
+    def test_speed_outside_100_to_10000_khz_is_refused_before_anything_is_sent(self):
+        for argv in (["gdbserver", "--speed", "99"], ["gdbserver", "--speed", "10001"],
                      ["gdbserver", "--speed", "fast"], ["--speed", "50", "gdbserver"]):
             self.assertIn("--speed", self.refused_by_argparse(argv))
 
@@ -885,7 +885,7 @@ class EemPeekCliTest(unittest.TestCase):
         for addr in ("1", "0x3F", "0x40", "0x80", "-2", "256", "ten"):
             self.assertIn("--addr", self.refused_by_argparse(["eem-peek", "--addr", addr]))
         self.assertIn("even, 0x00-0x3E", self.refused_by_argparse(["eem-peek", "--addr", "0x41"]))
-        for speed in ("99", "1001", "fast"):
+        for speed in ("99", "10001", "fast"):
             self.assertIn("--speed", self.refused_by_argparse(["eem-peek", "--speed", speed]))
 
     def test_no_target_is_tried_four_times(self):

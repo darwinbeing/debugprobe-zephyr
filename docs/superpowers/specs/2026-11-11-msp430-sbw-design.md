@@ -119,7 +119,8 @@ TDO_RD` macros in `LowLevelFunc430Xv2.h`):
 
 Timing rules:
 
-- SBWTCK idles **high**. The slot rate is configurable from 100 kHz to 1 MHz,
+- SBWTCK idles **high**. The slot rate is configurable from 100 kHz to 10 MHz
+  (1 MHz until 2026-11-14; MSP430 debug design spec correction 29),
   default 250 kHz. A slot is 8 state-machine ticks, 4 low and 4 high; the
   hand-over after the TDO slot adds 4 high ticks per cycle. At the lowest rate
   the low phase is 5 µs, inside the 7 µs limit after which the target's SBW
@@ -148,7 +149,7 @@ cache.
 
 The driver protects the target against caller errors and its own faults:
 
-- The slot rate is clamped to 100 kHz–1 MHz in the driver itself.
+- The slot rate is clamped to 100 kHz–10 MHz in the driver itself.
 - Before it starts a stopped state machine it reads back what the PIO block is
   actually driving. Both pins must be outputs and SBWTCK must be high;
   otherwise nothing is clocked and the call fails. (Starting with the clock
@@ -358,7 +359,7 @@ response: [0x90][status][data...]
 | op | Name | Request args | Response data |
 |---|---|---|---|
 | 0x00 | INFO | – | `u8 version` (1), `u8 state` (0 Idle, 1 Connected, 2 Flashing), `u16 max_data_bytes`, `u32 features` (bit 0: CPUXv2 flash programming) |
-| 0x01 | CONNECT | `u16 speed_khz` (100–1000), `u8 entry_mode` (0 normal, 1 magic pattern) | `u8 jtag_id`, `u16 core_id`, `u32 device_id_ptr`, `u16 device_id` |
+| 0x01 | CONNECT | `u16 speed_khz` (100–10000), `u8 entry_mode` (0 normal, 1 magic pattern) | `u8 jtag_id`, `u16 core_id`, `u32 device_id_ptr`, `u16 device_id` |
 | 0x02 | DISCONNECT | – | – |
 | 0x03 | READ_MEM | `u32 addr`, `u16 nwords` | `nwords × u16` |
 | 0x04 | WRITE_MEM | `u32 addr`, `n × u16` | – |
@@ -383,7 +384,7 @@ Status codes:
 
 Argument rules, all answered with `BAD_ARG` when violated:
 
-- `speed_khz` outside 100–1000, or an unknown `entry_mode` or erase `mode`.
+- `speed_khz` outside 100–10000, or an unknown `entry_mode` or erase `mode`.
 - Addresses must be even, and `addr + 2 × nwords` must not exceed `0x100000`.
 - Data payloads must be a whole number of words, not empty, and at most
   `max_data_bytes`; `READ_MEM` must request between 1 and

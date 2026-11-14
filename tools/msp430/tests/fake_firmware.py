@@ -14,7 +14,7 @@ for DBG_EEM_PEEK: eem, peek_glitch, peek_status, peek_no_target.
 `polls` counts the looks at the running CPU since the last DBG_RESUME.
 
 DBG_EEM_PEEK (op 19, Session::op_dbg_eem_peek): only in Idle (BAD_STATE
-otherwise, before the size check), u16 speed 100-1000 and an even EEM address
+otherwise, before the size check), u16 speed 100-10000 and an even EEM address
 0x00-0x3E, else BAD_ARG; answers the JTAG ID and the register in `eem` twice
 (missing: 0). It stays Idle whatever it answers.
 
@@ -252,7 +252,7 @@ class FakeFirmware:
             if bad_len:
                 return BAD_ARG, b""
             speed, mode = struct.unpack("<HB", a[:3])
-            if not 100 <= speed <= 1000 or mode > 1:
+            if not 100 <= speed <= 10000 or mode > 1:
                 return BAD_ARG, b""
             self.connects.append(mode)
             self.speeds.append(speed)
@@ -415,7 +415,7 @@ class FakeFirmware:
         if len(a) != FIXED_ARGS[19]:
             return BAD_ARG, b""
         speed, addr = struct.unpack("<HB", a)
-        if not 100 <= speed <= 1000 or addr & 1 or addr > EEM_PEEK_LAST_ADDR:
+        if not 100 <= speed <= 10000 or addr & 1 or addr > EEM_PEEK_LAST_ADDR:
             return BAD_ARG, b""
         self.peeks.append((speed, addr))
         if self.peek_no_target > 0:
@@ -438,7 +438,7 @@ class FakeFirmware:
         if len(a) != FIXED_ARGS[9]:
             return BAD_ARG, b""
         mode, flags, speed, lo, hi = struct.unpack("<BBHII", a)
-        if (mode > 1 or flags != 0 or not 100 <= speed <= 1000 or lo & 1 or lo >= hi
+        if (mode > 1 or flags != 0 or not 100 <= speed <= 10000 or lo & 1 or lo >= hi
                 or hi > ADDR_LIMIT):
             return BAD_ARG, b""
         self.attaches.append((mode, flags, speed, lo, hi))

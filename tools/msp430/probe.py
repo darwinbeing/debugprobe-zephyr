@@ -71,7 +71,7 @@ SYNC_TIMEOUT_MIN_MS = 15000
 SYNC_WORST_CYCLES = 1_450_000
 SLOTS_PER_CYCLE_X2 = 7  # 3.5 slots per JTAG cycle, doubled to keep integers
 MIN_SPEED_KHZ = 100     # the slowest SBW clock the probe accepts
-MAX_SPEED_KHZ = 1000    # the fastest
+MAX_SPEED_KHZ = 10000   # the fastest
 SYNCS = {OP_DBG_ATTACH: 2, OP_DBG_HALT: 1, OP_DBG_STEP: 1, OP_DBG_STATUS: 1, OP_DBG_DETACH: 1}
 
 

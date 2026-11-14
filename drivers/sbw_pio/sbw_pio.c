@@ -34,7 +34,11 @@ LOG_MODULE_REGISTER(sbw_pio, LOG_LEVEL_INF);
 #define SBW_TICKS_PER_SLOT 8U
 #define SBW_DEFAULT_SLOT_HZ 250000U
 #define SBW_MIN_SLOT_HZ 100000U
-#define SBW_MAX_SLOT_HZ 1000000U
+/* 10 MHz: 80 MHz ticks, a fractional divider of 1.5625 at 125 MHz (1.875 at
+ * 150 MHz), so a tick lasts one or two system clocks and the shortest low
+ * phase (4 ticks) is 32 ns (26.7 ns), above the target's 25 ns minimum. The
+ * F552x accepts up to 20 MHz. */
+#define SBW_MAX_SLOT_HZ 10000000U
 
 /* A full 32-cycle call takes at most about 1.2 ms. */
 #define SBW_RX_TIMEOUT_MS 10U
