@@ -28,30 +28,29 @@ HEADER_ADDRESSES = {
 
 
 def probe_tables():
-    """kPeripheralEnd and kKnownDevices from the probe's session.cpp:
-    (peripheral_end, {device_id: (ram, main_flash, [hole, ...])})."""
+    """kKnownDevices from the probe's session.cpp:
+    {device_id: (ram, main_flash, peripherals, [hole, ...])}."""
     with open(SESSION_CPP) as f:
         text = f.read()
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     text = re.sub(r"//[^\n]*", "", text)
     text = re.sub(r"\b(0x[0-9A-Fa-f]+)[uU]\b", r"\1", text)
-    end = re.search(r"constexpr uint32_t kPeripheralEnd = (0x[0-9A-Fa-f]+);", text)
     table = re.search(r"constexpr KnownDevice kKnownDevices\[\] = (\{.*?\});", text, re.S)
     entries = ast.literal_eval(table.group(1).replace("{", "[").replace("}", "]"))
-    return int(end.group(1), 16), {e[0]: (tuple(e[1]), tuple(e[2]), [tuple(h) for h in e[3]])
-                                   for e in entries}
+    return {e[0]: (tuple(e[1]), tuple(e[2]), tuple(e[3]), [tuple(h) for h in e[4]])
+            for e in entries}
 
 
 class ProbeMirrorTest(unittest.TestCase):
     """The host's write and PC rules are the probe's: a change to either
-    kKnownDevices / kPeripheralEnd or this table without the other fails."""
+    kKnownDevices or this table without the other fails."""
 
     def test_the_host_table_is_the_probes(self):
-        peripheral_end, probe = probe_tables()
+        probe = probe_tables()
         self.assertEqual(sorted(probe), sorted(devices.DEVICES))
-        for device_id, (ram, main_flash, holes) in probe.items():
+        for device_id, (ram, main_flash, peripherals, holes) in probe.items():
             d = devices.lookup(device_id)
-            self.assertEqual(d.peripherals, (0x0000, peripheral_end), d.name)
+            self.assertEqual(d.peripherals, peripherals, d.name)
             self.assertEqual(d.ram, ram, d.name)
             self.assertEqual((d.main_start, d.main_end), main_flash, d.name)
             self.assertEqual([(lo, hi) for lo, hi, _ in d.peripheral_holes], holes, d.name)
@@ -161,13 +160,15 @@ class DeviceTableTest(unittest.TestCase):
                          [(0x0120, 0x0140), (0x0140, 0x0150), (0x0180, 0x01A0), (0x0500, 0x0540)])
 
     def test_debug_writable_at_every_edge_of_the_probes_rule(self):
-        """Session::writable: RAM 0x1C00-0x43FF, and the peripherals
-        0x0000-0x0FFF without PMM 0x0120-0x013F, FCTL 0x0140-0x014F, SYS
+        """Session::writable: RAM 0x1C00-0x43FF, and the peripheral registers
+        0x0100-0x093F without PMM 0x0120-0x013F, FCTL 0x0140-0x014F, SYS
         0x0180-0x019F and DMA 0x0500-0x053F."""
-        writable = ((0x0000, 2), (0x0000, 0x0120), (0x011E, 2), (0x011F, 1), (0x0150, 2),
+        writable = ((0x0100, 2), (0x0100, 0x20), (0x011E, 2), (0x011F, 1), (0x0150, 2),
                     (0x017E, 2), (0x01A0, 2), (0x04FE, 2), (0x0540, 2), (0x05C0, 2),
-                    (0x0FFE, 2), (0x1C00, 2), (0x43FE, 2))
-        refused = ((0x011E, 4), (0x0120, 1), (0x0120, 2), (0x0130, 2), (0x013E, 2), (0x013F, 1),
+                    (0x093E, 2), (0x093F, 1), (0x0540, 0x400), (0x1C00, 2), (0x43FE, 2))
+        refused = ((0x0000, 2), (0x00FE, 2), (0x00FF, 1), (0x00FE, 4), (0x0940, 2), (0x0940, 1),
+                   (0x093E, 4), (0x0540, 0x401), (0x0FFE, 2),
+                   (0x011E, 4), (0x0120, 1), (0x0120, 2), (0x0130, 2), (0x013E, 2), (0x013F, 1),
                    (0x013E, 4), (0x0140, 2), (0x014E, 2), (0x014F, 1), (0x014E, 4),
                    (0x017E, 4), (0x0180, 2), (0x019E, 2), (0x019E, 4),
                    (0x04FE, 4), (0x0500, 2), (0x053E, 2), (0x053E, 4),
@@ -177,6 +178,13 @@ class DeviceTableTest(unittest.TestCase):
             self.assertTrue(F5529.debug_writable(addr, n), (hex(addr), n))
         for addr, n in refused:
             self.assertFalse(F5529.debug_writable(addr, n), (hex(addr), n))
+
+    def test_every_writable_word_is_readable(self):
+        """The write window lies inside the memory map: what GDB may write it
+        may also read."""
+        for addr in range(0, F5529.main_end, 2):
+            if F5529.debug_writable(addr, 2):
+                self.assertTrue(F5529.debug_readable(addr, 2), hex(addr))
 
     def test_debug_pc_writable_only_into_main_flash(self):
         current = 0x5000

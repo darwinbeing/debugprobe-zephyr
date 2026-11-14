@@ -16,9 +16,10 @@ class Device:
     # Debugging (phase B). (start, end) pairs, end exclusive. The write rules
     # and the PC rule mirror the probe's kKnownDevices
     # (lib/msp430/src/session.cpp), which enforces them.
-    peripherals: tuple  # peripheral space: the probe's write window for registers
+    peripherals: tuple  # first to last peripheral register: a memory-map region and the
+    #                     write window for registers (minus the holes), as on the probe
     peripheral_holes: tuple  # ((start, end, name), ...): peripherals a debug session never writes
-    vacant: tuple  # ((start, end), ...): no registers there; left out of the memory map
+    vacant: tuple  # ((start, end), ...): no registers there; never in the memory map
     bsl: tuple  # bootloader area: a debug session neither reads nor writes it
     info: tuple  # information memory A-D
     tlv: tuple  # device descriptor (TLV), read-only
@@ -108,7 +109,7 @@ MSP430F5529 = Device(
     segment_size=512,
     info_segments=((0x1800, 128), (0x1880, 128), (0x1900, 128)),
     ram_start=0x2400,
-    peripherals=(0x0000, 0x1000),
+    peripherals=(0x0100, 0x0940),  # SFRIE1..USBFUNADR, TI's msp430f5529.h
     peripheral_holes=(
         # PMMCTL0..PM5CTL0: PMMCTL0's password (written 0xA5, read 0x96) makes a
         # byte write, done as a word read-modify-write, a reset; core voltage, SVS
@@ -117,7 +118,7 @@ MSP430F5529 = Device(
         (0x0180, 0x01A0, "SYS"),  # SYSCTL (SYSRIVECT), SYSBSLC, ...: vectors, BSL protection
         (0x0500, 0x0540, "DMA"),  # DMACTL0..DMA2SZ: a transfer could write FCTL
     ),
-    # below SFRIE1 (0x0100) and above USBFUNADR (0x093F), TI's msp430f5529.h
+    # the peripheral space 0x0000-0x0FFF outside `peripherals`
     vacant=((0x0000, 0x0100), (0x0940, 0x1000)),
     bsl=(0x1000, 0x1800),
     info=(0x1800, 0x1A00),

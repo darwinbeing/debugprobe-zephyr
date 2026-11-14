@@ -7,9 +7,11 @@
  * for the host, the probe never writes flash, the registers of the PMM, the
  * flash controller, the DMA controller or the SYS module, and never moves the
  * PC outside the device's main flash. WRITE_MEM may write only RAM and the
- * peripherals below 0x1000 minus those four register blocks (F5529: PMM
- * 0x0120-0x013F, FCTL 0x0140-0x014F, SYS 0x0180-0x019F, DMA 0x0500-0x053F;
- * the host's device table, tools/msp430/devices.py, mirrors them);
+ * device's peripheral registers minus those four register blocks (F5529:
+ * registers 0x0100-0x093F, not the vacant 0x0000-0x00FF and 0x0940-0x0FFF;
+ * blocks PMM 0x0120-0x013F, FCTL 0x0140-0x014F, SYS 0x0180-0x019F, DMA
+ * 0x0500-0x053F; the host's device table, tools/msp430/devices.py, mirrors
+ * them);
  * DBG_WRITE_REG may set the PC only to an address in main flash or to its
  * current value; ERASE and FLASH_BEGIN are refused. On a device the probe
  * does not know, no RAM and no peripheral may be written and the PC stays

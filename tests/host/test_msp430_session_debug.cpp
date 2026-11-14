@@ -857,14 +857,15 @@ TEST(session_dbg_write_mem_whitelist)
 {
 	Fx f;
 	f.attach();
-	/* allowed: RAM, USB RAM, the peripherals outside the F5529's PMM, flash
-	 * controller, SYS module and DMA controller, each edge included */
+	/* allowed: RAM, USB RAM, the F5529's peripheral registers 0x0100-0x093F
+	 * outside its PMM, flash controller, SYS module and DMA controller, each
+	 * edge included */
 	CHECK_BYTES(f.run(write_req(0x2400, 4)), kOk);
 	CHECK_BYTES(f.run(write_req(0x1C00, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x43FE, 2)), kOk);
 	CHECK_BYTES(f.run(write_req(0x0200, 2)), kOk);
-	CHECK_BYTES(f.run(write_req(0x0000, 2)), kOk);
-	CHECK_BYTES(f.run(write_req(0x0FFE, 2)), kOk);
+	CHECK_BYTES(f.run(write_req(0x0100, 2)), kOk); /* SFRIE1: the window's first word */
+	CHECK_BYTES(f.run(write_req(0x093E, 2)), kOk); /* USBIFG: the window's last word */
 	CHECK_BYTES(f.run(write_req(0x011E, 2)), kOk); /* below PMMCTL0 */
 	CHECK_BYTES(f.run(write_req(0x0150, 2)), kOk); /* above FCTL4 */
 	CHECK_BYTES(f.run(write_req(0x017E, 2)), kOk); /* below SYSCTL */
@@ -878,20 +879,26 @@ TEST(session_dbg_write_mem_whitelist)
 	const size_t writes = f.tap.mem_writes.size();
 	CHECK_EQ(writes, 16u + 508u);
 	f.tap.log.clear();
-	/* refused: main flash, information memory, BSL, vacant memory, the PMM,
-	 * the flash controller, the SYS module, the DMA controller, the top of
-	 * the address space, a write that runs off the end of RAM, of the
-	 * peripherals or into one of the four */
+	/* refused: main flash, information memory, BSL, vacant memory (below
+	 * and above the peripheral registers too), the PMM, the flash
+	 * controller, the SYS module, the DMA controller, the top of the address
+	 * space, a write that runs off the end of RAM, of the peripheral
+	 * registers or into one of the four */
 	for (uint32_t addr : {0x4400u, 0x4402u, 0xFFFEu, 0x10000u, 0x1FFFEu, 0x243FEu, 0x24400u,
 			      0xFFFFEu, 0x1800u, 0x1980u, 0x19FEu, 0x1A00u, 0x1B00u, 0x1BFEu,
 			      0x1000u, 0x17FEu, 0x1C00u - 2u, 0x1C00u - 0x200u, 0x0120u, 0x0122u,
 			      0x0124u, 0x012Cu, 0x0130u, 0x013Eu, 0x0140u, 0x0142u,
 			      0x0144u, 0x0146u, 0x0148u, 0x014Eu, 0x0180u, 0x0182u, 0x0186u,
-			      0x019Eu, 0x0500u, 0x0510u, 0x053Au, 0x053Eu}) {
+			      0x019Eu, 0x0500u, 0x0510u, 0x053Au, 0x053Eu, 0x0000u, 0x00FEu,
+			      0x0940u, 0x0FFEu}) {
 		CHECK_BYTES(f.run(write_req(addr, 2)), kProtected);
 	}
 	CHECK_BYTES(f.run(write_req(0x43FE, 4)), kProtected);    /* RAM into flash */
 	CHECK_BYTES(f.run(write_req(0x4010, 1016)), kProtected); /* RAM into flash */
+	CHECK_BYTES(f.run(write_req(0x00FE, 4)), kProtected);    /* vacant into SFRIE1 */
+	CHECK_BYTES(f.run(write_req(0x00F0, 0x20)), kProtected); /* across SFRIE1's start */
+	CHECK_BYTES(f.run(write_req(0x093E, 4)), kProtected);    /* USBIFG into vacant */
+	CHECK_BYTES(f.run(write_req(0x0930, 0x20)), kProtected); /* across the window's end */
 	CHECK_BYTES(f.run(write_req(0x011E, 4)), kProtected);    /* into PMMCTL0 */
 	CHECK_BYTES(f.run(write_req(0x0110, 0x20)), kProtected); /* across PMMCTL0 */
 	CHECK_BYTES(f.run(write_req(0x013E, 4)), kProtected);    /* PMM into FCTL1 */
@@ -903,8 +910,8 @@ TEST(session_dbg_write_mem_whitelist)
 	CHECK_BYTES(f.run(write_req(0x04FE, 4)), kProtected);    /* into DMACTL0 */
 	CHECK_BYTES(f.run(write_req(0x053E, 4)), kProtected);    /* out of the DMA controller */
 	CHECK_BYTES(f.run(write_req(0x0400, 0x300)), kProtected); /* across the DMA controller */
-	CHECK_BYTES(f.run(write_req(0x0FFE, 4)), kProtected);   /* out of the peripherals */
-	CHECK_BYTES(f.run(write_req(0x0FF0, 0x3F8)), kProtected); /* peripherals into vacant memory */
+	CHECK_BYTES(f.run(write_req(0x0FFE, 4)), kProtected);   /* vacant into the BSL */
+	CHECK_BYTES(f.run(write_req(0x0FF0, 0x3F8)), kProtected); /* vacant into the BSL */
 	CHECK_BYTES(f.run(write_req(0x1BFE, 4)), kProtected);   /* descriptors into RAM */
 	CHECK_BYTES(f.run(write_req(0x1BFE, 0x100)), kProtected);
 	CHECK_EQ(f.tap.mem_writes.size(), writes);

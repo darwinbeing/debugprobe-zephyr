@@ -135,15 +135,17 @@ are 20-bit numbers in 32-bit fields.
   debug layer, which preserves the halted context. In DebugRunning they
   return `RUNNING` (correction 6).
 - New status `PROTECTED` (0x09): in read-only mode `WRITE_MEM` may only
-  touch the peripheral space below 0x1000 **without the flash controller
-  registers (0x0140–0x014F)**, and RAM. The RAM window is the **intersection**
-  of the range given with `DBG_ATTACH` and the RAM the probe itself knows for
-  the device it identified (F5529, device ID bytes 55h 29h: 0x1C00–0x43FF, USB RAM
-  included); for a device the probe does not know, the window is empty, and
-  so is the peripheral window (the refused ranges below are per device). Any
-  other address — main flash, information memory, BSL, vacant memory — is
-  refused with `PROTECTED`. A wrong host table can therefore only narrow the
-  window, never open flash. Three more peripheral ranges are refused: the DMA
+  touch the device's peripheral registers (F5529: 0x0100–0x093F, `SFRIE1` to
+  `USBFUNADR`; the vacant 0x0000–0x00FF and 0x0940–0x0FFF are refused, as
+  GDB's map leaves them out) **without the flash controller registers
+  (0x0140–0x014F)** and the three blocks below, and RAM. The RAM window is
+  the **intersection** of the range given with `DBG_ATTACH` and the RAM the
+  probe itself knows for the device it identified (F5529, device ID bytes
+  55h 29h: 0x1C00–0x43FF, USB RAM included); for a device the probe does not
+  know, the window is empty, and so is the peripheral window (it and the
+  refused ranges below are per device). Any other address — main flash,
+  information memory, BSL, vacant memory — is refused with `PROTECTED`. A
+  wrong host table can therefore only narrow the window, never open flash. Three more peripheral ranges are refused: the DMA
   module (F5529: 0x0500–0x053F), since a DMA transfer could copy into the
   flash controller; the SYS module (0x0180–0x019F: `SYSCTL.SYSRIVECT`
   would move the interrupt vectors into RAM, `SYSBSLC` controls the BSL

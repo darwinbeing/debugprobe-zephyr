@@ -439,8 +439,8 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
     def test_write_mem_whitelist(self):
         """session_dbg_write_mem_whitelist in test_msp430_session_debug.cpp."""
         fw = self.attached()
-        for addr, n in ((0x2400, 4), (0x1C00, 2), (0x43FE, 2), (0x0200, 2), (0x0000, 2),
-                        (0x0FFE, 2), (0x011E, 2), (0x0150, 2), (0x017E, 2), (0x01A0, 2),
+        for addr, n in ((0x2400, 4), (0x1C00, 2), (0x43FE, 2), (0x0200, 2), (0x0100, 2),
+                        (0x093E, 2), (0x011E, 2), (0x0150, 2), (0x017E, 2), (0x01A0, 2),
                         (0x04FE, 2), (0x0540, 2), (0x05C0, 2), (0x05FE, 2), (0x0600, 2),
                         (0x1C00, 1016)):
             self.assertEqual(self.write(fw, addr, n), reply(OK), hex(addr))
@@ -449,9 +449,10 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
                      0x1800, 0x1980, 0x19FE, 0x1A00, 0x1B00, 0x1BFE, 0x1000, 0x17FE,
                      0x1C00 - 0x200, 0x0120, 0x0122, 0x0124, 0x012C, 0x0130, 0x013E, 0x0140,
                      0x0142, 0x0144, 0x0146, 0x0148, 0x014E, 0x0180, 0x0182, 0x0186, 0x019E,
-                     0x0500, 0x0510, 0x053A, 0x053E):
+                     0x0500, 0x0510, 0x053A, 0x053E, 0x0000, 0x00FE, 0x0940, 0x0FFE):
             self.assertEqual(self.write(fw, addr), reply(PROTECTED), hex(addr))
-        for addr, n in ((0x43FE, 4), (0x4010, 1016), (0x011E, 4), (0x0110, 0x20), (0x013E, 4),
+        for addr, n in ((0x43FE, 4), (0x4010, 1016), (0x00FE, 4), (0x00F0, 0x20), (0x093E, 4),
+                        (0x0930, 0x20), (0x011E, 4), (0x0110, 0x20), (0x013E, 4),
                         (0x014E, 4), (0x0100, 0x50), (0x017E, 4), (0x019E, 4), (0x0170, 0x40),
                         (0x04FE, 4), (0x053E, 4), (0x0400, 0x300), (0x0FFE, 4), (0x0FF0, 0x3F8),
                         (0x1BFE, 4), (0x1BFE, 0x100)):
@@ -460,7 +461,8 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
 
     def test_write_mem_whitelist_is_the_device_tables(self):
         """Word by word up to main flash: the fake writes exactly what
-        devices.py's debug_writable allows (RAM, peripherals minus the holes)."""
+        devices.py's debug_writable allows (RAM, the peripheral window minus
+        the holes)."""
         fw = self.attached()
         d = devices.MSP430F5529
         for addr in range(0, d.main_start + 2, 2):

@@ -192,7 +192,8 @@ class MemoryTest(ServerFixture):
         self.start()
         writes = list(self.fw.write_chunks)
         for packet in ("M4400,2:0000", "M1800,2:0000", "M1000,2:0000", "M0140,2:0000",
-                       "M43fe,4:00000000", "Mfffe,2:0000", "X4400,2:\x00\x00"):
+                       "M43fe,4:00000000", "Mfffe,2:0000", "X4400,2:\x00\x00",
+                       "M0000,2:0000", "M00fe,4:00000000", "M0940,2:0000", "M0ffe,2:0000"):
             self.assertEqual(self.gdb.cmd(packet), "E01", packet)
         self.assertEqual(self.fw.write_chunks, writes)
         self.assertIn("read-only mode writes only RAM and peripheral registers", self.out.getvalue())

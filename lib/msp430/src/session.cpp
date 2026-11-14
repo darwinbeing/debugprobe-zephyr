@@ -37,22 +37,22 @@ bool range_ok(uint32_t addr, uint64_t nwords)
 	       addr + 2u * nwords <= kAddressSpace;
 }
 
-/* The peripheral space, 0x0000-0x0FFF on every CPUXv2 device. */
-constexpr uint32_t kPeripheralEnd = 0x1000;
-
 } // namespace
 
 /* The devices the probe knows, by device ID. In a read-only session:
  * WRITE_MEM may write only RAM that lies inside both `ram` and the range the
  * host passes with DBG_ATTACH, so a wrong host table cannot open flash, and
- * the peripherals below kPeripheralEnd minus the `holes`; DBG_WRITE_REG may
- * move the PC only into `main_flash` (or leave it where it is). Names and
- * addresses from TI's device header. */
+ * the peripheral registers in `peripherals` minus the `holes`; DBG_WRITE_REG
+ * may move the PC only into `main_flash` (or leave it where it is). Names and
+ * addresses from TI's device header. The host's device table
+ * (tools/msp430/devices.py) mirrors this one; its tests compare the two. */
 struct KnownDevice {
 	struct Range {
 		uint32_t lo, hi; /* [lo, hi) */
 
 		bool contains(uint32_t a) const { return a >= lo && a < hi; }
+		/* Does the range hold all of [addr, end)? */
+		bool holds(uint64_t addr, uint64_t end) const { return addr >= lo && end <= hi; }
 		/* Does [addr, end) overlap the range? */
 		bool overlaps(uint64_t addr, uint64_t end) const { return addr < hi && end > lo; }
 	};
@@ -60,7 +60,8 @@ struct KnownDevice {
 	uint16_t device_id;
 	Range ram;
 	Range main_flash;
-	Range holes[4];
+	Range peripherals; /* from the first register to the last one */
+	Range holes[4];    /* inside `peripherals`: never written */
 };
 
 namespace {
@@ -69,6 +70,7 @@ constexpr KnownDevice kKnownDevices[] = {
 	{0x2955, /* MSP430F5529 */
 	 {0x1C00, 0x4400},  /* USB RAM + RAM */
 	 {0x4400, 0x24400}, /* 128 KB */
+	 {0x0100, 0x0940},  /* SFRIE1..USBFUNADR; 0x0000-0x00FF and 0x0940-0x0FFF are vacant */
 	 {
 		 {0x0120, 0x0140}, /* PMM: PMMCTL0..PM5CTL0. PMMCTL0 is written with
 				    * password 0xA5 but reads 0x96, so a host's byte write,
@@ -211,9 +213,9 @@ bool Session::writable(uint32_t addr, uint32_t nbytes) const
 	if (addr >= ram_lo_ && end <= ram_hi_) {
 		return true;
 	}
-	/* The peripherals minus the device's holes; none for a device the probe
-	 * does not know, whose holes it cannot tell. */
-	if (device_ == nullptr || end > kPeripheralEnd) {
+	/* The device's peripheral registers minus its holes; none for a device
+	 * the probe does not know, whose registers and holes it cannot tell. */
+	if (device_ == nullptr || !device_->peripherals.holds(addr, end)) {
 		return false;
 	}
 	for (const KnownDevice::Range &hole : device_->holes) {

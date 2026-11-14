@@ -35,8 +35,9 @@ Three layers refuse it independently:
 What can be written:
 
 - RAM, 0x1C00-0x43FF (USB buffer RAM included);
-- peripheral registers below 0x1000, except four blocks: the power
-  management module PMM (0x0120-0x013F), the flash controller
+- peripheral registers, 0x0100-0x093F (`SFRIE1` to `USBFUNADR`; the vacant
+  0x0000-0x00FF and 0x0940-0x0FFF are not written), except four blocks: the
+  power management module PMM (0x0120-0x013F), the flash controller
   (0x0140-0x014F), the system module SYS (0x0180-0x019F) and the DMA
   controller (0x0500-0x053F). A byte write to `PMMCTL0` resets the chip,
   `SYSCTL` can move the interrupt vectors into RAM, and a DMA transfer could
@@ -288,7 +289,7 @@ flash, and `load` (`Load failed`).
 
 | Message | Meaning |
 |---|---|
-| `refused: write of ... read-only mode writes only RAM and peripheral registers, not ...` | One of the four peripheral blocks. (Flash, the bootloader and the gap 0x1B00-0x1BFF are refused by GDB itself.) With `set mem inaccessible-by-default off`, GDB sends writes outside its map too: those to the bootloader area, the gap and everything above main flash get this message. Vacant memory below 0x1000 (0x0000-0x00FF, 0x0940-0x0FFF) lies inside the peripheral write window and is written. |
+| `refused: write of ... read-only mode writes only RAM and peripheral registers, not ...` | One of the four peripheral blocks. (Flash, the bootloader, vacant memory and the gap 0x1B00-0x1BFF are refused by GDB itself.) With `set mem inaccessible-by-default off`, GDB sends writes outside its map too: those to vacant memory (0x0000-0x00FF, 0x0940-0x0FFF), the bootloader area, the gap and everything above main flash get this message. |
 | `refused: read-only mode: the PC may only be set inside main flash ...` | `set var $pc = ...` or `jump ADDR` to an address outside main flash, or `load` of a symbol ELF without `--image` (entry address 0). |
 | `refused: software breakpoints are not allowed in read-only mode ...` | Use `hbreak`. |
 | `refused: all 8 hardware breakpoints are in use` | Delete a breakpoint. |
