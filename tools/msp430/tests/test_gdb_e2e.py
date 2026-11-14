@@ -1,5 +1,6 @@
 """End to end: msp430-elf-gdb --batch against the GDB server and the fake
-firmware. Skipped unless msp430-elf-gdb is on PATH (TI's MSP430-GCC).
+firmware. Skipped unless msp430-elf-gdb 9.x is on PATH (TI's MSP430-GCC):
+the expected texts are GDB 9.1's.
 
 Besides a session and the read-only refusals, these tests pin GDB behaviour
 the server and docs/MSP430_DEBUG.md rely on (checked with GDB 9.1 of
@@ -33,6 +34,30 @@ GDB = shutil.which("msp430-elf-gdb")
 GDB_TIMEOUT = 60  # seconds for one GDB run; a run takes well under one
 
 
+def _gdb_version():
+    """The first line of `msp430-elf-gdb --version`, or None."""
+    try:
+        done = subprocess.run([GDB, "--version"], capture_output=True, text=True,
+                              timeout=GDB_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (done.stdout.splitlines() or [None])[0]
+
+
+def _skip_reason():
+    """Why the tests cannot run here, or None."""
+    if GDB is None:
+        return "msp430-elf-gdb is not installed"
+    version = _gdb_version()
+    major = re.search(r"\s(\d+)\.\d+[.\d]*$", version or "")
+    if major is None or major.group(1) != "9":
+        return f"the expected texts are msp430-elf-gdb 9.x's; this one says {version!r}"
+    return None
+
+
+SKIP_REASON = _skip_reason()
+
+
 class HookedFirmware(FakeFirmware):
     """Calls on_transfer(self) after every request, in the server's thread."""
     on_transfer = None
@@ -44,10 +69,11 @@ class HookedFirmware(FakeFirmware):
         return response
 
 
-@unittest.skipUnless(GDB, "msp430-elf-gdb is not installed")
+@unittest.skipIf(SKIP_REASON, SKIP_REASON)
 class GdbEndToEndTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         names = os.path.join(self.tmp.name, "names.tsv")
         with open(names, "w") as f:
             f.write("address\tnew_name\n4520\tdemo_main_loop\n4600\tdemo_key_handler\n"
@@ -65,22 +91,29 @@ class GdbEndToEndTest(unittest.TestCase):
         self.server = gdbserver.GdbServer(SbwProbe(self.fw), devices.MSP430F5529, out=self.out,
                                           poll_interval=0.001)
         self.listener = socket.socket()
+        self.addCleanup(self.listener.close)
+        self.listener.settimeout(GDB_TIMEOUT)  # a GDB that never connects ends the server too
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen(1)
         self.port = self.listener.getsockname()[1]
         self.steps_at_interrupt = None
+        self.error = None
         self.thread = threading.Thread(target=self._serve, daemon=True)
         self.thread.start()
 
     def _serve(self):
-        conn, _ = self.listener.accept()
-        with conn:
-            self.server.serve_connection(conn)
+        try:
+            conn, _ = self.listener.accept()
+            with conn:
+                self.server.serve_connection(conn)
+        except Exception as e:  # noqa: BLE001 -- tearDown reports it
+            self.error = e
 
     def tearDown(self):
-        self.listener.close()
-        self.thread.join(10)
-        self.tmp.cleanup()
+        # GDB has exited: the server has seen the connection end
+        self.thread.join(GDB_TIMEOUT)
+        self.assertFalse(self.thread.is_alive(), "the server did not end the session")
+        self.assertIsNone(self.error)
 
     def gdb(self, *commands, elf=None, interrupt_when=None):
         """Run GDB with these commands; its stdout, then its stderr (where it
@@ -146,14 +179,17 @@ class GdbEndToEndTest(unittest.TestCase):
         self.assertEqual(self.fw.writes, [(0x2400, b"*#$}")])
 
     def test_monitor_reset_keeps_breakpoints_and_flushregs_reads_the_pc(self):
-        text = self.gdb("break demo_key_handler", "monitor reset", "info registers pc",
-                        "flushregs", "info registers pc", "continue", "detach",
-                        interrupt_when=self._ran_past_the_breakpoint)
+        # by default GDB removes its breakpoints at a stop and inserts them on resume
+        text = self.gdb("break demo_key_handler", "continue", "monitor reset",
+                        "info registers pc", "flushregs", "info registers pc", "continue",
+                        "detach", interrupt_when=self._ran_past_the_breakpoint)
         self.assertIn("run 'flushregs'", text)
         # GDB keeps its register cache across a monitor command, until flushregs
-        self.assertEqual(re.findall(r"^pc\s+(0x[0-9a-f]+)", text, re.M), ["0x4520", "0x441a"])
-        self.assertIn("Breakpoint 1, 0x00004600 in demo_key_handler", text)
+        self.assertEqual(re.findall(r"^pc\s+(0x[0-9a-f]+)", text, re.M), ["0x4600", "0x441a"])
+        self.assertEqual(text.count("Breakpoint 1, 0x00004600 in demo_key_handler"), 2, text)
+        self.assertNotIn("SIGINT", text)
         self.assertEqual([a[0] for a in self.fw.attaches], [0, 1])
+        self.assertEqual(self.fw.resumes, 2)
 
     def test_monitor_reset_keeps_breakpoints_always_inserted(self):
         # GDB inserts the breakpoint once and not again on resume
@@ -169,7 +205,7 @@ class GdbEndToEndTest(unittest.TestCase):
         """The safety net of the monitor reset tests: a CPU that has run for
         2000 polls without stopping has passed the breakpoint; GDB's Ctrl-C
         then ends the run instead of the test's timeout."""
-        return fw.state == RUNNING_STATE and fw._polls >= 2000
+        return fw.state == RUNNING_STATE and fw.polls >= 2000
 
     def test_notes_before_a_stop_reply(self):
         self.fw.fail_op = {14: TIMEOUT}
@@ -192,11 +228,17 @@ class GdbEndToEndTest(unittest.TestCase):
         self.assertIn("The program is not being run.", text)  # detach: nothing left to detach
         self.assertEqual(self.fw.detaches, [])
 
+    # The SIGINT is sent once the fake has done a step, before the server
+    # answers it. GDB passes it on as 0x03 when it next checks for Ctrl-C:
+    # before its next step request (that step is then answered SIGINT
+    # without stepping), or while waiting for it (that one step runs).
+    STEP_BOUND = "more than one step after the Ctrl-C"
+
     def test_ctrl_c_during_stepi_1000(self):
         text = self.gdb("stepi 1000", "info registers pc", "detach",
                         interrupt_when=lambda fw: fw.steps >= 50)
         self.assertIn("Program received signal SIGINT, Interrupt.", text)
-        self.assertLessEqual(self.fw.steps - self.steps_at_interrupt, 2)
+        self.assertLessEqual(self.fw.steps - self.steps_at_interrupt, 1, self.STEP_BOUND)
         self.assertRegex(text, rf"pc\s+0x{0x4520 + 2 * self.fw.steps:x}\s")
         self.assertEqual(self.fw.detaches, [0])
 
@@ -205,7 +247,7 @@ class GdbEndToEndTest(unittest.TestCase):
         text = self.gdb("next", "detach", interrupt_when=lambda fw: fw.steps >= 50)
         self.assertIn("Single stepping until exit from function demo_long", text)
         self.assertIn("Program received signal SIGINT, Interrupt.", text)
-        self.assertLessEqual(self.fw.steps - self.steps_at_interrupt, 2)
+        self.assertLessEqual(self.fw.steps - self.steps_at_interrupt, 1, self.STEP_BOUND)
         self.assertEqual(self.fw.resumes, 0)
         self.assertEqual(self.fw.detaches, [0])
 

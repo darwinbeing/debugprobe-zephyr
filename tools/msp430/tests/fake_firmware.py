@@ -8,7 +8,8 @@ addressed to flash or anywhere else.
 Fault injection knobs: version, features, connect_status, fail_op,
 interrupt_on_op, fail_flash_after, stuck, no_target, has_handler, also_erase,
 skip_segment_erases, read_shift; for debugging: attach_status, run_polls,
-stop_at, halt_pc, step_size, step_timeout_pc, lost_on_poll.
+stop_at, halt_pc, step_size, step_timeout_pc, lost_on_poll, hw_breakpoints.
+`polls` counts the looks at the running CPU since the last DBG_RESUME.
 
 Debug model (ops 9-18, states 3 DebugHalted / 4 DebugRunning; a probe of
 version 1 answers them UNKNOWN_OP), after msp430::Session in
@@ -103,6 +104,7 @@ class FakeFirmware:
                                      # (fail_op {14: TIMEOUT}); None: unchanged
         self.lost_on_poll = False    # the target is lost while running: DBG_STATUS and
                                      # DBG_HALT answer TARGET_ERROR, the session ends
+        self.hw_breakpoints = HW_BREAKPOINTS  # EEM triggers INFO and DBG_ATTACH report
         self.stop_reason = STOP_NONE
         self.bp_hit = NO_BREAKPOINT
         self.ram_range = (0, 0)      # RAM a debug session may write, [lo, hi)
@@ -112,7 +114,7 @@ class FakeFirmware:
         self.resumes = 0
         self.steps = 0
         self.reg_writes = []         # (index, value) of every accepted DBG_WRITE_REG
-        self._polls = 0
+        self.polls = 0               # looks at the running CPU since the last DBG_RESUME
 
     # --- transport interface used by SbwProbe ---
     def transfer(self, request, timeout_ms=3000):
@@ -211,9 +213,9 @@ class FakeFirmware:
                 return BAD_ARG
         if op == 17:
             index, addr = struct.unpack("<BI", a)
-            if index >= HW_BREAKPOINTS or addr & 1 or addr >= ADDR_LIMIT:
+            if index >= self.hw_breakpoints or addr & 1 or addr >= ADDR_LIMIT:
                 return BAD_ARG
-        if op == 18 and a[0] != ALL_BREAKPOINTS and a[0] >= HW_BREAKPOINTS:
+        if op == 18 and a[0] != ALL_BREAKPOINTS and a[0] >= self.hw_breakpoints:
             return BAD_ARG
         return None
 
@@ -227,7 +229,7 @@ class FakeFirmware:
             if op in self.fail_op:
                 return self._fail(op)
             info = struct.pack("<BBHI", self.version, self.state, MAX_DATA_BYTES, self.features)
-            return OK, info + (bytes([HW_BREAKPOINTS]) if self.version >= 2 else b"")
+            return OK, info + (bytes([self.hw_breakpoints]) if self.version >= 2 else b"")
         if op == 1:
             if bad_len:
                 return BAD_ARG, b""
@@ -417,7 +419,8 @@ class FakeFirmware:
         self.stop_reason = STOP_RESET if mode == 1 else STOP_REQUEST
         self.bp_hit = NO_BREAKPOINT
         identity = struct.pack("<BHIH", 0x91, 0x0106, 0x1A00, self.device_id)
-        return OK, identity + struct.pack("<IBB", self.regs[0], self.stop_reason, HW_BREAKPOINTS)
+        return OK, identity + struct.pack("<IBB", self.regs[0], self.stop_reason,
+                                          self.hw_breakpoints)
 
     def _stop(self, pc, reason):
         self.state = HALTED
@@ -435,11 +438,11 @@ class FakeFirmware:
         if self.lost_on_poll:
             self._end_debug(None)
             return TARGET_ERROR
-        self._polls += 1
+        self.polls += 1
         target = self.stop_at
         if target is None and self.breakpoints:
             target = self.breakpoints[min(self.breakpoints)]
-        if target is not None and self._polls >= self.run_polls:
+        if target is not None and self.polls >= self.run_polls:
             self._stop(target, STOP_BREAKPOINT)
         return None
 
@@ -460,7 +463,7 @@ class FakeFirmware:
             self.state = RUNNING_STATE
             self.stop_reason, self.bp_hit = STOP_NONE, NO_BREAKPOINT
             self.resumes += 1
-            self._polls = 0
+            self.polls = 0
             return OK, b""
         if op == 13:  # DBG_STATUS
             if self.state == RUNNING_STATE:

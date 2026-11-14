@@ -760,19 +760,36 @@ class GdbServer:
         them again on resume (by default it removes them at each stop, and
         none is set here). GDB keeps its register cache across a monitor
         command; GDB 9 has no "maintenance flush register-cache" (it runs
-        "maintenance flush-symbol-cache" by prefix match), flushregs works."""
+        "maintenance flush-symbol-cache" by prefix match), flushregs works.
+        A breakpoint that cannot be set again is named in the reply; its
+        slot stays free. A lost target ends the session as for any packet."""
         inserted = list(self.slots)
         self._attach(probe_mod.ATTACH_RESET)
-        again = 0
+        again, lost = 0, []
         for index, addr in enumerate(inserted):
-            if addr is not None and index < len(self.slots):
+            if addr is None:
+                continue
+            if index >= len(self.slots):
+                self.say(f"breakpoint at 0x{addr:05X}: the target has {len(self.slots)} "
+                         "hardware breakpoints now")
+                lost.append(addr)
+                continue
+            try:
                 self.probe.dbg_bp_set(index, addr)
-                self.slots[index] = addr
-                again += 1
+            except StatusError as e:
+                if e.status == probe_mod.STATUS_TARGET_ERROR:
+                    raise
+                self.say(f"breakpoint at 0x{addr:05X} not set again: {e}")
+                lost.append(addr)
+                continue
+            self.slots[index] = addr
+            again += 1
         rearmed = (f"; {again} hardware breakpoint{'s' if again > 1 else ''} set again"
                    if again else "")
         return (f"target reset, halted at 0x{self.stop_pc:05X}{rearmed}; "
-                "run 'flushregs' so that GDB reads the registers again\n")
+                "run 'flushregs' so that GDB reads the registers again\n" +
+                "".join(f"breakpoint at 0x{addr:05X} could not be set again; "
+                        "delete it and set it again\n" for addr in lost))
 
     def _monitor_read(self, args: list) -> str:
         """monitor read ADDR [WORDS]: inside the memory map and out of the BSL

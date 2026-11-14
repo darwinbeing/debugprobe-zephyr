@@ -373,6 +373,46 @@ class MonitorTest(ServerFixture):
         self.assertEqual(self.gdb.cmd("z1,4700,2"), "OK")
         self.assertEqual(self.fw.breakpoints, {})
 
+    def test_reset_names_the_breakpoints_it_could_not_set_again(self):
+        self.start()
+        self.assertEqual(self.gdb.cmd("Z1,4600,2"), "OK")
+        self.assertEqual(self.gdb.cmd("Z1,4700,2"), "OK")
+        self.fw.fail_op = {17: BAD_STATE}
+        text = self.monitor("reset")
+        self.assertIn("target reset, halted at 0x0441A; run 'flushregs'", text)  # no "set again"
+        for addr in ("0x04600", "0x04700"):
+            self.assertIn(f"breakpoint at {addr} could not be set again; "
+                          "delete it and set it again", text)
+        self.assertIn("DBG_BP_SET failed: BAD_STATE", self.out.getvalue())
+        self.assertEqual(self.fw.breakpoints, {})
+        # their slots are free: GDB's delete and a new insert work
+        self.fw.fail_op = {}
+        self.assertEqual(self.gdb.cmd("z1,4600,2"), "OK")
+        self.assertEqual(self.gdb.cmd("Z1,4600,2"), "OK")
+        self.assertEqual(self.fw.breakpoints, {0: 0x4600})
+
+    def test_reset_names_a_breakpoint_the_new_attach_has_no_trigger_for(self):
+        self.start()
+        self.assertEqual(self.gdb.cmd("Z1,4600,2"), "OK")
+        self.assertEqual(self.gdb.cmd("Z1,4700,2"), "OK")
+        self.fw.hw_breakpoints = 1
+        text = self.monitor("reset")
+        self.assertIn("target reset, halted at 0x0441A; 1 hardware breakpoint set again; "
+                      "run 'flushregs'", text)
+        self.assertIn("breakpoint at 0x04700 could not be set again; delete it and set it again",
+                      text)
+        self.assertEqual(self.fw.breakpoints, {0: 0x4600})
+
+    def test_a_target_lost_while_setting_breakpoints_again_ends_the_session(self):
+        self.start()
+        self.assertEqual(self.gdb.cmd("Z1,4600,2"), "OK")
+        self.fw.fail_op = {17: TARGET_ERROR}
+        self.assertEqual(self.gdb.cmd("qRcmd," + b"reset".hex()), "E03")
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        self.assertIn("target lost", self.out.getvalue())
+        self.assertEqual(self.fw.detaches, [0, 0])  # the reset's attach, then the session's end
+
 
 # ---- the addenda ----
 
