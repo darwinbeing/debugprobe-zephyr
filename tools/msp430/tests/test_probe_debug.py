@@ -384,7 +384,17 @@ class CommandTimeoutTest(unittest.TestCase):
         for op in self.SYNC_OPS:
             self.assertEqual(t[op], 28375, probe_mod.OP_NAMES[op])  # 3 s + 1.25 * 20.3 s
             self.assertGreater(t[op], 20300)
-        self.assertEqual(t[probe_mod.OP_DBG_ATTACH], 53750)       # 3 s + 1.25 * 2 * 20.3 s
+        # the first attach in a process: a session a previous process left
+        # open may run at 100 kHz, so 3 s + 1.25 * 2 * 50.75 s
+        self.assertEqual(t[probe_mod.OP_DBG_ATTACH], 129875)
+
+    def test_a_later_attach_counts_with_the_open_sessions_speed(self):
+        fw = TimedFirmware()
+        p = SbwProbe(fw)
+        p.dbg_attach(probe_mod.ATTACH_RUNNING, 250, 0x1C00, 0x4400)
+        p.dbg_attach(probe_mod.ATTACH_RUNNING, 250, 0x1C00, 0x4400)
+        self.assertEqual(fw.timeouts, [(probe_mod.OP_DBG_ATTACH, 129875),
+                                       (probe_mod.OP_DBG_ATTACH, 53750)])  # 3 s + 1.25 * 2 * 20.3 s
 
     def test_the_other_commands_keep_3_s(self):
         t = self.session(250)
@@ -398,7 +408,13 @@ class CommandTimeoutTest(unittest.TestCase):
         self.assertEqual(slow[probe_mod.OP_DBG_HALT], 66438)     # 3 s + 1.25 * 50.75 s
         self.assertEqual(slow[probe_mod.OP_DBG_ATTACH], 129875)
         self.assertEqual(fast[probe_mod.OP_DBG_HALT], 15000)     # 3 s + 1.25 * 5.1 s; the minimum
-        self.assertEqual(fast[probe_mod.OP_DBG_ATTACH], 15688)
+        # the first attach in a process counts with 100 kHz whatever its own speed
+        self.assertEqual(fast[probe_mod.OP_DBG_ATTACH], 129875)
+        fw = TimedFirmware()
+        p = SbwProbe(fw)
+        p.dbg_attach(probe_mod.ATTACH_RUNNING, 1000, 0x1C00, 0x4400)
+        p.dbg_attach(probe_mod.ATTACH_RESET, 1000, 0x1C00, 0x4400)
+        self.assertEqual(fw.timeouts[1], (probe_mod.OP_DBG_ATTACH, 15688))
 
     def test_an_attach_detaches_the_open_session_at_its_own_speed(self):
         fw = TimedFirmware()

@@ -62,9 +62,10 @@ READ_SIZE = 4096  # bytes asked of the IN endpoint per read
 # 20.3 s at 250 kHz, 50.8 s at 100 kHz. Those commands wait that long per
 # sync at the session's SBW speed, a quarter more, plus TIMEOUT_MS, and at
 # least SYNC_TIMEOUT_MIN_MS. DBG_ATTACH may sync twice: it first ends an open
-# debug session (a running CPU is halted). DBG_HALT, DBG_STEP, DBG_STATUS (on
-# a breakpoint stop) and DBG_DETACH (of a running CPU) sync once; DBG_RESUME
-# only releases the CPU.
+# debug session (a running CPU is halted), at that session's speed, which the
+# first attach of a process does not know (it counts with MIN_SPEED_KHZ).
+# DBG_HALT, DBG_STEP, DBG_STATUS (on a breakpoint stop) and DBG_DETACH (of a
+# running CPU) sync once; DBG_RESUME only releases the CPU.
 TIMEOUT_MS = 3000
 SYNC_TIMEOUT_MIN_MS = 15000
 SYNC_WORST_CYCLES = 1_450_000
@@ -395,8 +396,10 @@ class SbwProbe:
         """Attach without reset (ATTACH_RUNNING) or reset and halt (ATTACH_RESET).
         ram_lo/ram_hi: the RAM a read-only session may write (the probe narrows
         it to the RAM it knows for the device)."""
-        # an open debug session is ended at its own speed first
-        slowest = min(speed_khz, self.debug_khz or speed_khz)
+        # An open debug session is ended at its own speed first. Before this
+        # process's first attach that speed is unknown (a session an earlier
+        # process left open may run at the slowest): count with MIN_SPEED_KHZ.
+        slowest = min(speed_khz, self.debug_khz or MIN_SPEED_KHZ)
         self.debug_khz = speed_khz
         data = self._cmd(OP_DBG_ATTACH, struct.pack("<BBHII", mode, 0, speed_khz, ram_lo, ram_hi),
                          speed_khz=slowest)

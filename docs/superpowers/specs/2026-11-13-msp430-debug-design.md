@@ -427,7 +427,10 @@ already worked into the text above; the others take precedence over it.
     need at worst: 3 s for most, and for `DBG_ATTACH`, `DBG_HALT`,
     `DBG_STEP`, `DBG_STATUS` and `DBG_DETACH`, which can sync with the CPU,
     the worst case of the sync's loops at the session's SBW speed (about
-    20 s per sync at 250 kHz) with a margin.
+    20 s per sync at 250 kHz) with a margin. `DBG_ATTACH` counts its first
+    sync, which ends an open session, at the slower of its own speed and
+    that session's; the first attach of a process does not know the speed
+    of a session an earlier process left open and counts with 100 kHz.
 
 ## Corrections made after B1 (2026-11-13)
 
