@@ -72,7 +72,9 @@
  *    link. After a failed sync (the context not saved): EEM control 0x0006,
  *    IR_CNTRL_SIG_RELEASE and the pins released, nothing written to the
  *    target's memory (abandon(), as for a lost target below). In
- *    detach(Run) the context is saved: the CPU has been fed instructions,
+ *    detach(Run), where the check is made a second time when it fails (one
+ *    bad capture on a healthy link must not cost a reset), the context is
+ *    saved: the CPU has been fed instructions,
  *    holds the watchdog (WDTHOLD) and has GIE cleared, and its PC is
  *    wherever JTAG left it (0x0004 after read_regs' safe-PC step, for
  *    example); let go there, it would hang until reset if only the link's
@@ -846,8 +848,9 @@ Status Debugger::detach(DetachAction action)
 	Status st = Status::Ok;
 	if (action == DetachAction::Reset) {
 		release_with_reset();
-	} else if (!cpu_.in_full_emulation()) {
-		/* Nothing restored over a link that fails its check: SR, WDTCTL and
+	} else if (!cpu_.in_full_emulation() && !cpu_.in_full_emulation()) {
+		/* Nothing restored over a link that fails its check twice in a row
+		 * (one bad capture on a healthy link does not count): SR, WDTCTL and
 		 * the PC are not fed. The context is saved, so the CPU has been
 		 * fed instructions and holds the watchdog with GIE cleared; let go
 		 * where it is, it would run on from whatever PC JTAG left if only

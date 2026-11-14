@@ -57,8 +57,9 @@ public:
 	 * Then the triggers are cleared and the EEM sequencer is turned off, and
 	 * Run: the link check, then the context (SR, WDTCTL, PC) is restored and
 	 * the program continues where it stopped, EEM off; Ok. If the link check
-	 * fails (after a TargetError from a memory, register or breakpoint
-	 * access, for example), nothing is restored over the link: the EEM is
+	 * fails twice in a row (after a TargetError from a memory, register or
+	 * breakpoint access, for example; one bad capture does not count),
+	 * nothing is restored over the link: the EEM is
 	 * turned off and the CPU gets a power-on reset through the control
 	 * signal (as with Reset; nothing written to its memory, no instruction
 	 * fed), so the firmware restarts instead of running on from wherever

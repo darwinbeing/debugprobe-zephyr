@@ -663,7 +663,8 @@ TEST(debugger_reset_and_halt_with_a_late_dead_link_resets_again)
 	CHECK(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::TargetError);
 	CHECK(f.scripts_consumed());
 	CHECK(!f.d.attached());
-	const Log want = Log{"ir:28", "dr16:0000"} + clear_triggers() + link_check() + kResetRelease;
+	const Log want = Log{"ir:28", "dr16:0000"} + clear_triggers() + link_check() + link_check() +
+			 kResetRelease;
 	CHECK_LOG(last(f.t.log, want.size()), want);
 	/* the only memory writes are the sync's: the watchdog hold */
 	for (const auto &w : f.t.mem_writes) {
@@ -953,7 +954,36 @@ TEST(debugger_detach_after_a_dead_link_resets_instead_of_restoring)
 		CHECK(f.d.stop_reason() == StopReason::None);
 		CHECK(f.t.mem_writes.empty());
 		CHECK(f.t.cpu_words.empty()); /* no SR or PC fed */
-		CHECK_LOG(f.t.log, clear_triggers() + link_check(!id_lost) + kResetRelease);
+		/* two failed link checks in a row, then the reset */
+		CHECK_LOG(f.t.log, clear_triggers() + link_check(!id_lost) + link_check(!id_lost) +
+					   kResetRelease);
+	}
+}
+
+/* One bad capture on a healthy link is not a failed link: the reset needs
+ * two failed checks in a row. A glitched control-signal capture, or a
+ * glitched JTAG ID capture, in the first check before the restore: the
+ * second passes and the context is restored as usual, no reset. */
+TEST(debugger_detach_restores_the_context_after_one_glitched_check)
+{
+	for (const bool id_glitch : {false, true}) {
+		Fx f;
+		f.attached();
+		if (id_glitch) {
+			/* clear_triggers' IR scan, then the first check's capture */
+			f.t.jtag_id_script = {0x91, 0x48};
+		} else {
+			f.t.cntrl_sig_script = {0x0000};
+		}
+		CHECK(f.d.detach(DetachAction::Run) == Status::Ok);
+		CHECK(f.scripts_consumed());
+		CHECK(f.t.jtag_id_script.empty());
+		CHECK(!f.d.attached());
+		CHECK_LOG(f.t.log, clear_triggers() + link_check(!id_glitch) + link_check() +
+					   restore_release(0x4520, 0x0008, 0x6904, 0x0006) + Log{"close"});
+		CHECK(!contains(f.t.log, Log{"dr16:0c01"})); /* no reset */
+		REQUIRE(f.t.mem_writes.size() == 1u);
+		CHECK(f.t.mem_writes[0] == (std::pair<uint32_t, uint16_t>{0x015C, 0x5A04}));
 	}
 }
 
@@ -988,7 +1018,7 @@ TEST(debugger_attach_with_a_late_dead_link_resets)
 	CHECK(f.scripts_consumed());
 	CHECK(!f.d.attached());
 	const Log want = clear_triggers() + link_check() + clear_triggers() + link_check() +
-			 kResetRelease;
+			 link_check() + kResetRelease;
 	CHECK_LOG(last(f.t.log, want.size()), want);
 	/* the only memory write is the sync's watchdog hold */
 	REQUIRE(f.t.mem_writes.size() == 1u);

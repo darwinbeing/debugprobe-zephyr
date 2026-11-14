@@ -1116,7 +1116,7 @@ TEST(session_dbg_detach)
 		f.tap.cntrl_sig = 0x0000;
 		CHECK_BYTES(f.run({0x90, 0x0A, 0x00}), kTargetError);
 		CHECK(f.s.state() == State::Idle);
-		CHECK_LOG(f.tap.log, clear_triggers() + link_check() + kResetRelease);
+		CHECK_LOG(f.tap.log, clear_triggers() + link_check() + link_check() + kResetRelease);
 		CHECK(f.tap.mem_writes.empty()); /* no WDTCTL restore */
 		CHECK(f.tap.cpu_words.empty());  /* no SR or PC fed */
 		f.tap.log.clear();
@@ -1131,6 +1131,29 @@ TEST(session_dbg_detach)
 		CHECK_BYTES(f.run({0x90, 0x0A, 0x01}), kOk);
 		CHECK(f.s.state() == State::Idle);
 		CHECK_LOG(f.tap.log, clear_triggers() + kResetRelease);
+	}
+}
+
+/* One glitched capture during DBG_DETACH 0 on a healthy link: the second
+ * link check passes, the context is restored, OK, no reset. */
+TEST(session_dbg_detach_restores_the_context_after_one_glitched_check)
+{
+	for (const bool id_glitch : {false, true}) {
+		Fx f;
+		f.attach();
+		if (id_glitch) {
+			f.tap.jtag_id_script = {0x91, 0x48}; /* clear_triggers' IR scan, the check */
+		} else {
+			f.tap.cntrl_sig_script = {0x0000};
+		}
+		CHECK_BYTES(f.run({0x90, 0x0A, 0x00}), kOk);
+		CHECK(f.s.state() == State::Idle);
+		CHECK(f.tap.jtag_id_script.empty());
+		CHECK(f.tap.cntrl_sig_script.empty());
+		CHECK(!log_has(f.tap, "dr16:0c01"));
+		CHECK_LOG(f.tap.log, clear_triggers() + link_check(!id_glitch) + link_check() +
+					     restore_release(0x4520, 0x0008, 0x6904, 0x0006) +
+					     Log{"close"});
 	}
 }
 
@@ -1361,7 +1384,8 @@ TEST(session_target_error_on_a_dead_link_resets_instead_of_restoring)
 		CHECK(f.s.state() == State::Idle);
 		CHECK(f.tap.mem_writes.empty());
 		CHECK(f.tap.cpu_words.empty()); /* no SR or PC fed */
-		const Log tail = clear_triggers() + link_check(!id_lost) + kResetRelease;
+		const Log tail = clear_triggers() + link_check(!id_lost) + link_check(!id_lost) +
+				 kResetRelease;
 		CHECK_LOG(last(f.tap.log, tail.size()), tail);
 		CHECK_EQ(count_log(f.tap, "close"), 1u);
 		f.tap.log.clear();
