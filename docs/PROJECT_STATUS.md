@@ -273,34 +273,37 @@ Design: `docs/superpowers/specs/2026-11-13-msp430-debug-design.md`; plan:
 `docs/superpowers/plans/2026-11-13-msp430-debug-b1.md`; user guide:
 `docs/MSP430_DEBUG.md`; TI's licence notice: `THIRD_PARTY_NOTICES.md`.
 
-**Status: implemented and tested on the host only.** Nothing of this phase has
-run on a target. The server has been driven by scripted GDB clients and by
-`msp430-elf-gdb` 9.1 (installed in plan Task 22), both against a fake probe.
+**Status: implemented, host-tested, and accepted on the target (rpi_pico +
+MSP430F5529 board, 2026-11-13, read-only).** The server has been driven by
+scripted GDB clients and by `msp430-elf-gdb` 9.1 (installed in plan Task 22)
+against a fake probe, and by `msp430-elf-gdb` 9.1 on the board.
 
 | Axis | Status |
 |---|---|
 | Host tests | 384/384 C++ (`scripts/run_host_tests.sh`, also under ASan); 431 Python, 13 of them skipped without msp430-elf-gdb (`python3 -m unittest discover -s tools/msp430/tests`) |
 | 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on: rebuilt 2026-11-13 after the last firmware changes (`a3cb815`, `DBG_EEM_PEEK`; `7d624be`, the reset when the link check before a detach's restore fails; `1210beb`, only after two failed checks in a row; `7bfa278`, the bootcode area and the device ID read with TI's quick read), all three boards; rpi_pico with `CONFIG_PROBE_MSP430_SBW=n`: built at Task 15, and nothing that configuration compiles has changed since |
 | End-to-end with GDB | ✓ 2026-11-13, GNU gdb (Mitto Systems Limited - msp430-gcc 9.3.1.11) 9.1: connect, registers, breakpoint by symbol, stepi, memory, refusals (tools/msp430/tests/test_gdb_e2e.py); also `X` escaping, breakpoints after `monitor reset` (also with `always-inserted on`, which needed a server fix) and `flushregs`, console notes before stop replies, Ctrl-C during `stepi 1000` and `next` (stops after the step under way), SIGLOST, `load`, reads and writes GDB's memory map refuses itself, register names, `break NAME` after a `PUSHM.A` prologue and `break *NAME` at the first instruction |
-| On-target hardware | **Not run yet** — see the acceptance table below |
+| On-target hardware | ✓ 2026-11-13, rpi_pico probe on the MSP430F5529 board, read-only: every step of the acceptance table below; flash and information memory unchanged. One defect found and fixed on the way (the device ID and the bootcode area read with TI's quick read, `7bfa278`; the probe was re-flashed and the steps from the first GDB attach repeated) |
 
 ### Phase 7 hardware acceptance (rpi_pico + MSP430F5529 board, read-only)
 
 Main flash and information memory are compared with the Phase 6 backups
-before the first step and after the last. Nothing below has been run.
+before the first step and after the last. Run 2026-11-13 with the user at the
+board; firmware-specific details (function names, addresses in the target's
+firmware) are kept in the local acceptance notes, not here.
 
 | # | Step | Result |
 |---|---|---|
-| 0 | Flash and information memory equal the backups before the session | — |
-| 1 | `sbw.py info` shows protocol version 2, debugging supported, 8 hardware breakpoints | — |
-| 1a | `sbw.py eem-peek` at EEM 0x00, 0x02, 0x04, 0x06, at 250 and 100 kHz: JTAG ID 0x91 and both reads equal each time (the 32-bit scans, read-only, before the first attach) | — |
-| 1b | VMAIE (0 per the local notes) confirmed after the attach; VMAIFG after the attach and after one register read | — |
-| 2 | Attach without reset, read registers, detach: the firmware keeps running | — |
-| 3 | Halt and resume 50 times while it runs; it keeps working; whether a timer runs while halted | — |
-| 4 | Hardware breakpoint on a function by symbol; the firmware reaches it and stops there; step, inspect, continue | — |
-| 5 | Reset and halt at the reset vector, step through the start-up, continue | — |
-| 6 | Refusals: `load`, a write into flash, a software breakpoint | — |
-| 7 | Flash and information memory equal the backups after the session | — |
+| 0 | Flash and information memory equal the backups before the session | ✓ 2026-11-13: `verified` for both (main flash 25 s at 250 kHz) |
+| 1 | `sbw.py info` shows protocol version 2, debugging supported, 8 hardware breakpoints | ✓ 2026-11-13: both lines as expected (JTAG ID 0x91, core ID 0x0103, device ID 55h 29h) |
+| 1a | `sbw.py eem-peek` at EEM 0x00, 0x02, 0x04, 0x06, at 250 and 100 kHz: JTAG ID 0x91 and both reads equal each time (the 32-bit scans, read-only, before the first attach) | ✓ 2026-11-13: all 8 runs `0x00000000 0x00000000 (equal)`, JTAG ID 0x91 after each (trigger blocks in their reset state) |
+| 1b | VMAIE (0 per the local notes) confirmed after the attach; VMAIFG after the attach and after one register read | ✓ 2026-11-13: SFRIE1 0x0000 (VMAIE 0); SFRIFG1 0x0088 after the attach and after one register read (VMAIFG 1 -> 1, set by the attach's own SR save, harmless with VMAIE 0); PC in main flash, SP in RAM; detached, firmware running |
+| 2 | Attach without reset, read registers, detach: the firmware keeps running | ✓ 2026-11-13 (second run, after `7bfa278`): `attached to MSP430F5529 without reset`, PC in main flash, SP in RAM, `x/4i` plausible, `detached; the program continues where it stopped`; the user confirmed normal operation. The first run had stopped: the attach reported device ID bytes FFh 3Fh, because the bootcode area 0x1A00-0x1AFF reads 0x3FFF with the address-register read (confirmed by a read-only diagnostic; all other areas matched the backups); TI reads it with ReadMemQuick, now so do we (spec correction 27) |
+| 3 | Halt and resume 50 times while it runs; it keeps working; whether a timer runs while halted | ✓ 2026-11-13: 51 PCs, all even and in main flash (every stop found the CPU in the firmware's low-power idle loop); TB0R constant over 1 s while halted after 51 stops (not conclusive: those stops were all in LPM4, where its clock is off anyway); the user confirmed normal operation |
+| 4 | Hardware breakpoint on a function by symbol; the firmware reaches it and stops there; step, inspect, continue | ✓ 2026-11-13: `break *NAME` on the key-press function (local notes), GDB chose a hardware breakpoint by itself; one key press stopped it exactly at the function's first instruction; SR 0x0008 (GIE); the first `stepi` ended at the first instruction of the Timer0_B CCR0 handler (vector 0xFFF6: GIE set, a tick pending, as documented), the second at the next instruction; a RAM variable read; `continue`, Ctrl-C, detach; normal operation confirmed |
+| 5 | Reset and halt at the reset vector, step through the start-up, continue | ✓ 2026-11-13: `target reset, halted at 0x0441A` (the backup's reset vector), `flushregs`, start-up code shown, three `stepi` along the start-up path; `continue` restarted the firmware (startup screen, then normal operation) |
+| 6 | Refusals: `load`, a write into flash, a software breakpoint | ✓ 2026-11-13: write to 0x4400 `Cannot access memory` (GDB itself); `load` `Load failed` (no packet sent); `break *0x2400` + `continue` `Cannot insert breakpoint 1 … Command aborted`, target stayed halted, server `refused: software breakpoints are not allowed in read-only mode`; `monitor mode full` refused (B2) |
+| 7 | Flash and information memory equal the backups after the session | ✓ 2026-11-13: `verified` for both |
 
 ---
 
@@ -314,6 +317,7 @@ before the first step and after the last. Nothing below has been run.
 - UART bridge + serial (phase 4-core): loopback echo both directions; serial from hwinfo propagated to DAP_Info and USB iSerialNumber.
 - Autobaud apply path (phase 4b): MAGIC_BAUD sentinel + 4 KB stack overflow + race fixes all hold.
 - MSP430F5529 Spy-Bi-Wire (phase 6, rpi_pico, 2026-11-11): identify, RAM self-test, read, segment erase, mass erase, program and verify at 250, 500 and 1000 kHz; details in the Phase 6 section.
+- MSP430F5529 debugging, read-only (phase 7, rpi_pico, 2026-11-13): 32-bit EEM scans, attach without reset, 50 halt/resume cycles, a hardware breakpoint hit by a key press, single steps, reset and halt, every read-only refusal, with `msp430-elf-gdb` 9.1; flash unchanged; details in the Phase 7 section.
 - Conformance A/B (phase 5): 26 protocol-deterministic byte-identical + 1 environment-dependent (`swj_pins_read`, matched) + 4 whitelisted enhancements (3 DAP_Info strings + DAP packet size 64→1024), 0 unexpected mismatches vs official v2.3.1 (`compare` → 27 identical / 4 whitelisted → PASS).  **Live on-hardware A/B done 2026-06-12** — official firmware captured live, byte-for-byte identical to the source-derived prediction on all 31 commands; packet-size bump re-captured 2026-06-13.
 - **Full openocd debug acceptance (phase 5, rpi_pico/PIO, 2026-06-12): ✓ PASS** against a live RP2040 target — multidrop connect (`DPIDR 0x0bc12477`, Cortex-M0+ detected), `reset halt`, single-step, memory read, RAM write+readback (3 locations), flash erase+program+verify (top sector), and `reset run` all pass. Also verified attaching to a **running** target (connect → halt → resume), confirming the probe is not BOOTSEL-limited. The earlier connect failure was the target not being live on the bus (the garbage `DPIDR 0x10212927` was a misread), not a probe-firmware issue.
 
@@ -336,9 +340,9 @@ before the first step and after the last. Nothing below has been run.
 
 4. **MSP430 Spy-Bi-Wire on rpi_pico2 and rpi_debug_probe** — built, not run.
 
-5. **MSP430 debugging (phase 7)** — host-tested only, also with
-   `msp430-elf-gdb` 9.1 against the fake probe; needs the on-target
-   acceptance above (Task 25).
+5. **MSP430 debugging (phase 7)** — accepted on rpi_pico with the
+   MSP430F5529 board (read-only, 2026-11-13); not run on rpi_pico2 or
+   rpi_debug_probe; full mode (B2) not implemented.
 
 ---
 

@@ -285,9 +285,11 @@ error, according to the comments in TI's USB API.
   low-power mode or one that is already stopped leaves the clocks as they
   were. Timers clocked from them stop too. TI's
   stack also sets per-module clock control from its device database; this
-  port leaves that out, so the modules keep their reset defaults. Whether
-  Timer0_B runs while halted is to be measured in the acceptance, Phase 7 in
-  `docs/PROJECT_STATUS.md`.
+  port leaves that out, so the modules keep their reset defaults. On the
+  acceptance board (2026-11-13) Timer0_B's counter stayed constant over one
+  second while halted, but every one of those stops found the CPU in LPM4,
+  where its clock is off anyway; whether it runs while a CPU halted outside a
+  low-power mode is not measured (Phase 7 in `docs/PROJECT_STATUS.md`).
 - A CPU in a low-power mode is taken over without waking it; its status
   register is restored on resume.
 - The probe answers memory and register requests only while the CPU is
