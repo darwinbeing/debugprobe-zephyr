@@ -57,7 +57,10 @@ public:
 	 * closes the session (the target is in an unknown state and the pins are
 	 * released); the host has to connect again. In a debug session the
 	 * Debugger may already have let the CPU go and released the pins; then
-	 * nothing more is sent. */
+	 * nothing more is sent.
+	 * DBG_EEM_PEEK is accepted in Idle only (BAD_STATE elsewhere, nothing
+	 * sent) and leaves the session Idle whatever it returns: it releases
+	 * the pins itself (Debugger::eem_peek). */
 	size_t handle(std::span<const uint8_t> request, std::span<uint8_t> response);
 
 	/* Close an open session (USB loss, SWD takeover, a new CONNECT). Safe
@@ -98,6 +101,7 @@ private:
 	Status op_dbg_write_reg(In args);
 	Status op_dbg_bp_set(In args);
 	Status op_dbg_bp_clear(In args);
+	Status op_dbg_eem_peek(In args, Out out, size_t &n);
 
 	bool debugging() const
 	{

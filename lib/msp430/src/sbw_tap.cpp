@@ -118,6 +118,9 @@ void SbwTap::reset()
  * calls. Between two calls SBWTCK stays high and the TAP waits in whatever
  * state the last cycle of the earlier call left it (Shift-DR for the 32-bit
  * DR scan); SBW limits only the low phase of SBWTCK, not the high phase.
+ * On the pins this is the same wait as between two scans: sbw.pio stalls at
+ * `pull block side 1` with SBWTDIO driven at the last TDI level (here data
+ * bit 3), and the next call starts with a TMS slot.
  */
 uint32_t SbwTap::scan(bool ir, unsigned nbits, uint32_t data)
 {

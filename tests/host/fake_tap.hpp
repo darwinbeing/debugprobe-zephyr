@@ -47,6 +47,9 @@ public:
 	 * stored one: a register the chip lacks, or bits it adds. Writes are
 	 * stored as before. */
 	std::map<uint8_t, uint32_t> eem_read_as;
+	/* Consumed first, one per EEM register read, in place of what the
+	 * register reads (eem_read_as, eem). */
+	std::deque<uint32_t> eem_read_script;
 
 	/* --- debug-layer model (msp430::Debugger) --- */
 	static constexpr uint32_t kWdtctl = 0x015C;
@@ -311,6 +314,9 @@ private:
 		eem_addr_pending_ = false;
 		const uint8_t reg = static_cast<uint8_t>(eem_addr_ & 0xFEu);
 		if ((eem_addr_ & 1u) != 0) {
+			if (!eem_read_script.empty()) {
+				return pop(eem_read_script, 0);
+			}
 			const auto as = eem_read_as.find(reg);
 			if (as != eem_read_as.end()) {
 				return as->second;

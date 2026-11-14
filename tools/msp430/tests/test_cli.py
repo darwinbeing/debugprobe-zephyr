@@ -782,5 +782,112 @@ class GdbServerCliTest(unittest.TestCase):
                                       sbw_op(probe_mod.OP_DISCONNECT)])
 
 
+class EemPeekCliTest(unittest.TestCase):
+    """sbw.py eem-peek: DBG_EEM_PEEK, the read-only check of the 32-bit SBW
+    path (design spec correction 25). No CONNECT: the target is not reset."""
+
+    PEEK = sbw_op(probe_mod.OP_DBG_EEM_PEEK)
+
+    def peek(self, argv, fw):
+        t = Recorder(fw)
+        out, err = io.StringIO(), io.StringIO()
+        code = sbw.main(argv, transport=t, out=out, err=err)
+        return code, out.getvalue(), err.getvalue(), t.commands
+
+    def test_prints_the_jtag_id_and_both_reads(self):
+        fw = FakeFirmware()
+        fw.eem[0x00] = 0x0004402A
+        code, out, err, commands = self.peek(["eem-peek"], fw)
+        self.assertEqual((code, out, err),
+                         (0, "JTAG ID 0x91; EEM 0x00: 0x0004402A 0x0004402A (equal)\n", ""))
+        # DAP_Disconnect, INFO and the peek: no CONNECT, DISCONNECT or debug session
+        self.assertEqual(commands, [DAP_DISCONNECT, sbw_op(probe_mod.OP_INFO), self.PEEK])
+        self.assertEqual((fw.peeks, fw.connects, fw.attaches, fw.state), ([(250, 0x00)], [], [], 0))
+        self.assertTrue(fw.closed)
+
+    def test_two_different_reads_exit_1(self):
+        fw = FakeFirmware()
+        fw.eem[0x06] = 0x00000001
+        fw.peek_glitch = 0x80000001
+        code, out, err, _ = self.peek(["eem-peek", "--addr", "0x06"], fw)
+        self.assertEqual((code, out),
+                         (1, "JTAG ID 0x91; EEM 0x06: 0x00000001 0x80000001 (different)\n"))
+        self.assertEqual(err, "error: the two reads of EEM register 0x06 differ: the 32-bit SBW "
+                              "path is not reliable at 250 kHz\n")
+        self.assertTrue(fw.closed)
+
+    def test_address_and_speed(self):
+        fw = FakeFirmware()
+        fw.eem[0x3E] = 0xFFFFFFFF
+        code, out, _, _ = self.peek(["eem-peek", "--addr", "0x3E", "--speed", "500"], fw)
+        self.assertEqual((code, out),
+                         (0, "JTAG ID 0x91; EEM 0x3E: 0xFFFFFFFF 0xFFFFFFFF (equal)\n"))
+        self.peek(["--speed", "100", "eem-peek", "--addr", "6"], fw)  # the global speed
+        self.peek(["--speed", "100", "eem-peek", "--speed", "1000"], fw)  # its own wins
+        self.assertEqual(fw.peeks, [(500, 0x3E), (100, 0x06), (1000, 0x00)])
+
+    def refused_by_argparse(self, argv):
+        t = Recorder(FakeFirmware())
+        argparse_err = io.StringIO()
+        with contextlib.redirect_stderr(argparse_err):
+            with self.assertRaises(SystemExit) as cm:
+                sbw.main(argv, transport=t)
+        self.assertEqual((cm.exception.code, t.commands), (2, []), argv)
+        return argparse_err.getvalue()
+
+    def test_bad_addresses_and_speeds_are_refused_before_anything_is_sent(self):
+        for addr in ("1", "0x3F", "0x40", "0x80", "-2", "256", "ten"):
+            self.assertIn("--addr", self.refused_by_argparse(["eem-peek", "--addr", addr]))
+        self.assertIn("even, 0x00-0x3E", self.refused_by_argparse(["eem-peek", "--addr", "0x41"]))
+        for speed in ("99", "1001", "fast"):
+            self.assertIn("--speed", self.refused_by_argparse(["eem-peek", "--speed", speed]))
+
+    def test_no_target_is_tried_four_times(self):
+        fw = FakeFirmware()
+        fw.peek_no_target = 3
+        code, out, _, commands = self.peek(["eem-peek"], fw)
+        self.assertEqual(code, 0)
+        self.assertEqual(commands.count(self.PEEK), 4)
+        self.assertIn("(equal)", out)
+        fw = FakeFirmware()
+        fw.peek_no_target = 4
+        code, out, err, commands = self.peek(["eem-peek"], fw)
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(commands.count(self.PEEK), 4)
+        self.assertEqual(err, "error: no MSP430 found (JTAG ID read as 0xFF); check the wiring and "
+                              "the target supply, or try a lower --speed\n")
+        self.assertTrue(fw.closed)
+
+    def test_other_failures_exit_1(self):
+        fw = FakeFirmware()
+        fw.peek_status = probe_mod.STATUS_LOCKED
+        code, _, err, commands = self.peek(["eem-peek"], fw)
+        self.assertEqual((code, commands.count(self.PEEK)), (1, 1))
+        self.assertEqual(err, "error: the device's JTAG lock key is programmed\n")
+        fw = FakeFirmware()
+        fw.peek_status = TARGET_ERROR
+        code, _, err, _ = self.peek(["eem-peek"], fw)
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "error: DBG_EEM_PEEK failed: TARGET_ERROR (the link failed: no core "
+                              "ID, or the JTAG ID was not 0x91 before or after the 32-bit reads)\n")
+        for state in (probe_mod.STATE_CONNECTED, probe_mod.STATE_DEBUG_HALTED):
+            fw = FakeFirmware()
+            fw.state = state
+            code, _, err, _ = self.peek(["eem-peek"], fw)
+            self.assertEqual(code, 1)
+            self.assertIn("DBG_EEM_PEEK failed: BAD_STATE (the probe holds a programming or debug "
+                          "session)", err)
+            self.assertEqual(fw.state, state)
+
+    def test_probes_without_debugging_are_refused_after_info(self):
+        for version, features in ((1, 1), (3, 3), (2, 1)):
+            fw = FakeFirmware(version=version, features=features)
+            code, _, err, commands = self.peek(["eem-peek"], fw)
+            self.assertEqual((code, commands), (1, [DAP_DISCONNECT, sbw_op(probe_mod.OP_INFO)]))
+            self.assertTrue(err.startswith("error: "))
+            self.assertIn("debugging", err)
+            self.assertTrue(fw.closed)
+
+
 if __name__ == "__main__":
     unittest.main()

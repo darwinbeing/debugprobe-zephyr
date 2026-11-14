@@ -32,6 +32,9 @@ enum class Op : uint8_t {
 	DbgWriteReg = 0x10,
 	DbgBpSet = 0x11,
 	DbgBpClear = 0x12,
+	/* Outside a debug session: a read-only check of the 32-bit DR path
+	 * (design spec correction 25). */
+	DbgEemPeek = 0x13,
 };
 
 enum class Status : uint8_t {
@@ -71,6 +74,10 @@ inline constexpr unsigned kHwBreakpoints = 8;
 inline constexpr uint8_t kNoBreakpoint = 0xFF; /* DBG_STATUS breakpoint_index: no breakpoint hit */
 inline constexpr uint8_t kAllBreakpoints = 0xFF; /* DBG_BP_CLEAR index: every breakpoint */
 static_assert(kHwBreakpoints < kNoBreakpoint, "a real breakpoint index is never 0xFF");
+/* DBG_EEM_PEEK reads only the even EEM addresses 0x00 to this one: the value,
+ * control, mask and combination registers of trigger blocks 0-7, whose reads
+ * have no side effects. */
+inline constexpr uint8_t kEemPeekLastAddr = 0x3E;
 
 inline constexpr uint16_t kMinSpeedKhz = 100;
 inline constexpr uint16_t kMaxSpeedKhz = 1000;

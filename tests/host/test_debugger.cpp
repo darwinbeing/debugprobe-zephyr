@@ -2432,6 +2432,12 @@ TEST(debugger_never_writes_flash)
 	f.t.memory[0x4404] = 0x40B2;
 	f.t.memory[0x4406] = 0x5A80;
 
+	/* the read-only peek at an EEM register, before any session */
+	uint32_t peek[2] = {};
+	CHECK(f.d.eem_peek(0x00, 250000, f.id, peek) == Status::Ok);
+	CHECK(f.t.eem_writes.empty());
+	CHECK_LOG(f.faults(), Log{});
+
 	/* reset and halt, detach */
 	REQUIRE(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::Ok);
 	CHECK_LOG(f.faults(), Log{});
@@ -2586,4 +2592,205 @@ TEST(debugger_never_writes_flash)
 	}
 	CHECK_LOG(other_irs, Log{});
 	CHECK(f.t.jmb_in.empty()); /* nothing fed to a funclet */
+}
+
+/* ---- DBG_EEM_PEEK (design spec correction 25) ---- */
+
+namespace {
+
+/* Debugger::eem_peek on a healthy link: Cpuxv2::identify() as attach() runs
+ * it, IR_EMEX_DATA_EXCHANGE32 (its JTAG ID checked), the register read twice
+ * with EemDataExchangeXv2's read framing (address with the read bit, then
+ * 32 bits out), the JTAG ID captured once more, the pins released. */
+Log eem_peek_log(unsigned reg)
+{
+	return identify_log() + Log{ir(0xB0)} + eem_read(reg) + eem_read(reg) +
+	       Log{ir(0x28), "close"};
+}
+
+} // namespace
+
+TEST(debugger_eem_peek_reads_the_register_twice_and_writes_nothing)
+{
+	Fx f;
+	f.t.eem_read_script = {0x0004402A, 0x8000FFFE};
+	uint32_t v[2] = {1, 2};
+	CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::Ok);
+	CHECK_LOG(f.t.log,
+		  Log{"speed:250000", "open", "enter:high", "ir:28",          /* entry, JTAG ID */
+		      "ir:28", "dr16:aaaa", "ir:28", "dr16:aaaa", "ir:28", "dr16:aaaa", /* lock */
+		      "ir:e8", "dr16:0000", "ir:e1", "dr20:00000",           /* core ID, ID pointer */
+		      "ir:b0", "dr32:00000001", "dr32:00000000",             /* first read */
+		      "dr32:00000001", "dr32:00000000",                      /* second read */
+		      "ir:28", "close"});
+	CHECK_LOG(f.t.log, eem_peek_log(0x00));
+	CHECK_EQ(v[0], 0x0004402Au); /* each read answered in turn */
+	CHECK_EQ(v[1], 0x8000FFFEu);
+	CHECK(f.t.eem_read_script.empty());
+	CHECK_EQ(f.id.jtag_id, 0x91);
+	CHECK_EQ(f.id.core_id, 0x0106);
+	CHECK_EQ(f.id.device_id_ptr, 0x1A00u);
+	/* Read-only: nothing written to memory, to an EEM register or to the EEM
+	 * control, nothing fed to the CPU or the mailbox, no TCLK edge, and no
+	 * IR_CNTRL_SIG_16BIT, the only instruction that writes the control
+	 * signal (JTAG mode, halt, sync, reset). The CPU is not touched. */
+	CHECK(f.t.mem_writes.empty());
+	CHECK(f.t.eem_writes.empty());
+	CHECK(f.t.eem_control_writes.empty());
+	CHECK(f.t.cpu_words.empty());
+	CHECK(f.t.jmb_in.empty());
+	for (const std::string &e : f.t.log) {
+		CHECK(e != ir(msp430::kIrCntrlSig16Bit));
+		CHECK(e != ir(msp430::kIrEmexWriteControl));
+		CHECK(e != ir(msp430::kIrCntrlSigRelease));
+		CHECK(e.compare(0, 5, "tclk:") != 0);
+	}
+	CHECK_LOG(f.faults(), Log{}); /* unexpected_instruction among them */
+	CHECK(!f.d.attached());
+}
+
+TEST(debugger_eem_peek_reads_the_trigger_block_registers_only)
+{
+	for (unsigned reg = 0; reg <= 0x3E; reg += 2) {
+		Fx f;
+		f.t.eem[static_cast<uint8_t>(reg)] = 0x10000u + reg;
+		uint32_t v[2] = {};
+		CHECK(f.d.eem_peek(static_cast<uint8_t>(reg), 250000, f.id, v) == Status::Ok);
+		CHECK_LOG(f.t.log, eem_peek_log(reg));
+		CHECK_EQ(v[0], 0x10000u + reg);
+		CHECK_EQ(v[1], 0x10000u + reg);
+		CHECK(f.t.eem_writes.empty());
+	}
+	/* An odd address (the read bit is the probe's to set) or any register
+	 * past trigger block 7 (BREAKREACT 0x80, GENCLKCTRL 0x88, ...): BadArg,
+	 * nothing sent, both values 0. */
+	for (const unsigned reg : {0x01u, 0x3Du, 0x3Fu, 0x40u, 0x41u, 0x80u, 0x88u, 0xA6u, 0xFEu,
+				   0xFFu}) {
+		Fx f;
+		uint32_t v[2] = {1, 2};
+		CHECK(f.d.eem_peek(static_cast<uint8_t>(reg), 250000, f.id, v) == Status::BadArg);
+		CHECK(f.t.log.empty());
+		CHECK_EQ(v[0], 0u);
+		CHECK_EQ(v[1], 0u);
+	}
+}
+
+TEST(debugger_eem_peek_runs_at_the_speed_asked_for)
+{
+	Fx f;
+	uint32_t v[2] = {};
+	CHECK(f.d.eem_peek(0x3E, 1000000, f.id, v) == Status::Ok);
+	REQUIRE(!f.t.log.empty());
+	CHECK(f.t.log.front() == "speed:1000000");
+	CHECK(contains(f.t.log, eem_read(0x3E) + eem_read(0x3E)));
+}
+
+/* The failures of Cpuxv2::identify(), as DBG_ATTACH reports them; identify()
+ * has released the pins (Busy: never taken). Nothing else is sent. */
+TEST(debugger_eem_peek_passes_on_identify_failures)
+{
+	uint32_t v[2] = {};
+	{
+		Fx f;
+		f.t.jtag_id = 0xFF;
+		CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::NoTarget);
+		CHECK_EQ(f.id.jtag_id, 0xFF);
+		CHECK_LOG(f.t.log, Log{"speed:250000", "open", "enter:high", "ir:28", "close"});
+	}
+	{
+		Fx f;
+		f.t.cntrl_sig_script = {0x5555};
+		CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::Locked);
+		CHECK_LOG(f.t.log, Log{"speed:250000", "open", "enter:high", "ir:28", "ir:28",
+				       "dr16:aaaa", "close"});
+	}
+	{
+		Fx f;
+		f.t.open_ok = false; /* SWD holds the pins */
+		CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::Busy);
+		CHECK_LOG(f.t.log, Log{"speed:250000", "open"});
+	}
+	{
+		Fx f;
+		f.t.core_id = 0;
+		CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::TargetError);
+		CHECK_LOG(f.t.log, identify_log() + Log{"close"});
+	}
+}
+
+/* The JTAG ID captured by the IR scan in front of the reads, and by one more
+ * IR scan after them, must be 0x91. Otherwise the link died after identify()
+ * or the 32-bit scans broke it: TargetError, the pins released, no data. */
+TEST(debugger_eem_peek_checks_the_jtag_id_around_the_reads)
+{
+	{
+		Fx f;
+		f.t.ones_after_shifts = 11; /* after identify()'s 11 shifts the line floats */
+		uint32_t v[2] = {1, 2};
+		CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::TargetError);
+		CHECK_LOG(f.t.log, identify_log() + Log{"ir:b0", "close"}); /* no 32-bit scan */
+		CHECK_EQ(v[0], 0u);
+		CHECK_EQ(v[1], 0u);
+	}
+	{
+		Fx f;
+		f.t.ones_after_shifts = 16; /* ... and after the IR scan and four 32-bit scans */
+		uint32_t v[2] = {};
+		CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::TargetError);
+		CHECK_LOG(f.t.log, eem_peek_log(0x00));
+	}
+	{
+		Fx f; /* the capture after the reads out of phase */
+		f.t.jtag_id_script = {0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x48};
+		uint32_t v[2] = {};
+		CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::TargetError);
+		CHECK_LOG(f.t.log, eem_peek_log(0x00));
+		CHECK(f.t.jtag_id_script.empty());
+	}
+	{
+		Fx f; /* the capture in front of the reads */
+		f.t.jtag_id_script = {0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x00};
+		uint32_t v[2] = {};
+		CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::TargetError);
+		CHECK_LOG(f.t.log, identify_log() + Log{"ir:b0", "close"});
+	}
+}
+
+/* Not while a debug session is open: BadState, nothing sent, the session
+ * kept. */
+TEST(debugger_eem_peek_is_refused_while_attached)
+{
+	Fx f;
+	f.attached();
+	uint32_t v[2] = {};
+	msp430::Identity id;
+	CHECK(f.d.eem_peek(0x00, 250000, id, v) == Status::BadState);
+	CHECK(f.t.log.empty());
+	CHECK(f.d.attached());
+	REQUIRE(f.d.resume() == Status::Ok);
+	f.t.log.clear();
+	CHECK(f.d.eem_peek(0x00, 250000, id, v) == Status::BadState);
+	CHECK(f.t.log.empty());
+	CHECK(f.d.running());
+	f.t.eem_control_script = {0x0000, 0x0000, 0x0080}; /* detach halts it first */
+	f.t.captured = {0x0008, 0x0000};
+	f.d.detach(DetachAction::Run);
+	CHECK(!f.d.attached());
+}
+
+/* A peek after a detach and an attach after a peek: each from the state the
+ * other leaves. */
+TEST(debugger_eem_peek_between_debug_sessions)
+{
+	Fx f;
+	f.attached();
+	f.d.detach(DetachAction::Run);
+	f.t.log.clear();
+	uint32_t v[2] = {};
+	CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::Ok);
+	CHECK_LOG(f.t.log, eem_peek_log(0x00));
+	f.t.log.clear();
+	CHECK(f.attach() == Status::Ok);
+	CHECK_LOG(f.t.log, identify_log() + eem_stop(1, kTb0Zero) + sync_tail(0x6904, 0x0008) +
+				   read_word(0x1A04) + clear_triggers() + Log{"ir:28", "dr16:0000"});
 }

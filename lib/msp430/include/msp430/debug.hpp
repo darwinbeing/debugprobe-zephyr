@@ -182,6 +182,26 @@ public:
 	 * longer counts as set. */
 	Status clear_breakpoint(unsigned index);
 
+	/* Not in MSPDS: a read-only check of the 32-bit DR shift (design spec
+	 * correction 25), outside a debug session. Cpuxv2::identify() with the
+	 * normal entry, as attach() runs it before its sync; then
+	 * IR_EMEX_DATA_EXCHANGE32 and the EEM register `reg` read twice with
+	 * EemDataExchangeXv2's read framing (each read shifts `reg` with the read
+	 * bit set, then 32 bits out; the register is not written), into
+	 * values[0] and values[1]; then one more IR scan, IR_CNTRL_SIG_CAPTURE,
+	 * whose captured JTAG ID shows that the link survived the 32-bit scans;
+	 * then the pins are released as a failed identify() releases them. No
+	 * TCLK, no control-signal write, no EEM register or control write, no
+	 * memory access: the CPU keeps running untouched. `reg` must be even and
+	 * at most kEemPeekLastAddr (the trigger blocks' value, control, mask and
+	 * combination registers), else BadArg with no TAP traffic. BadState,
+	 * nothing sent, while attached. Statuses of identify() (NoTarget with
+	 * `id.jtag_id`, Locked, Busy, TargetError), each with the pins released
+	 * by identify(); TargetError, pins released, if the JTAG ID captured in
+	 * front of the reads or after them is not 0x91 (no 32-bit scan when the
+	 * first is wrong). `values` is 0 0 unless Ok. */
+	Status eem_peek(uint8_t reg, uint32_t slot_hz, Identity &id, uint32_t values[2]);
+
 private:
 	struct Context {
 		uint32_t pc = 0;

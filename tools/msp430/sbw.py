@@ -10,10 +10,12 @@
     sbw.py trial --backup FILE
     sbw.py reset
     sbw.py gdbserver [--port 3333] [--attach | --reset] [--speed KHZ]
+    sbw.py eem-peek [--addr 0x00] [--speed KHZ]
 
-Every command except gdbserver resets the target; gdbserver attaches to the
-running program unless --reset is given. See docs/MSP430_SBW.md for wiring
-and docs/MSP430_DEBUG.md for debugging.
+Every command except gdbserver and eem-peek resets the target; gdbserver
+attaches to the running program unless --reset is given, and eem-peek only
+reads one EEM register twice without stopping the CPU. See docs/MSP430_SBW.md
+for wiring and docs/MSP430_DEBUG.md for debugging.
 """
 from __future__ import annotations
 
@@ -50,6 +52,18 @@ def _speed(text: str) -> int:
         raise argparse.ArgumentTypeError(f"invalid speed {text!r}") from None
     if not 100 <= value <= 1000:
         raise argparse.ArgumentTypeError("must be between 100 and 1000 kHz")
+    return value
+
+
+def _eem_addr(text: str) -> int:
+    try:
+        value = int(text, 0)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid address {text!r}") from None
+    if not 0 <= value <= probe_mod.EEM_PEEK_LAST_ADDR or value & 1:
+        raise argparse.ArgumentTypeError(
+            f"must be even, 0x00-0x{probe_mod.EEM_PEEK_LAST_ADDR:02X} (a trigger block's value, "
+            "control, mask or combination register)")
     return value
 
 
@@ -117,6 +131,14 @@ def _parser() -> argparse.ArgumentParser:
                    help="SBW clock in kHz, 100-1000 (same as the global --speed)")
     g.add_argument("--allow-flash-write", action="store_true",
                    help="full mode (phase B2; not available in this version)")
+
+    k = sub.add_parser("eem-peek", help="read-only check of the 32-bit SBW path: read one EEM "
+                                        "register twice; the CPU is not stopped or reset")
+    k.add_argument("--addr", type=_eem_addr, default=0x00, metavar="ADDR",
+                   help="EEM address, even, 0x00-0x3E: trigger blocks 0-7's value, control, "
+                        "mask and combination registers (default 0x00)")
+    k.add_argument("--speed", type=_speed, dest="peek_speed", metavar="KHZ",
+                   help="SBW clock in kHz, 100-1000 (same as the global --speed)")
     return p
 
 
@@ -237,11 +259,9 @@ def _run(args, probe: SbwProbe, out, segments) -> None:
             pass
 
 
-def _gdbserver(args, probe: SbwProbe, out, err, serve) -> None:
-    """Check the probe, then serve GDB connections until Ctrl-C. No CONNECT
-    (a Phase A session would reset the target): DAP_Disconnect and INFO here,
-    then only what the debug session needs."""
-    speed = args.gdb_speed or args.speed
+def _debug_probe_info(probe: SbwProbe):
+    """DAP_Disconnect and INFO; refuses a probe without this tool's debug
+    commands. Returns the INFO."""
     probe.dap_disconnect()
     info = probe.info()
     if not probe_mod.supports_debugging(info):
@@ -253,6 +273,44 @@ def _gdbserver(args, probe: SbwProbe, out, err, serve) -> None:
         raise FlashError(f"the probe firmware does not support debugging (SBW protocol version "
                          f"{info.version} without the debug feature); update the probe "
                          "firmware to this version of debugprobe-zephyr")
+    return info
+
+
+def _eem_peek(args, probe: SbwProbe, out) -> None:
+    """DBG_EEM_PEEK (design spec correction 25): no CONNECT and no debug
+    session, so the target is neither reset nor stopped. Up to four tries
+    when no target answers, as gdbserver's attach."""
+    speed = args.peek_speed or args.speed
+    _debug_probe_info(probe)
+    last = None
+    for _ in range(gdbserver.ATTACH_TRIES):
+        try:
+            peek = probe.dbg_eem_peek(speed, args.addr)
+            break
+        except probe_mod.StatusError as e:
+            if e.status == probe_mod.STATUS_LOCKED:
+                raise FlashError("the device's JTAG lock key is programmed") from None
+            if e.status != probe_mod.STATUS_NO_TARGET:
+                raise
+            last = e
+    else:
+        jtag_id = last.data[0] if last.data else 0
+        raise FlashError(f"no MSP430 found (JTAG ID read as 0x{jtag_id:02X}); check the wiring "
+                         "and the target supply, or try a lower --speed")
+    same = peek.first == peek.second
+    out.write(f"JTAG ID 0x{peek.jtag_id:02X}; EEM 0x{args.addr:02X}: 0x{peek.first:08X} "
+              f"0x{peek.second:08X} ({'equal' if same else 'different'})\n")
+    if not same:
+        raise FlashError(f"the two reads of EEM register 0x{args.addr:02X} differ: the 32-bit "
+                         f"SBW path is not reliable at {speed} kHz")
+
+
+def _gdbserver(args, probe: SbwProbe, out, err, serve) -> None:
+    """Check the probe, then serve GDB connections until Ctrl-C. No CONNECT
+    (a Phase A session would reset the target): DAP_Disconnect and INFO here,
+    then only what the debug session needs."""
+    speed = args.gdb_speed or args.speed
+    info = _debug_probe_info(probe)
     if info.state in (probe_mod.STATE_CONNECTED, probe_mod.STATE_FLASHING):
         # DBG_ATTACH would answer BAD_STATE; CONNECT would end it, but resets the target
         raise FlashError("the probe still holds a programming session from an earlier command; "
@@ -318,6 +376,8 @@ def main(argv=None, transport=None, out=sys.stdout, err=sys.stderr, serve=gdbser
             try:
                 if args.cmd == "gdbserver":
                     _gdbserver(args, SbwProbe(t), out, err, serve)
+                elif args.cmd == "eem-peek":
+                    _eem_peek(args, SbwProbe(t), out)
                 else:
                     _run(args, SbwProbe(t), out, segments)
             finally:

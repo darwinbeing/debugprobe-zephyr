@@ -160,6 +160,9 @@ size_t Session::handle(std::span<const uint8_t> request, std::span<uint8_t> resp
 	case Op::DbgBpClear:
 		st = op_dbg_bp_clear(args);
 		break;
+	case Op::DbgEemPeek:
+		st = op_dbg_eem_peek(args, out, n);
+		break;
 	default:
 		break;
 	}
@@ -654,6 +657,37 @@ Status Session::op_dbg_bp_clear(In args)
 		return Status::BadArg;
 	}
 	return dbg_.clear_breakpoint(args[0]);
+}
+
+/* A read-only check of the 32-bit DR path before a first DBG_ATTACH (design
+ * spec correction 25): no session is opened, the CPU is not touched. Only in
+ * Idle, where nothing holds the pins; the EEM address is the Debugger's to
+ * check (BadArg before any TAP traffic). */
+Status Session::op_dbg_eem_peek(In args, Out out, size_t &n)
+{
+	if (state_ != State::Idle) {
+		return Status::BadState;
+	}
+	if (args.size() != 3 || out.size() < 9) {
+		return Status::BadArg;
+	}
+	const uint16_t speed_khz = get16(args, 0);
+	if (speed_khz < kMinSpeedKhz || speed_khz > kMaxSpeedKhz) {
+		return Status::BadArg;
+	}
+	Identity id;
+	uint32_t values[2] = {};
+	const Status st = dbg_.eem_peek(args[2], speed_khz * 1000u, id, values);
+	if (st == Status::Ok) {
+		out[0] = id.jtag_id;
+		put32(out, 1, values[0]);
+		put32(out, 5, values[1]);
+		n = 9;
+	} else if (st == Status::NoTarget) {
+		out[0] = id.jtag_id;
+		n = 1;
+	}
+	return st;
 }
 
 } // namespace msp430

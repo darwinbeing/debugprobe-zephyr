@@ -47,6 +47,7 @@ sbw read 0x4400 0x20000 -o main.hex   # dump memory (here: all of main flash)
 sbw trial --backup main.hex           # prove erase/program/verify on one blank segment
 sbw verify firmware.hex               # compare flash with an image
 sbw reset                             # reset the target and let it run
+sbw eem-peek                          # read-only check of the 32-bit SBW scans (no reset)
 ```
 
 The two commands that destroy flash contents:
@@ -84,9 +85,31 @@ Details:
   different data, without an error.
 - **Every command resets the target**, including `info` and `read`: taking
   control of the CPU involves a power-on reset, and releasing it a JTAG reset.
-  The exception is `gdbserver`, which attaches without reset unless given
-  `--reset` (`docs/MSP430_DEBUG.md`). Any other command closes a debug session
-  that is open, which detaches the debugger.
+  The exceptions are `gdbserver`, which attaches without reset unless given
+  `--reset` (`docs/MSP430_DEBUG.md`), and `eem-peek` (below), which never
+  takes control of the CPU. Any other command closes a debug session that is
+  open, which detaches the debugger.
+
+`sbw eem-peek [--addr 0x00] [--speed KHZ]` is a read-only smoke test of the
+32-bit JTAG scans that debugging uses for the EEM (the breakpoint logic), to
+run on a board before its first `gdbserver` attach. It sends vendor operation
+`DBG_EEM_PEEK` (0x13; arguments `u16 speed_khz`, `u8 eem_addr`; reply
+`u8 jtag_id`, `u32 first`, `u32 second`; protocol version 2), which the probe
+accepts only when no programming or debug session is open (`BAD_STATE`
+otherwise). The probe enters SBW with RST high and reads the JTAG ID, the
+lock state, the core ID and the device-ID pointer exactly as a debug attach
+does before it synchronizes with the CPU; then it reads one EEM register twice
+through the 32-bit data exchange, the way TI's MSP Debug Stack reads EEM
+registers, reads the JTAG ID once more, and releases the pins. The CPU is not
+stopped or reset, gets no JTAG clock (TCLK), and nothing is written, neither
+memory nor an EEM register. `--addr` must be even, 0x00–0x3E: the value,
+control, mask and combination registers of trigger blocks 0–7, whose reads
+have no side effects. The tool prints `JTAG ID 0x91; EEM 0x00: 0x00000000
+0x00000000 (equal)` and exits 1 if the two values differ. `TARGET_ERROR`
+means the JTAG ID was wrong before or after the 32-bit reads, that is, the
+link did not survive them; do not attach a debugger until that is
+understood. The check is that the two reads agree; the value itself is
+whatever the trigger block holds (an earlier debug session may have set it).
 
 Exit status: 0 on success, 1 on failure, 2 for a usage error, 130 when
 interrupted with Ctrl-C.

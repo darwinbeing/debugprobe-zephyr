@@ -16,6 +16,9 @@ TEST(protocol_debug_values_match_the_spec)
 	CHECK_EQ(static_cast<int>(Op::DbgWriteReg), 0x10);
 	CHECK_EQ(static_cast<int>(Op::DbgBpSet), 0x11);
 	CHECK_EQ(static_cast<int>(Op::DbgBpClear), 0x12);
+	CHECK_EQ(static_cast<int>(Op::DbgEemPeek), 0x13); /* correction 25 */
+	CHECK_EQ(kEemPeekLastAddr, 0x3E); /* MBTRIG7CMB: trigger blocks 0-7 only */
+	CHECK_EQ(kProtocolVersion, 2);    /* unchanged by DBG_EEM_PEEK */
 	CHECK_EQ(static_cast<int>(Status::Protected), 0x09);
 	CHECK_EQ(static_cast<int>(Status::Running), 0x0A);
 	CHECK_EQ(static_cast<int>(State::DebugHalted), 3);

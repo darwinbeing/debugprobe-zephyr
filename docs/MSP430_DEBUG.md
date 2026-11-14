@@ -325,7 +325,9 @@ control and saving its context, reset and halt, register and memory access
 that keep the context, single step, release with EEM breakpoints armed, and
 stop detection. The deliberate differences from TI's code are listed in the
 header of that file. The sequences are exposed as operations 0x09-0x12 of the
-CMSIS-DAP vendor command 0x90 (protocol version 2). `lib/msp430/src/session.cpp`
+CMSIS-DAP vendor command 0x90 (protocol version 2); operation 0x13
+(`DBG_EEM_PEEK`, `sbw.py eem-peek`) is a read-only check of the 32-bit scans
+to run before the first attach on a board (`docs/MSP430_SBW.md`). `lib/msp430/src/session.cpp`
 enforces the write rules above. `tools/msp430/gdbserver.py` translates GDB's
 remote protocol into those operations. The design is
 `docs/superpowers/specs/2026-11-13-msp430-debug-design.md`; TI's licence

@@ -26,12 +26,13 @@ OP_INFO, OP_CONNECT, OP_DISCONNECT, OP_READ_MEM, OP_WRITE_MEM = 0, 1, 2, 3, 4
 OP_ERASE, OP_FLASH_BEGIN, OP_FLASH_DATA, OP_FLASH_END = 5, 6, 7, 8
 OP_DBG_ATTACH, OP_DBG_DETACH, OP_DBG_HALT, OP_DBG_RESUME, OP_DBG_STATUS = 9, 10, 11, 12, 13
 OP_DBG_STEP, OP_DBG_READ_REGS, OP_DBG_WRITE_REG, OP_DBG_BP_SET, OP_DBG_BP_CLEAR = 14, 15, 16, 17, 18
+OP_DBG_EEM_PEEK = 19  # outside a debug session: read-only check of the 32-bit SBW path
 
 OP_NAMES = {0: "INFO", 1: "CONNECT", 2: "DISCONNECT", 3: "READ_MEM", 4: "WRITE_MEM",
             5: "ERASE", 6: "FLASH_BEGIN", 7: "FLASH_DATA", 8: "FLASH_END",
             9: "DBG_ATTACH", 10: "DBG_DETACH", 11: "DBG_HALT", 12: "DBG_RESUME",
             13: "DBG_STATUS", 14: "DBG_STEP", 15: "DBG_READ_REGS", 16: "DBG_WRITE_REG",
-            17: "DBG_BP_SET", 18: "DBG_BP_CLEAR"}
+            17: "DBG_BP_SET", 18: "DBG_BP_CLEAR", 19: "DBG_EEM_PEEK"}
 
 FEATURE_CPUXV2_FLASH = 1
 FEATURE_DEBUG = 2
@@ -43,6 +44,10 @@ STOP_NONE, STOP_REQUEST, STOP_BREAKPOINT, STOP_STEP, STOP_RESET = range(5)
 NO_BREAKPOINT = 0xFF    # DBG_STATUS: no breakpoint at the stop address
 ALL_BREAKPOINTS = 0xFF  # DBG_BP_CLEAR: every breakpoint
 MAX_HW_BREAKPOINTS = 8  # breakpoint indexes 0-7: the F5529's EEM triggers (B1's only device)
+# DBG_EEM_PEEK reads only even EEM addresses 0x00-0x3E: the value, control,
+# mask and combination registers of trigger blocks 0-7 (reads without side
+# effects)
+EEM_PEEK_LAST_ADDR = 0x3E
 
 ENTRY_NORMAL, ENTRY_MAGIC_PATTERN = 0, 1
 ERASE_SEGMENT, ERASE_BANK, ERASE_MAIN = 0, 1, 2
@@ -65,6 +70,7 @@ SYNC_TIMEOUT_MIN_MS = 15000
 SYNC_WORST_CYCLES = 1_450_000
 SLOTS_PER_CYCLE_X2 = 7  # 3.5 slots per JTAG cycle, doubled to keep integers
 MIN_SPEED_KHZ = 100     # the slowest SBW clock the probe accepts
+MAX_SPEED_KHZ = 1000    # the fastest
 SYNCS = {OP_DBG_ATTACH: 2, OP_DBG_HALT: 1, OP_DBG_STEP: 1, OP_DBG_STATUS: 1, OP_DBG_DETACH: 1}
 
 
@@ -107,6 +113,13 @@ OP_STATUS_NAMES = {
         "TIMEOUT (the step did not complete in time; the probe stopped the CPU)",
     (OP_DBG_WRITE_REG, STATUS_PROTECTED):
         "PROTECTED (read-only mode: the PC may only be set inside main flash)",
+    (OP_DBG_EEM_PEEK, STATUS_BAD_STATE):
+        "BAD_STATE (the probe holds a programming or debug session)",
+    (OP_DBG_EEM_PEEK, STATUS_TARGET_ERROR):
+        "TARGET_ERROR (the link failed: no core ID, or the JTAG ID was not 0x91 before or "
+        "after the 32-bit reads)",
+    (OP_DBG_EEM_PEEK, STATUS_UNKNOWN_OP):
+        "UNKNOWN_OP (the probe firmware predates DBG_EEM_PEEK; update it)",
 }
 
 
@@ -168,6 +181,13 @@ class DebugStatus:
     stop_reason: int
     breakpoint: int  # index of the breakpoint at the stop address, or NO_BREAKPOINT
     pc: int          # 0 while running
+
+
+@dataclass(frozen=True)
+class EemPeek:
+    jtag_id: int
+    first: int   # the EEM register as the first read returned it
+    second: int  # and the second
 
 
 def _check(op: int, ok: bool, problem: str) -> None:
@@ -429,6 +449,20 @@ class SbwProbe:
                f"breakpoint index {index} is not 0-{MAX_HW_BREAKPOINTS - 1} "
                f"or 0x{ALL_BREAKPOINTS:02X}")
         self._cmd(OP_DBG_BP_CLEAR, bytes([index]))
+
+    def dbg_eem_peek(self, speed_khz: int, addr: int) -> EemPeek:
+        """Read EEM register `addr` (even, 0x00-0x3E) twice over the 32-bit DR
+        path, outside a debug session (the probe must be idle): entry and
+        JTAG ID as DBG_ATTACH, then the two reads, then the pins released. The
+        CPU is not stopped and nothing is written."""
+        _check(OP_DBG_EEM_PEEK, MIN_SPEED_KHZ <= speed_khz <= MAX_SPEED_KHZ,
+               f"speed {speed_khz} kHz is not {MIN_SPEED_KHZ}-{MAX_SPEED_KHZ}")
+        _check(OP_DBG_EEM_PEEK, 0 <= addr <= EEM_PEEK_LAST_ADDR and not addr & 1,
+               f"EEM address {addr:#x} is not even and 0x00-0x{EEM_PEEK_LAST_ADDR:02X}")
+        data = self._cmd(OP_DBG_EEM_PEEK, struct.pack("<HB", speed_khz, addr))
+        if len(data) < 9:
+            raise ProbeError(OUT_OF_STEP)
+        return EemPeek(*struct.unpack("<BII", data[:9]))
 
     @staticmethod
     def _u32(data: bytes) -> int:

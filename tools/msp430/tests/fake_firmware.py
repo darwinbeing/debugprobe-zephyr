@@ -8,8 +8,14 @@ addressed to flash or anywhere else.
 Fault injection knobs: version, features, connect_status, fail_op,
 interrupt_on_op, fail_flash_after, stuck, no_target, has_handler, also_erase,
 skip_segment_erases, read_shift; for debugging: attach_status, run_polls,
-stop_at, halt_pc, step_size, step_timeout_pc, lost_on_poll, hw_breakpoints.
+stop_at, halt_pc, step_size, step_timeout_pc, lost_on_poll, hw_breakpoints;
+for DBG_EEM_PEEK: eem, peek_glitch, peek_status, peek_no_target.
 `polls` counts the looks at the running CPU since the last DBG_RESUME.
+
+DBG_EEM_PEEK (op 19, Session::op_dbg_eem_peek): only in Idle (BAD_STATE
+otherwise, before the size check), u16 speed 100-1000 and an even EEM address
+0x00-0x3E, else BAD_ARG; answers the JTAG ID and the register in `eem` twice
+(missing: 0). It stays Idle whatever it answers.
 
 Debug model (ops 9-18, states 3 DebugHalted / 4 DebugRunning; a probe of
 version 1 answers them UNKNOWN_OP), after msp430::Session in
@@ -44,7 +50,8 @@ SR_CPUOFF = 0x0010
 
 # Argument bytes of the fixed-size requests; the firmware rejects any other length.
 FIXED_ARGS = {0: 0, 1: 3, 2: 0, 3: 6, 5: 9, 6: 12, 8: 0,
-              9: 12, 10: 1, 11: 0, 12: 0, 13: 0, 14: 0, 15: 0, 16: 5, 17: 5, 18: 1}
+              9: 12, 10: 1, 11: 0, 12: 0, 13: 0, 14: 0, 15: 0, 16: 5, 17: 5, 18: 1, 19: 3}
+EEM_PEEK_LAST_ADDR = 0x3E  # DBG_EEM_PEEK: trigger blocks 0-7's registers
 # The debug ops a running CPU allows: DBG_DETACH, DBG_HALT, DBG_STATUS.
 RUNNING_OPS = (10, 11, 13)
 # A TARGET_ERROR from these leaves the Debugger attached and the Session
@@ -115,6 +122,12 @@ class FakeFirmware:
         self.steps = 0
         self.reg_writes = []         # (index, value) of every accepted DBG_WRITE_REG
         self.polls = 0               # looks at the running CPU since the last DBG_RESUME
+        # --- DBG_EEM_PEEK ---
+        self.eem = {}                # EEM address -> 32-bit register value; missing = 0
+        self.peek_glitch = None      # if set: the second read returns this (an unreliable link)
+        self.peek_status = None      # if set: DBG_EEM_PEEK answers this status (NO_TARGET: + ID)
+        self.peek_no_target = 0      # NO_TARGET answers DBG_EEM_PEEK still has to give first
+        self.peeks = []              # (speed, addr) of every DBG_EEM_PEEK that passed the checks
 
     # --- transport interface used by SbwProbe ---
     def transfer(self, request, timeout_ms=3000):
@@ -220,7 +233,7 @@ class FakeFirmware:
         return None
 
     def _op(self, op, a):
-        if 9 <= op <= 18 and self.version < 2:
+        if 9 <= op <= 19 and self.version < 2:
             return UNKNOWN_OP, b""  # the debug ops came with protocol version 2
         bad_len = op in FIXED_ARGS and len(a) != FIXED_ARGS[op]
         if op == 0:
@@ -385,7 +398,30 @@ class FakeFirmware:
             if op in self.fail_op:
                 return self._fail(op)
             return self._dbg_op(op, a)
+        if op == 19:
+            return self._dbg_eem_peek(a)
         return UNKNOWN_OP, b""
+
+    def _dbg_eem_peek(self, a):
+        """Session::op_dbg_eem_peek: state, size, speed, then the address
+        (Debugger::eem_peek); the probe stays Idle."""
+        if self.state != 0:
+            return BAD_STATE, b""
+        if len(a) != FIXED_ARGS[19]:
+            return BAD_ARG, b""
+        speed, addr = struct.unpack("<HB", a)
+        if not 100 <= speed <= 1000 or addr & 1 or addr > EEM_PEEK_LAST_ADDR:
+            return BAD_ARG, b""
+        self.peeks.append((speed, addr))
+        if self.peek_no_target > 0:
+            self.peek_no_target -= 1
+            return NO_TARGET, bytes([self.no_target_id])
+        if self.peek_status is not None:
+            no_target_id = bytes([self.no_target_id]) if self.peek_status == NO_TARGET else b""
+            return self.peek_status, no_target_id
+        first = self.eem.get(addr, 0)
+        second = first if self.peek_glitch is None else self.peek_glitch
+        return OK, bytes([0x91]) + struct.pack("<II", first, second)
 
     def _dbg_attach(self, a):
         """Session::op_dbg_attach: BAD_STATE in Connected and Flashing; the

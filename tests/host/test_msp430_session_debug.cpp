@@ -1372,3 +1372,165 @@ TEST(session_dbg_fixed_size_requests)
 	CHECK(f.tap.log.empty());
 	CHECK(f.s.state() == State::DebugHalted);
 }
+
+/* ---- DBG_EEM_PEEK (0x13, design spec correction 25) ---- */
+
+namespace {
+
+/* DBG_EEM_PEEK: u16 speed_khz, u8 eem_addr */
+Bytes peek_req(uint8_t addr = 0x00, uint16_t khz = 250)
+{
+	return {0x90, 0x13, static_cast<uint8_t>(khz), static_cast<uint8_t>(khz >> 8), addr};
+}
+
+} // namespace
+
+TEST(session_dbg_eem_peek_returns_the_jtag_id_and_both_reads)
+{
+	Fx f;
+	f.tap.eem_read_script = {0x89ABCDEF, 0x01234567};
+	CHECK_BYTES(f.run(peek_req(0x06, 500)),
+		    (Bytes{0x90, 0x00, 0x91,             /* JTAG ID */
+			   0xEF, 0xCD, 0xAB, 0x89,       /* first read */
+			   0x67, 0x45, 0x23, 0x01}));    /* second read */
+	CHECK(f.s.state() == State::Idle);
+	CHECK_LOG(f.tap.log, Log{"speed:500000", "open", "enter:high", "ir:28",
+				 "ir:28", "dr16:aaaa", "ir:28", "dr16:aaaa", "ir:28", "dr16:aaaa",
+				 "ir:e8", "dr16:0000", "ir:e1", "dr20:00000",
+				 "ir:b0", "dr32:00000007", "dr32:00000000", "dr32:00000007",
+				 "dr32:00000000", "ir:28", "close"});
+	CHECK(f.tap.mem_writes.empty());
+	CHECK(f.tap.eem_writes.empty());
+	CHECK(f.tap.eem_control_writes.empty());
+	CHECK(f.tap.cpu_words.empty());
+	CHECK(!log_has(f.tap, "ir:c8")); /* no control-signal write */
+	/* INFO still reports Idle; a debug session can follow */
+	const Bytes info = f.run({0x90, 0x00});
+	REQUIRE(info.size() > 3u);
+	CHECK_EQ(info[3], 0);
+	f.cpu_runs();
+	CHECK(f.run(attach_req())[1] == 0x00);
+	CHECK(f.s.state() == State::DebugHalted);
+}
+
+TEST(session_dbg_eem_peek_validates_arguments)
+{
+	Fx f;
+	CHECK_BYTES(f.run(peek_req(0x00, 99)), kBadArg);   /* speed */
+	CHECK_BYTES(f.run(peek_req(0x00, 1001)), kBadArg); /* speed */
+	CHECK_BYTES(f.run(peek_req(0x00, 0)), kBadArg);    /* speed */
+	CHECK_BYTES(f.run(peek_req(0x01)), kBadArg);       /* odd: the read bit is the probe's */
+	CHECK_BYTES(f.run(peek_req(0x3F)), kBadArg);
+	CHECK_BYTES(f.run(peek_req(0x40)), kBadArg);       /* past trigger block 7 */
+	CHECK_BYTES(f.run(peek_req(0x80)), kBadArg);       /* BREAKREACT */
+	CHECK_BYTES(f.run(peek_req(0x88)), kBadArg);       /* GENCLKCTRL */
+	CHECK_BYTES(f.run(peek_req(0xFE)), kBadArg);
+	Bytes shortreq = peek_req();
+	shortreq.pop_back();
+	CHECK_BYTES(f.run(shortreq), kBadArg);
+	Bytes longreq = peek_req();
+	longreq.push_back(0);
+	CHECK_BYTES(f.run(longreq), kBadArg);
+	CHECK_BYTES(f.run({0x90, 0x13}), kBadArg);
+	uint8_t small[10] = {}; /* 2 + 9 bytes needed */
+	CHECK_EQ(f.s.handle(peek_req(), small), 2u);
+	CHECK_EQ(small[1], 0x01);
+	CHECK(f.tap.log.empty());
+	CHECK(f.s.state() == State::Idle);
+
+	/* the limits */
+	uint8_t enough[11] = {};
+	CHECK_EQ(f.s.handle(peek_req(0x3E, 100), enough), 11u);
+	CHECK_EQ(enough[1], 0x00);
+	REQUIRE(!f.tap.log.empty());
+	CHECK(f.tap.log.front() == "speed:100000");
+	CHECK(log_has(f.tap, "dr32:0000003f"));
+	f.tap.log.clear();
+	CHECK_BYTES(f.run(peek_req(0x00, 1000)),
+		    (Bytes{0x90, 0x00, 0x91, 0, 0, 0, 0, 0, 0, 0, 0}));
+	REQUIRE(!f.tap.log.empty());
+	CHECK(f.tap.log.front() == "speed:1000000");
+}
+
+/* The identify phase's statuses as DBG_ATTACH reports them (NO_TARGET with
+ * the ID), and TARGET_ERROR when the JTAG ID around the reads is wrong. The
+ * pins are released and the session stays Idle every time. */
+TEST(session_dbg_eem_peek_failures_leave_idle)
+{
+	{
+		Fx f;
+		f.tap.jtag_id = 0xFF;
+		CHECK_BYTES(f.run(peek_req()), (Bytes{0x90, 0x04, 0xFF}));
+		CHECK(f.s.state() == State::Idle);
+		REQUIRE(!f.tap.log.empty());
+		CHECK(f.tap.log.back() == "close");
+	}
+	{
+		Fx f;
+		f.tap.cntrl_sig_script = {0x5555};
+		CHECK_BYTES(f.run(peek_req()), (Bytes{0x90, 0x05}));
+		CHECK(f.s.state() == State::Idle);
+		REQUIRE(!f.tap.log.empty());
+		CHECK(f.tap.log.back() == "close");
+	}
+	{
+		Fx f;
+		f.tap.open_ok = false;
+		CHECK_BYTES(f.run(peek_req()), (Bytes{0x90, 0x03}));
+		CHECK(f.s.state() == State::Idle);
+	}
+	{
+		Fx f;
+		f.tap.ones_after_shifts = 16; /* the capture after the reads floats */
+		CHECK_BYTES(f.run(peek_req()), kTargetError);
+		CHECK(f.s.state() == State::Idle);
+		REQUIRE(!f.tap.log.empty());
+		CHECK(f.tap.log.back() == "close");
+		CHECK_EQ(count_log(f.tap, "close"), 1u); /* nothing more after the release */
+	}
+}
+
+/* Only in Idle: in Connected, Flashing, DebugHalted and DebugRunning it is
+ * BAD_STATE (before the size check) and nothing is sent; the session stays
+ * as it was. */
+TEST(session_dbg_eem_peek_only_in_idle)
+{
+	const Bytes reqs[] = {peek_req(), {0x90, 0x13}, peek_req(0x01)};
+	{
+		Fx f; /* Connected */
+		f.tap.quick_words = {0x2955};
+		REQUIRE(f.run(kConnectReq)[1] == 0x00);
+		f.tap.log.clear();
+		for (const Bytes &req : reqs) {
+			CHECK_BYTES(f.run(req), kBadState);
+		}
+		CHECK(f.tap.log.empty());
+		CHECK(f.s.state() == State::Connected);
+
+		f.tap.push_jmb_out(0xABADBABE); /* Flashing */
+		REQUIRE(f.run(begin_req(0x4400, 2, 0x2400))[1] == 0x00);
+		REQUIRE(f.s.state() == State::Flashing);
+		f.tap.log.clear();
+		f.tap.mem_writes.clear();
+		for (const Bytes &req : reqs) {
+			CHECK_BYTES(f.run(req), kBadState);
+		}
+		CHECK(f.tap.log.empty());
+		CHECK(f.tap.mem_writes.empty());
+		CHECK(f.s.state() == State::Flashing);
+	}
+	for (const bool running : {false, true}) {
+		Fx f;
+		f.open_session(running);
+		for (const Bytes &req : reqs) {
+			CHECK_BYTES(f.run(req), kBadState);
+		}
+		CHECK(f.tap.log.empty());
+		CHECK(f.tap.mem_writes.empty());
+		CHECK(f.s.state() == (running ? State::DebugRunning : State::DebugHalted));
+		if (!running) {
+			CHECK_BYTES(f.run({0x90, 0x0D}),
+				    (Bytes{0x90, 0x00, 0x01, 0x01, 0xFF, 0x20, 0x45, 0, 0}));
+		}
+	}
+}

@@ -44,6 +44,22 @@ TEST(fake_tap_eem_read_as_replaces_what_a_register_reads)
 	CHECK(!t.eem_protocol_error);
 }
 
+TEST(fake_tap_eem_read_script_answers_reads_first)
+{
+	FakeTap t;
+	t.eem[0x06] = 0x00000001;
+	t.eem_read_script = {0x89ABCDEF};
+	t.ir_shift(msp430::kIrEmexDataExchange32);
+	t.dr_shift32(0x07);
+	CHECK_EQ(t.dr_shift32(0), 0x89ABCDEFu); /* the script, once */
+	t.dr_shift32(0x07);
+	CHECK_EQ(t.dr_shift32(0), 0x00000001u); /* then the register */
+	t.dr_shift32(0x06); /* a write consumes nothing */
+	t.dr_shift32(0x00000002);
+	CHECK(t.eem_read_script.empty());
+	CHECK(!t.eem_protocol_error);
+}
+
 TEST(fake_tap_eem_ir_shift_with_address_pending_is_an_error)
 {
 	FakeTap t;

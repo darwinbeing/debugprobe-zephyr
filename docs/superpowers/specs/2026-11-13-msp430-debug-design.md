@@ -130,6 +130,7 @@ are 20-bit numbers in 32-bit fields.
 | 0x10 | DBG_WRITE_REG | `u8 index`, `u32 value` | – |
 | 0x11 | DBG_BP_SET | `u8 index`, `u32 address` | – |
 | 0x12 | DBG_BP_CLEAR | `u8 index` (0xFF: all) | – |
+| 0x13 | DBG_EEM_PEEK | `u16 speed_khz` (100–1000), `u8 eem_addr` (even, 0x00–0x3E) | `u8 jtag_id`, `u32 first`, `u32 second` (correction 25; Idle only, no session opened) |
 
 - `READ_MEM` / `WRITE_MEM` (Phase A ops) work in DebugHalted through the
   debug layer, which preserves the halted context. In DebugRunning they
@@ -420,3 +421,41 @@ already worked into the text above; the others take precedence over it.
     `DBG_STEP`, `DBG_STATUS` and `DBG_DETACH`, which can sync with the CPU,
     the worst case of the sync's loops at the session's SBW speed (about
     20 s per sync at 250 kHz) with a margin.
+
+## Corrections made after B1 (2026-11-13)
+
+25. **The 32-bit read-only smoke check.** EEM registers are read and written
+    with 32-bit DR scans, which had never run on hardware: Phase A's longest
+    port call was 25 cycles, while a 32-bit scan (37 cycles) is the first
+    call of four PIO words and the first pause between two port calls inside
+    one scan. The first attach on the user's board would write EEM registers
+    through that path, so `DBG_EEM_PEEK` (0x13, in the table above; protocol
+    version and feature bits unchanged) checks it first without writing
+    anything. It is accepted in Idle only (`BAD_STATE` elsewhere, nothing
+    sent) and leaves the session Idle; `u16 speed_khz` must be 100–1000 and
+    `u8 eem_addr` even and 0x00–0x3E (the value, control, mask and
+    combination registers of trigger blocks 0–7, whose reads have no side
+    effects), else `BAD_ARG` with nothing sent. It runs `Cpuxv2::identify()`
+    with the normal entry as `DBG_ATTACH` does before its sync, selects
+    `IR_EMEX_DATA_EXCHANGE32`, reads the register twice with
+    `EemDataExchangeXv2`'s read framing (the address with the read bit set,
+    then 32 bits out; as `SyncJtag_Conditional_SaveContextXv2` reads trigger
+    block 0 when it attaches), shifts `IR_CNTRL_SIG_CAPTURE` once more, and
+    releases the pins as a failed identify does (`Tap::close()`: the PIO
+    state machine is stopped where it waits with SBWTCK high, then both pins
+    go high-impedance with the idle pulls; nothing more is clocked). No TCLK,
+    no control-signal write, no EEM register or control write, no memory
+    access: the CPU keeps running untouched. The JTAG ID captured by the IR
+    scans in front of and after the reads must be 0x91, else `TARGET_ERROR`,
+    so the reply also says whether the link survived the 32-bit scans. The
+    identify phase's failures are reported as `DBG_ATTACH` reports them
+    (`NO_TARGET` with the ID, `LOCKED`, `BUSY`, `TARGET_ERROR`).
+    `sbw.py eem-peek [--addr 0x00] [--speed 250]` prints
+    `JTAG ID 0x91; EEM 0x00: 0x… 0x… (equal)` and exits 1 when the two
+    values differ. The pause between the two port calls of a 32-bit scan is
+    electrically the pause between two scans that Phase A ran: in both the
+    PIO program waits at `pull block side 1`, SBWTCK driven high, SBWTDIO
+    driven at the last TDI level, and the next slot is a TMS slot. Only the
+    TAP state (Shift-DR instead of Run-Test/Idle) and the level held on
+    SBWTDIO (data bit 3 of the scan instead of the TCLK level) differ; SBW
+    limits only the low phase of SBWTCK.

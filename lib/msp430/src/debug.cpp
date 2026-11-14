@@ -171,7 +171,11 @@
  *    (DLL430_OldApiV3::State with stop, DebugManagerMSP430::stop) runs the
  *    macro alone, whose own look at EEM_STOPPED then skips the stop request
  *    as here. After a breakpoint stop, the breakpoint whose address is the
- *    stop PC is named; the DLL reports only that one was hit.
+ *    stop PC is named; the DLL reports only that one was hit;
+ *  - eem_peek() (DBG_EEM_PEEK, design spec correction 25) is no MSPDS
+ *    macro: identify(), then EemDataExchangeXv2's read of one trigger-block
+ *    register, twice, with the JTAG ID checked before and after, and no
+ *    sync; a read-only check of the 32-bit scans.
  *
  * Copyright (C) 2012 Texas Instruments Incorporated - http://www.ti.com/
  *
@@ -842,6 +846,42 @@ void Debugger::detach(DetachAction action)
 	attached_ = false;
 	running_ = false;
 	reason_ = StopReason::None;
+}
+
+/* Not in MSPDS (design spec correction 25): the kind of EEM read that
+ * SyncJtag_Conditional_SaveContextXv2 makes first when it attaches to a
+ * running CPU (lines 112-124: trigger block 0's value, control, mask and
+ * combination registers, after the same entry and identify), on one register
+ * and alone, with the JTAG ID checked before and after the reads. For the
+ * addresses allowed here EemDataExchangeXv2 has no special case (only
+ * MODCLKCTRL0, 0x8A, is answered from a cache). */
+Status Debugger::eem_peek(uint8_t reg, uint32_t slot_hz, Identity &id, uint32_t values[2])
+{
+	values[0] = 0;
+	values[1] = 0;
+	if (attached_) {
+		return Status::BadState;
+	}
+	if ((reg & 1u) != 0 || reg > kEemPeekLastAddr) {
+		return Status::BadArg;
+	}
+	const Status st = cpu_.identify(EntryMode::Normal, slot_hz, id);
+	if (st != Status::Ok) {
+		return st; /* identify() has released the pins */
+	}
+	/* EemDataExchangeXv2.c:70, then lines 83-84 once per read */
+	bool link_ok = tap_.ir_shift(kIrEmexDataExchange32) == kJtagId91;
+	if (link_ok) {
+		const uint32_t first = eem_read(reg);
+		const uint32_t second = eem_read(reg);
+		link_ok = tap_.ir_shift(kIrCntrlSigCapture) == kJtagId91;
+		if (link_ok) {
+			values[0] = first;
+			values[1] = second;
+		}
+	}
+	tap_.close();
+	return link_ok ? Status::Ok : Status::TargetError;
 }
 
 /* i_ReadJmbOut, Bios/src/hil/edt.c:44-57 */

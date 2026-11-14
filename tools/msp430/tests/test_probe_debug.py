@@ -59,11 +59,17 @@ class ReplyDecodingTest(unittest.TestCase):
         data = b"\x90\x00" + b"".join(r.to_bytes(4, "little") for r in regs)
         self.assertEqual(SbwProbe(Stub(data)).dbg_read_regs(), regs)
 
+    def test_eem_peek(self):
+        stub = Stub(bytes.fromhex("9000" "91" "EFCDAB89" "67452301"))
+        peek = SbwProbe(stub).dbg_eem_peek(500, 0x3E)
+        self.assertEqual(peek, probe_mod.EemPeek(0x91, 0x89ABCDEF, 0x01234567))
+        self.assertEqual(stub.sent, [bytes([0x90, 0x13, 0xF4, 0x01, 0x3E])])
+
     def test_every_short_reply_is_out_of_step(self):
         """Each fixed-size reply one byte short; the full size decodes."""
         calls = (("dbg_attach", (0, 250, 0x1C00, 0x4400), 15), ("dbg_halt", (), 4),
                  ("dbg_status", (), 7), ("dbg_step", (), 4), ("dbg_read_regs", (), 64),
-                 ("connect", (250, 0), 9))
+                 ("connect", (250, 0), 9), ("dbg_eem_peek", (250, 0x00), 9))
         for name, args, n in calls:
             with self.assertRaisesRegex(ProbeError, "out of step", msg=name):
                 getattr(SbwProbe(Stub(b"\x90\x00" + bytes(n - 1))), name)(*args)
@@ -258,6 +264,61 @@ class DebugClientTest(unittest.TestCase):
         self.assertIs(self.probe.last_info, info)
         self.assertTrue(info.features & probe_mod.FEATURE_DEBUG)
 
+    # --- DBG_EEM_PEEK (design spec correction 25) ---
+
+    def test_eem_peek_reads_the_register_twice_and_stays_idle(self):
+        self.fw.eem[0x06] = 0x0004402A
+        peek = self.probe.dbg_eem_peek(250, 0x06)
+        self.assertEqual(peek, probe_mod.EemPeek(0x91, 0x0004402A, 0x0004402A))
+        self.assertEqual(self.probe.dbg_eem_peek(1000, 0x00),
+                         probe_mod.EemPeek(0x91, 0, 0))  # a register nothing set reads 0
+        self.assertEqual(self.fw.peeks, [(250, 0x06), (1000, 0x00)])
+        self.assertEqual((self.fw.state, self.fw.attaches, self.fw.connects), (0, [], []))
+
+    def test_eem_peek_reports_two_different_reads(self):
+        self.fw.eem[0x00] = 0x00004400
+        self.fw.peek_glitch = 0x00004401
+        self.assertEqual(self.probe.dbg_eem_peek(250, 0x00),
+                         probe_mod.EemPeek(0x91, 0x00004400, 0x00004401))
+
+    def test_eem_peek_arguments_are_checked_before_anything_is_sent(self):
+        sent = []
+        transfer = self.fw.transfer
+        self.fw.transfer = lambda req, timeout_ms=3000: sent.append(bytes(req)) or transfer(req)
+        for speed, addr in ((99, 0), (1001, 0), (0, 0), (250, 1), (250, 0x3F), (250, 0x40),
+                            (250, 0x80), (250, -2), (250, 0x100)):
+            with self.assertRaises(ProbeError, msg=(speed, addr)) as cm:
+                self.probe.dbg_eem_peek(speed, addr)
+            self.assertIs(type(cm.exception), ProbeError)
+            self.assertIn("DBG_EEM_PEEK", str(cm.exception))
+        self.assertEqual(sent, [])
+        self.probe.dbg_eem_peek(100, 0x3E)
+        self.probe.dbg_eem_peek(1000, 0x00)
+        self.assertEqual(sent, [bytes([0x90, 0x13, 0x64, 0x00, 0x3E]),
+                                bytes([0x90, 0x13, 0xE8, 0x03, 0x00])])
+
+    def test_eem_peek_failures(self):
+        self.fw.peek_status = NO_TARGET
+        with self.assertRaises(StatusError) as cm:
+            self.probe.dbg_eem_peek(250, 0)
+        self.assertEqual((cm.exception.status, cm.exception.data), (NO_TARGET, b"\xFF"))
+        self.fw.peek_status = TARGET_ERROR
+        with self.assertRaisesRegex(StatusError, r"^DBG_EEM_PEEK failed: TARGET_ERROR \(the link "
+                                                 r"failed: no core ID, or the JTAG ID was not 0x91 "
+                                                 r"before or after the 32-bit reads\)$"):
+            self.probe.dbg_eem_peek(250, 0)
+        self.assertEqual(self.fw.state, 0)
+        self.fw.peek_status = None
+        self.attach()
+        with self.assertRaisesRegex(StatusError, r"^DBG_EEM_PEEK failed: BAD_STATE \(the probe "
+                                                 r"holds a programming or debug session\)$"):
+            self.probe.dbg_eem_peek(250, 0)
+        self.assertEqual(self.fw.state, probe_mod.STATE_DEBUG_HALTED)
+        old = SbwProbe(FakeFirmware(version=1, features=1))
+        with self.assertRaisesRegex(StatusError, r"^DBG_EEM_PEEK failed: UNKNOWN_OP \(the probe "
+                                                 r"firmware predates DBG_EEM_PEEK; update it\)$"):
+            old.dbg_eem_peek(250, 0)
+
 
 class TimedFirmware(FakeFirmware):
     """Records the USB timeout SbwProbe gives each request, by op."""
@@ -299,12 +360,13 @@ class CommandTimeoutTest(unittest.TestCase):
         p.dbg_halt()
         p.dbg_bp_clear()
         p.dbg_detach()
+        p.dbg_eem_peek(khz, 0x00)
         p.connect(250, 0)
         p.disconnect()
         timeouts = {}
         for op, ms in fw.timeouts:
             timeouts.setdefault(op, set()).add(ms)
-        self.assertEqual(set(timeouts), set(range(19)) - {5, 6, 7, 8}, timeouts)
+        self.assertEqual(set(timeouts), set(range(20)) - {5, 6, 7, 8}, timeouts)
         return {op: ms.pop() for op, ms in timeouts.items() if len(ms) == 1}
 
     def test_commands_that_may_sync_wait_for_the_worst_case(self):
@@ -319,6 +381,7 @@ class CommandTimeoutTest(unittest.TestCase):
         for op in set(t) - set(self.SYNC_OPS) - {probe_mod.OP_DBG_ATTACH}:
             self.assertEqual(t[op], 3000, probe_mod.OP_NAMES[op])
         self.assertEqual(t[probe_mod.OP_DBG_RESUME], 3000)  # it releases the CPU, no sync
+        self.assertEqual(t[probe_mod.OP_DBG_EEM_PEEK], 3000)  # identify() and six scans, no sync
 
     def test_the_timeout_follows_the_session_speed(self):
         slow, fast = self.session(100), self.session(1000)
@@ -749,9 +812,56 @@ class FakeFirmwareDebugRulesTest(unittest.TestCase):
         for op in range(10, 19):
             self.assertEqual(self.cmd(fw, op), reply(UNKNOWN_OP), op)
             self.assertEqual(self.cmd(fw, op, b"\x00"), reply(UNKNOWN_OP), op)
-        self.assertEqual((fw.state, fw.attaches), (0, []))
+        self.assertEqual(self.cmd(fw, 19, b"\xFA\x00\x00"), reply(UNKNOWN_OP))
+        self.assertEqual((fw.state, fw.attaches, fw.peeks), (0, [], []))
         with self.assertRaisesRegex(StatusError, "DBG_ATTACH failed: UNKNOWN_OP"):
             SbwProbe(fw).dbg_attach(0, 250, 0x1C00, 0x4400)
+
+    def peek(self, fw, addr=0x00, speed=250):
+        return self.cmd(fw, 19, struct.pack("<HB", speed, addr))
+
+    def test_eem_peek_in_idle(self):
+        """Session::op_dbg_eem_peek: the JTAG ID and both reads; still Idle."""
+        fw = FakeFirmware()
+        fw.eem[0x3E] = 0x12345678
+        self.assertEqual(self.peek(fw, 0x3E, 1000),
+                         reply(OK) + bytes([0x91]) + struct.pack("<II", 0x12345678, 0x12345678))
+        self.assertEqual(self.peek(fw, 0x00, 100), reply(OK) + bytes([0x91]) + bytes(8))
+        self.assertEqual((fw.state, fw.peeks), (0, [(1000, 0x3E), (100, 0x00)]))
+        fw.peek_status = NO_TARGET
+        self.assertEqual(self.peek(fw), bytes([0x90, NO_TARGET, 0xFF]))
+        fw.peek_status = TARGET_ERROR
+        self.assertEqual(self.peek(fw), reply(TARGET_ERROR))
+        self.assertEqual(fw.state, 0)
+
+    def test_eem_peek_arguments(self):
+        fw = FakeFirmware()
+        for args in (struct.pack("<HB", 99, 0), struct.pack("<HB", 1001, 0),
+                     struct.pack("<HB", 250, 1), struct.pack("<HB", 250, 0x3F),
+                     struct.pack("<HB", 250, 0x40), struct.pack("<HB", 250, 0x88),
+                     struct.pack("<HB", 250, 0)[:-1], struct.pack("<HB", 250, 0) + b"\x00", b""):
+            self.assertEqual(self.cmd(fw, 19, args), reply(BAD_ARG), args)
+        self.assertEqual((fw.state, fw.peeks), (0, []))
+
+    def test_eem_peek_only_in_idle(self):
+        """BAD_STATE in every other state, before the size check; the session
+        is left as it was."""
+        fw = FakeFirmware()
+        SbwProbe(fw).connect(250, 0)
+        for state in (1, 2):
+            if state == 2:
+                self.assertEqual(self.cmd(fw, 6, struct.pack("<III", 0x4400, 2, 0x2400)), reply(OK))
+            self.assertEqual(self.peek(fw), reply(BAD_STATE))
+            self.assertEqual(self.cmd(fw, 19, b""), reply(BAD_STATE))
+            self.assertEqual(fw.state, state)
+        for running in (False, True):
+            fw = self.attached()
+            if running:
+                self.cmd(fw, 12)
+            self.assertEqual(self.peek(fw), reply(BAD_STATE))
+            self.assertEqual(self.cmd(fw, 19, b""), reply(BAD_STATE))
+            self.assertEqual((fw.state, fw.detaches), (RUNNING_STATE if running else HALTED, []))
+        self.assertEqual(fw.peeks, [])
 
     def test_step_timeout_pc(self):
         fw = self.attached()
