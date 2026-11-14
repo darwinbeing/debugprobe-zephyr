@@ -5,7 +5,8 @@ the expected texts are GDB 9.1's.
 Besides a session and the read-only refusals, these tests pin GDB behaviour
 the server and docs/MSP430_DEBUG.md rely on (checked with GDB 9.1 of
 MSP430-GCC 9.3.1.11): X packets escape *, #, $ and }; breakpoints after
-monitor reset; console notes before a stop reply; Ctrl-C while stepping;
+monitor reset; break NAME after a PUSHM prologue, break *NAME at the first
+instruction; console notes before a stop reply; Ctrl-C while stepping;
 SIGLOST; load; what GDB's memory map refuses before the server is asked; the
 register names."""
 import io
@@ -199,6 +200,29 @@ class GdbEndToEndTest(unittest.TestCase):
         self.assertIn("1 hardware breakpoint set again", text)
         self.assertIn("Breakpoint 1, 0x00004600 in demo_key_handler", text)
         self.assertNotIn("SIGINT", text)
+
+    def test_break_name_skips_the_prologue_and_break_star_name_does_not(self):
+        # demo_saver: PUSHM.A #2,R10 (0x141A), MOV.W R12,R10 (0x4C0A), RET (0x4130)
+        names = os.path.join(self.tmp.name, "saver.tsv")
+        with open(names, "w") as f:
+            f.write("address\tnew_name\n4520\tdemo_main_loop\n4680\tdemo_saver\n")
+        elf = os.path.join(self.tmp.name, "saver.elf")
+        self.assertEqual(symelf.main([names, "-o", elf], out=io.StringIO()), 0)
+        self.fw.mem.update(dict(enumerate(bytes.fromhex("1a140a4c3041"), start=0x4680)))
+        text = self.gdb("x/2i 0x4680", "break demo_saver", "continue", "delete",
+                        "break *demo_saver", "continue", "detach", elf=elf)
+        self.assertRegex(text, r"0x4680 <demo_saver>:\s+pushm\.a\s+#2,\s+r10")
+        # GDB's prologue analysis (msp430-tdep.c) reads the code from the
+        # target and skips the PUSHM.A
+        self.assertIn("Breakpoint 1 at 0x4682", text)
+        self.assertIn("Breakpoint 1, 0x00004682 in demo_saver ()", text)
+        self.assertIn("Breakpoint 2 at 0x4680", text)
+        self.assertIn("Breakpoint 2, 0x00004680 in demo_saver ()", text)
+        # both are hardware breakpoints, which GDB chose by itself in flash
+        self.assertIn("automatically using hardware breakpoints for read-only addresses", text)
+        self.assertNotIn("Cannot insert breakpoint", text)
+        self.assertEqual(self.fw.resumes, 2)
+        self.assertEqual(self.fw.detaches, [0])
 
     @staticmethod
     def _ran_past_the_breakpoint(fw):

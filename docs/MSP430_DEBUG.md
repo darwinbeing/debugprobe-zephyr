@@ -154,6 +154,12 @@ The ELF file only names addresses; it has no types and no line numbers:
 - GDB classes a symbol by the section it lies in, so a constant in flash is a
   text symbol. `print` asks for a cast: `print *(unsigned short *)&demo_table`
   or `x/hx &demo_table`. No symbol has a type.
+- `break NAME` stops after the function's prologue, not at its first
+  instruction: without line numbers GDB reads the function's first
+  instructions and skips those that set up its frame, such as a `PUSHM`. For
+  a function at 0x4680 that begins with `PUSHM.A #2,R10`, GDB answers
+  `Breakpoint 1 at 0x4682`. `break *NAME` stops at the first instruction. In
+  flash both are hardware breakpoints, which GDB chooses by itself.
 - A function in RAM and an absolute symbol (one in neither flash nor RAM)
   cannot be used with `break NAME`; use `hbreak *ADDRESS`.
 - `info symbol ADDRESS` answers only for addresses in flash or RAM.
@@ -173,7 +179,7 @@ The ELF file only names addresses; it has no types and no line numbers:
 | Stop a running program | Ctrl-C |
 | Continue | `continue` |
 | One instruction | `stepi`, `nexti` |
-| Breakpoint | `break demo_blink` or `hbreak *0x4420` |
+| Breakpoint | `break *demo_blink` (its first instruction), `break demo_blink` (after its prologue), `hbreak *0x4420` |
 | Leave, program keeps running | `detach` |
 
 - **Registers** are GDB's own layout for the MSP430: R0 (PC), R1 (SP), R2
