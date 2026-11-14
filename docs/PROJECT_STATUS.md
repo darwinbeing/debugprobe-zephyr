@@ -261,8 +261,10 @@ Things to look at during bring-up, from the code reviews:
 ## Phase 7 — MSP430F5529 debugging over SBW, read-only (B1)
 
 **Implemented:** `msp430::Debugger` (`lib/msp430/src/debug.cpp`, port of the
-CPUXv2 macros of TI's MSP Debug Stack 3.15.1.1), debug operations 0x09-0x12
-of vendor command 0x90 (protocol version 2) with the `PROTECTED` write rules
+CPUXv2 macros of TI's MSP Debug Stack 3.15.1.1), debug operations 0x09-0x13
+of vendor command 0x90 (protocol version 2; 0x13 `DBG_EEM_PEEK`, `sbw.py
+eem-peek`, is the read-only check of the 32-bit scans to run before a board's
+first attach) with the `PROTECTED` write rules
 (RAM and peripheral registers only, without the PMM, flash controller, SYS
 and DMA blocks; the PC only into main flash) and the lock on the flash
 operations, GDB remote-protocol server (`tools/msp430/gdbserver.py`,
@@ -277,8 +279,8 @@ run on a target. The server has been driven by scripted GDB clients and by
 
 | Axis | Status |
 |---|---|
-| Host tests | 363/363 C++ (`scripts/run_host_tests.sh`, also under ASan); 401 Python, 13 of them skipped without msp430-elf-gdb (`python3 -m unittest discover -s tools/msp430/tests`) |
-| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on: rebuilt 2026-11-13 after the last firmware changes (`748ebbb`, the per-device peripheral write window, and `07f2e4a`, the link check before a restore), all three boards; rpi_pico with `CONFIG_PROBE_MSP430_SBW=n`: built at Task 15, and nothing that configuration compiles has changed since |
+| Host tests | 376/376 C++ (`scripts/run_host_tests.sh`, also under ASan); 426 Python, 13 of them skipped without msp430-elf-gdb (`python3 -m unittest discover -s tools/msp430/tests`) |
+| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on: rebuilt 2026-11-13 after the last firmware changes (`a3cb815`, `DBG_EEM_PEEK`, and `7d624be`, the reset when the link check before a detach's restore fails), all three boards; rpi_pico with `CONFIG_PROBE_MSP430_SBW=n`: built at Task 15, and nothing that configuration compiles has changed since |
 | End-to-end with GDB | ✓ 2026-11-13, GNU gdb (Mitto Systems Limited - msp430-gcc 9.3.1.11) 9.1: connect, registers, breakpoint by symbol, stepi, memory, refusals (tools/msp430/tests/test_gdb_e2e.py); also `X` escaping, breakpoints after `monitor reset` (also with `always-inserted on`, which needed a server fix) and `flushregs`, console notes before stop replies, Ctrl-C during `stepi 1000` and `next` (stops after the step under way), SIGLOST, `load`, reads and writes GDB's memory map refuses itself, register names, `break NAME` after a `PUSHM.A` prologue and `break *NAME` at the first instruction |
 | On-target hardware | **Not run yet** — see the acceptance table below |
 
@@ -291,6 +293,8 @@ before the first step and after the last. Nothing below has been run.
 |---|---|---|
 | 0 | Flash and information memory equal the backups before the session | — |
 | 1 | `sbw.py info` shows protocol version 2, debugging supported, 8 hardware breakpoints | — |
+| 1a | `sbw.py eem-peek` at EEM 0x00, 0x02, 0x04, 0x06, at 250 and 100 kHz: JTAG ID 0x91 and both reads equal each time (the 32-bit scans, read-only, before the first attach) | — |
+| 1b | VMAIE is 0; VMAIFG before and after one register read | — |
 | 2 | Attach without reset, read registers, detach: the firmware keeps running | — |
 | 3 | Halt and resume 50 times while it runs; it keeps working; whether a timer runs while halted | — |
 | 4 | Hardware breakpoint on a function by symbol; the firmware reaches it and stops there; step, inspect, continue | — |
