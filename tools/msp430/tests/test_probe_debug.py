@@ -248,9 +248,19 @@ class DebugClientTest(unittest.TestCase):
         with self.assertRaisesRegex(StatusError, r"^DBG_DETACH failed: TARGET_ERROR \(the program "
                                                  r"does not continue where it stopped: the probe "
                                                  r"reset the target, whose firmware restarts, or "
-                                                 r"had lost it\)$") as cm:
+                                                 r"the halt for the detach failed and the CPU was "
+                                                 r"released where it was\)$") as cm:
             self.probe.dbg_detach()
         self.assertEqual((cm.exception.status, self.fw.state), (TARGET_ERROR, 0))
+
+    def test_a_failed_attach_names_what_became_of_the_cpu(self):
+        self.fw.attach_status = TARGET_ERROR
+        with self.assertRaisesRegex(StatusError, r"^DBG_ATTACH failed: TARGET_ERROR \(the attach "
+                                                 r"lost synchronization with the CPU: the probe "
+                                                 r"let it go where it was, or reset it if the link "
+                                                 r"failed after its context was saved or during an "
+                                                 r"attach with reset\)$"):
+            self.attach()
 
     def test_status_errors_that_mean_something_particular(self):
         self.attach()

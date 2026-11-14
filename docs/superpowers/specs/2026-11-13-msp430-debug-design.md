@@ -265,6 +265,10 @@ board cannot be put into full mode by mistake.
 
 - A failed attach leaves the target as it was: before the context is saved
   nothing is changed; after it, a failure releases with the saved context.
+  An attach without reset never resets the target on a healthy link; only if
+  the link itself fails after the context was saved (its check fails twice in
+  a row) does the probe reset the target, so that the firmware restarts
+  instead of hanging (correction 26).
 - Every operation that can leave the CPU halted has a release path: detach on
   `D`, on a dropped TCP connection, on Ctrl-C of the server, on USB loss
   (`Session::abort`).
@@ -427,10 +431,11 @@ already worked into the text above; the others take precedence over it.
     need at worst: 3 s for most, and for `DBG_ATTACH`, `DBG_HALT`,
     `DBG_STEP`, `DBG_STATUS` and `DBG_DETACH`, which can sync with the CPU,
     the worst case of the sync's loops at the session's SBW speed (about
-    20 s per sync at 250 kHz) with a margin. `DBG_ATTACH` counts its first
-    sync, which ends an open session, at the slower of its own speed and
-    that session's; the first attach of a process does not know the speed
-    of a session an earlier process left open and counts with 100 kHz.
+    20 s per sync at 250 kHz) with a margin. `DBG_ATTACH` counts both of its
+    syncs (the one that ends an open session and its own) at the slower of
+    its own speed and that session's; the first attach of a process does not
+    know the speed of a session an earlier process left open and counts with
+    100 kHz.
 
 ## Corrections made after B1 (2026-11-13)
 
@@ -470,8 +475,10 @@ already worked into the text above; the others take precedence over it.
     SBWTDIO (data bit 3 of the scan instead of the TCLK level) differ; SBW
     limits only the low phase of SBWTCK.
 26. **A detach that cannot restore the context resets the target.** When
-    the link check before the restore of a detach with action 0 fails
-    (correction 20), the CPU's context is saved: it has been fed
+    the link check before the restore of a detach with action 0 fails twice
+    in a row (correction 20; the check is made a second time so that one bad
+    capture on a healthy link does not cost a reset), the CPU's context is
+    saved: it has been fed
     instructions, holds the watchdog (WDTHOLD) and has GIE cleared, and its
     PC is wherever JTAG left it (0x0004 after a register read's safe-PC
     step, for example). Let go there, it would hang until a reset if only
@@ -482,9 +489,16 @@ already worked into the text above; the others take precedence over it.
     is fed), and the firmware restarts. The same applies wherever the probe
     detaches with action 0: `Session::abort` after a memory, register or
     breakpoint access returned `TARGET_ERROR`, and an attach whose final
-    check fails after the sync. `DBG_DETACH` then answers `TARGET_ERROR`,
-    as it does when a running CPU is lost while it is halted for the detach;
-    the session is over either way. The host does not report "the program
-    continues where it stopped" then: `sbw.py gdbserver` prints that the
-    probe could not restore the context and reset the target (its firmware
-    restarts), or had lost it.
+    check fails after the sync: so an attach without reset can, as its one
+    exception, end in a reset, but only when the link has failed after the
+    context was saved, never on a healthy link. `DBG_DETACH` then answers
+    `TARGET_ERROR`, as it does when the halt for the detach of a running CPU
+    fails (the CPU is released where it was); the session is over either
+    way. The host does not report "the program continues where it stopped"
+    then: `sbw.py gdbserver` prints that the probe either could not restore
+    the context and reset the target (its firmware restarts), or the halt
+    for the detach failed and the CPU was released where it was; a failed
+    `DBG_ATTACH` is worded the same way (let go where it was, or reset if
+    the link failed after the context was saved). `sbw.py gdbserver` also
+    ends a debug session an earlier process left open with `DBG_DETACH 0`
+    before it serves, and reports which of the two happened.

@@ -323,6 +323,13 @@ def _gdbserver(args, probe: SbwProbe, out, err, serve) -> None:
                   "restarts from the reset vector\n")
     server = gdbserver.GdbServer(probe, devices.MSP430F5529, speed_khz=speed,
                                  attach_mode=mode, out=out)
+    if info.state in (probe_mod.STATE_DEBUG_HALTED, probe_mod.STATE_DEBUG_RUNNING):
+        # An earlier process left a debug session open. The first DBG_ATTACH
+        # would end it silently; end it here and say whether its program
+        # continued or the target was reset.
+        server.say("the probe still holds a debug session from an earlier run; detaching it")
+        server.attached = True
+        server._detach_surely()
     args.serving = True  # from here on Ctrl-C stops the server (which detaches first)
     try:
         serve(server, args.port)
@@ -330,6 +337,9 @@ def _gdbserver(args, probe: SbwProbe, out, err, serve) -> None:
         if e.errno in (errno.EADDRINUSE, errno.EACCES):  # in use, or a privileged port
             raise FlashError(f"{e}; choose another with --port") from None
         raise
+    finally:
+        # whatever ended serve(): an attach it made is not left behind
+        server._detach_surely()
 
 
 class _Stopped(KeyboardInterrupt):

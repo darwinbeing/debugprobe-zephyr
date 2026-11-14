@@ -618,12 +618,49 @@ class GdbServerCliTest(unittest.TestCase):
             self.assertIn("unplug and replug the probe", err)
             self.assertIn("sbw.py reset", err)
             self.assertEqual(fw.state, state)  # nothing was changed
-        # a debug session left open is not in the way: DBG_ATTACH ends it
+    def test_a_debug_session_left_open_is_detached_and_reported_first(self):
+        """An earlier process left a debug session open: DBG_DETACH 0 before
+        serving, and whether the program continued or the target was reset
+        is said, not left to the first DBG_ATTACH to do silently."""
         for state in (probe_mod.STATE_DEBUG_HALTED, probe_mod.STATE_DEBUG_RUNNING):
-            fw = FakeFirmware()
-            fw.state = state
-            code, _, _, calls = self.run_server(["gdbserver"], fw)
-            self.assertEqual((code, len(calls)), (0, 1))
+            for unrestored in (False, True):
+                fw = FakeFirmware()
+                fw.state = state
+                fw.detach_unrestored = unrestored
+                t = Recorder(fw)
+                out, err = io.StringIO(), io.StringIO()
+                calls = []
+                code = sbw.main(["gdbserver"], transport=t, out=out, err=err,
+                                serve=lambda server, port: calls.append(server))
+                self.assertEqual((code, len(calls)), (0, 1), (state, unrestored))
+                self.assertEqual(t.commands, [DAP_DISCONNECT, sbw_op(probe_mod.OP_INFO),
+                                              sbw_op(probe_mod.OP_DBG_DETACH)])
+                self.assertEqual((fw.detaches, fw.state, fw.attaches), ([0], 0, []))
+                text = out.getvalue()
+                self.assertIn("the probe still holds a debug session from an earlier run; "
+                              "detaching it", text)
+                if unrestored:
+                    self.assertIn("detached, but the program does not continue where it "
+                                  "stopped", text)
+                else:
+                    self.assertIn("detached; the program continues where it stopped", text)
+
+    def test_the_server_detaches_on_the_way_out_however_serve_ends(self):
+        """sbw.py detaches after serve() too: an interrupt between the attach
+        and serve_connection's own detach does not leave the target halted."""
+        fw = FakeFirmware()
+
+        def attached_then_interrupted(server, port):
+            server._attach(probe_mod.ATTACH_RUNNING)
+            raise KeyboardInterrupt
+
+        out, err = io.StringIO(), io.StringIO()
+        code = sbw.main(["gdbserver"], transport=fw, out=out, err=err,
+                        serve=attached_then_interrupted)
+        self.assertEqual(code, 130)
+        self.assertEqual((fw.detaches, fw.state), ([probe_mod.DETACH_RUN], 0))
+        self.assertIn("detached; the program continues where it stopped", out.getvalue())
+        self.assertTrue(fw.closed)
 
     def test_a_whole_session_sends_no_connect_erase_or_flash_command(self):
         fw = FakeFirmware()

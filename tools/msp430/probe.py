@@ -114,9 +114,14 @@ OP_STATUS_NAMES = {
         "TIMEOUT (the step did not complete in time; the probe stopped the CPU)",
     (OP_DBG_WRITE_REG, STATUS_PROTECTED):
         "PROTECTED (read-only mode: the PC may only be set inside main flash)",
+    (OP_DBG_ATTACH, STATUS_TARGET_ERROR):
+        "TARGET_ERROR (the attach lost synchronization with the CPU: the probe let it go where "
+        "it was, or reset it if the link failed after its context was saved or during an "
+        "attach with reset)",
     (OP_DBG_DETACH, STATUS_TARGET_ERROR):
         "TARGET_ERROR (the program does not continue where it stopped: the probe reset the "
-        "target, whose firmware restarts, or had lost it)",
+        "target, whose firmware restarts, or the halt for the detach failed and the CPU was "
+        "released where it was)",
     (OP_DBG_EEM_PEEK, STATUS_BAD_STATE):
         "BAD_STATE (the probe holds a programming or debug session)",
     (OP_DBG_EEM_PEEK, STATUS_TARGET_ERROR):

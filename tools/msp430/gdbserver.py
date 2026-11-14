@@ -46,10 +46,13 @@ SIGINT, SIGTRAP, SIGLOST = 2, 5, 0x1D  # GDB's signal numbers (gdb/signals.def)
 REG_CG = 3            # R3, the constant generator: never written
 SR_CPUOFF = 0x0010
 MONITOR_READ_WORDS = 256
-# DBG_DETACH answered TARGET_ERROR: the session is over all the same
-DETACH_RESET = ("detached, but the program does not continue where it stopped: the probe could "
-                "not restore its context and reset the target (its firmware restarts), or had "
-                "lost it")
+# What the server says once the probe has answered DBG_DETACH 0: OK, or
+# TARGET_ERROR (the session is over all the same)
+DETACHED = "detached; the program continues where it stopped"
+DETACH_NOT_RESTORED = ("detached, but the program does not continue where it stopped: the probe "
+                       "either could not restore its context and reset the target (its firmware "
+                       "restarts), or the halt for the detach failed and the CPU was released "
+                       "where it was (it keeps running, if the target still has power)")
 
 HELP = """monitor commands:
   monitor reset              reset the target and halt at the reset vector
@@ -145,7 +148,10 @@ def _signals_ignored():
     previous = {}
     try:
         for signum in GUARDED_SIGNALS:
-            previous[signum] = signal.signal(signum, signal.SIG_IGN)
+            # recorded before it is replaced: an interrupt right after the
+            # replacement cannot lose it
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, signal.SIG_IGN)
         yield
     finally:
         _put_back(previous)
@@ -376,12 +382,11 @@ class GdbServer:
         Ctrl-C, SIGTERM and SIGHUP do not cut it off: they are ignored on the
         main thread while it is sent. One that comes through anyway (while
         the guard goes up or comes down) is kept and raised once the detach
-        is over and reported. `attached` stays set until the probe has
+        is over and reported (the report is made inside the guard). `attached` stays set until the probe has
         answered DBG_DETACH or the detach has failed for good, and until
         then it is sent again; once the probe has answered it is never sent
         again (a second one would only answer BAD_STATE)."""
         interrupt = None
-        outcome = None
         while self.attached:
             try:
                 with _signals_ignored():
@@ -389,19 +394,21 @@ class GdbServer:
                         self.probe.dbg_detach(probe_mod.DETACH_RUN)
                     except StatusError as e:
                         self.attached = False
-                        outcome = (DETACH_RESET if e.status == probe_mod.STATUS_TARGET_ERROR
+                        outcome = (DETACH_NOT_RESTORED
+                                   if e.status == probe_mod.STATUS_TARGET_ERROR
                                    else f"detach failed: {e}")
                     except ProbeError as e:
                         self.attached = False
                         outcome = f"detach failed: {e}"
                     else:
                         self.attached = False
-                        outcome = "detached; the program continues where it stopped"
+                        outcome = DETACHED
+                    # reported inside the guard: nothing comes between the
+                    # probe's answer and this line
+                    self.say(outcome)
             except KeyboardInterrupt as e:
                 if interrupt is None:
                     interrupt = e
-        if outcome is not None:
-            self.say(outcome)
         if interrupt is not None:
             raise interrupt
 

@@ -85,14 +85,21 @@ msp430-elf-gdb -nx symbols.elf
 build's ELF file. The longer `remotetimeout` is for the attach, which can take
 longer than GDB's default of two seconds.
 
-Attaching without reset stops the program where it is. Nothing is reset and
-the target's other state (watchdog setting, low-power mode, peripherals) is
-kept as TI's debug stack keeps it. When GDB detaches (`detach`, `kill`,
-`quit`, or the connection drops) the server detaches too and the program
-continues where it stopped, without a reset. The one exception: if the
-probe's link check before it gives the program its context back fails, it
-resets the target instead (the firmware restarts), and the server says so
-(Troubleshooting). Stop the server with Ctrl-C;
+Attaching without reset stops the program where it is. On a working link
+nothing is reset, and the target's other state (watchdog setting, low-power
+mode, peripherals) is kept as TI's debug stack keeps it. When GDB detaches
+(`detach`, `kill`, `quit`, or the connection drops) the server detaches too
+and the program continues where it stopped, without a reset.
+
+The one exception, for an attach without reset as for a detach: if the link
+fails after the probe has saved the CPU's context (its link check fails twice
+in a row), the probe cannot give the program its context back and resets the
+target instead, so that the firmware restarts rather than hangs; the server
+says so (Troubleshooting). If an earlier run left a debug session open on the
+probe (the tool was killed, for example), the server ends it before it waits
+for GDB and says whether that program continued or the target was reset.
+
+Stop the server with Ctrl-C;
 SIGTERM and SIGHUP do the same. It detaches first, and exits with status 130
 (Ctrl-C) or 128 plus the signal number. While it detaches, these three
 signals are ignored, so that nothing cuts the detach off; one that arrives
@@ -309,8 +316,9 @@ flash, and `load` (`Load failed`).
 | `refused: read of ... the BSL area ... is never read` | The bootloader area is not read. Seen as the previous row. |
 | `refused: read of NAME (...) clears ...` | See "Reads with side effects"; use `monitor read`. |
 | `refused: byte write at ... would read ...; write the whole word` | See "Using GDB", byte writes. |
-| `target lost (...); the debug session has ended` | The target was reset, lost power or the wires came off. While it ran, GDB says `Program terminated with signal SIGLOST, Resource lost.` The session is over (`detach` says `The program is not being run.`); start `target remote` again. |
-| `detached, but the program does not continue where it stopped: ...` | The detach could not give the program its context back: the link failed its check, so the probe reset the target and its firmware restarts from the reset vector (it is not left halted or hanging); or the target had been lost while it ran. Check the wiring and the target supply before attaching again. |
+| `target lost (...); the debug session has ended` | The target was reset, lost power or the wires came off, or the link failed. The probe has ended the session; if the link failed while the CPU was halted, it may have reset the target (its firmware restarts) because it could not give the program its context back. While it ran, GDB says `Program terminated with signal SIGLOST, Resource lost.` The session is over (`detach` says `The program is not being run.`); start `target remote` again. |
+| `detached, but the program does not continue where it stopped: ...` | The detach could not give the program its context back: the link failed its check twice, so the probe reset the target and its firmware restarts from the reset vector (it is not left halted or hanging); or the halt for the detach failed, and the CPU was released where it was and keeps running (if the target still has power). Check the wiring and the target supply before attaching again. |
+| `DBG_ATTACH failed: TARGET_ERROR (the attach lost synchronization with the CPU: ...)` | The attach failed. The probe let the CPU go where it was; only if the link failed after it had saved the CPU's context (or during an attach with reset) did it reset the target. |
 | `unexpected device: ID bytes ...` | The target is not an MSP430F5529. The target was left running. |
 | `no MSP430 found (JTAG ID read as 0x..)` | See `docs/MSP430_SBW.md`, Troubleshooting; try a lower `--speed`. |
 | `the device's JTAG lock key is programmed; it cannot be debugged` | The device is locked. |

@@ -1157,9 +1157,13 @@ class DetachSignalTest(unittest.TestCase):
         class Signal:  # stands in for the signal module inside gdbserver
             SIG_IGN, SIG_DFL = signal.SIG_IGN, signal.SIG_DFL
 
+            def getsignal(self, signum):
+                calls.append(("get", signum))
+                return None  # what getsignal() returns for such a handler
+
             def signal(self, signum, handler):
-                calls.append((signum, handler))
-                return None  # what signal.signal() returns for such a handler
+                calls.append(("set", signum, handler))
+                return None
 
         real = gdbserver.signal
         gdbserver.signal = Signal()
@@ -1168,8 +1172,56 @@ class DetachSignalTest(unittest.TestCase):
                 pass
         finally:
             gdbserver.signal = real
-        self.assertEqual(calls, [(n, signal.SIG_IGN) for n in GUARDED] +
-                         [(n, signal.SIG_DFL) for n in GUARDED])
+        # each handler recorded before it is replaced
+        want = []
+        for n in GUARDED:
+            want += [("get", n), ("set", n, signal.SIG_IGN)]
+        self.assertEqual(calls, want + [("set", n, signal.SIG_DFL) for n in GUARDED])
+
+    def test_an_interrupt_while_the_guard_goes_up_loses_no_handler(self):
+        """A Ctrl-C right after a handler was replaced by SIG_IGN (before the
+        old one could be kept, if it were kept from signal()'s return): the
+        old handlers were recorded first, so all go back."""
+        before = {n: signal.getsignal(n) for n in GUARDED}
+        hit = []
+
+        def on_signal(signum, handler):
+            if handler is signal.SIG_IGN and not hit:
+                hit.append(signum)
+                raise KeyboardInterrupt
+
+        real = gdbserver.signal
+        gdbserver.signal = self.signal_proxy(on_signal)
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                with gdbserver._signals_ignored():
+                    self.fail("the guard is not up")
+        finally:
+            gdbserver.signal = real
+            after = {n: signal.getsignal(n) for n in GUARDED}
+            for n, handler in before.items():
+                signal.signal(n, handler)
+        self.assertEqual(hit, [GUARDED[0]])
+        self.assertEqual(after, before)
+
+    def test_the_detach_is_reported_while_the_signals_are_ignored(self):
+        """The outcome line is written inside the guard: a Ctrl-C cannot come
+        between the probe's answer and the report."""
+        fw = FakeFirmware()
+        seen = []
+
+        class Out(io.StringIO):
+            def write(self, text):
+                if text.startswith("detached"):
+                    seen.append([signal.getsignal(n) for n in GUARDED])
+                return super().write(text)
+
+        server = self.server(fw)
+        server.out = Out()
+        server._attach(probe_mod.ATTACH_RUNNING)
+        server._detach()
+        self.assertEqual(seen, [[signal.SIG_IGN] * len(GUARDED)])
+        self.assertEqual(fw.detaches, [0])
 
     def test_attached_is_cleared_only_once_dbg_detach_was_answered(self):
         """Attempts cut off before DBG_DETACH is sent are made again until it
@@ -1376,11 +1428,12 @@ class DetachSignalTest(unittest.TestCase):
         server._detach()
         out = server.out.getvalue()
         self.assertFalse(server.attached)
-        self.assertIn("detached, but the program does not continue where it stopped: the probe "
-                      "could not restore its context and reset the target (its firmware "
-                      "restarts), or had lost it", out)
+        self.assertIn(gdbserver.DETACH_NOT_RESTORED, out)
+        self.assertIn("could not restore its context and reset the target", out)
+        self.assertIn("the halt for the detach failed and the CPU was released where it was",
+                      out)
         self.assertNotIn("continues where it stopped", out)
-        self.assertNotIn("detach failed", out)
+        self.assertNotIn("detach failed:", out)  # the message of a failed DBG_DETACH
         server._detach()  # not sent again
         self.assertEqual((fw.detaches, fw.state), ([0], 0))
 
