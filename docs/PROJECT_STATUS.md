@@ -272,15 +272,14 @@ Design: `docs/superpowers/specs/2026-11-13-msp430-debug-design.md`; plan:
 `docs/MSP430_DEBUG.md`; TI's licence notice: `THIRD_PARTY_NOTICES.md`.
 
 **Status: implemented and tested on the host only.** Nothing of this phase has
-run on a target, and `msp430-elf-gdb` is not installed yet (plan Tasks 22
-and 23); the server has only been driven by scripted GDB clients against a
-fake probe.
+run on a target. The server has been driven by scripted GDB clients and by
+`msp430-elf-gdb` 9.1 (installed in plan Task 22), both against a fake probe.
 
 | Axis | Status |
 |---|---|
-| Host tests | 357/357 C++ (`scripts/run_host_tests.sh`, also under ASan); 374/374 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
-| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on, rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n`: built after the last firmware change (Task 15); not rebuilt since, documentation only |
-| End-to-end with GDB | Not run: GDB not installed (Tasks 22-23) |
+| Host tests | 357/357 C++ (`scripts/run_host_tests.sh`, also under ASan); 387 Python, 12 of them skipped without msp430-elf-gdb (`python3 -m unittest discover -s tools/msp430/tests`) |
+| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on, rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n`: built after the last firmware change (Task 15); not rebuilt since, host tool and documentation only |
+| End-to-end with GDB | ✓ 2026-11-13, GNU gdb (Mitto Systems Limited - msp430-gcc 9.3.1.11) 9.1: connect, registers, breakpoint by symbol, stepi, memory, refusals (tools/msp430/tests/test_gdb_e2e.py); also `X` escaping, breakpoints after `monitor reset` (also with `always-inserted on`, which needed a server fix) and `flushregs`, console notes before stop replies, Ctrl-C during `stepi 1000` and `next` (stops after the step under way), SIGLOST, `load`, reads and writes GDB's memory map refuses itself, register names |
 | On-target hardware | **Not run yet** — see the acceptance table below |
 
 ### Phase 7 hardware acceptance (rpi_pico + MSP430F5529 board, read-only)
@@ -333,8 +332,9 @@ before the first step and after the last. Nothing below has been run.
 
 4. **MSP430 Spy-Bi-Wire on rpi_pico2 and rpi_debug_probe** — built, not run.
 
-5. **MSP430 debugging (phase 7)** — host-tested only; needs `msp430-elf-gdb`
-   (plan Tasks 22-23) and the on-target acceptance above (Task 25).
+5. **MSP430 debugging (phase 7)** — host-tested only, also with
+   `msp430-elf-gdb` 9.1 against the fake probe; needs the on-target
+   acceptance above (Task 25).
 
 ---
 

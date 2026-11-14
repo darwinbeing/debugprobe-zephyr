@@ -7,11 +7,12 @@ debugger is `msp430-elf-gdb` from TI's MSP430-GCC package. Wiring and
 electrical checks are those of `docs/MSP430_SBW.md`.
 
 **Status.** This is the first debugging version (phase B1). It is implemented
-and tested on the host, against a fake probe and a fake target. It has not run
-against a real target or a real `msp430-elf-gdb` yet; the acceptance record in
-`docs/PROJECT_STATUS.md` (Phase 7) says what has been checked. Statements below
-about GDB's own behaviour come from its documentation and its source and may
-need correcting after that run.
+and tested on the host, against a fake probe and a fake target, also with
+`msp430-elf-gdb` 9.1 (TI's MSP430-GCC 9.3.1.11), which is where the
+statements below about GDB's own behaviour were checked
+(`tools/msp430/tests/test_gdb_e2e.py`). It has not run against a real target
+yet; the acceptance record in `docs/PROJECT_STATUS.md` (Phase 7) says what has
+been checked.
 
 This version has one mode, **read-only**. It is meant for boards whose
 firmware must not change.
@@ -22,7 +23,9 @@ Flash (main flash, information memory, bootloader) is never written for you.
 Three layers refuse it independently:
 
 1. GDB is told that flash is read-only memory (the memory map marks it
-   `rom`), so it does not write there on its own.
+   `rom`), so it does not write there: it refuses such writes and `load`
+   itself, without asking the server. It also refuses reads and writes
+   outside the map.
 2. The server refuses every write outside RAM and the permitted peripheral
    registers, every PC change outside main flash, software breakpoints and
    `load`, before anything is sent to the probe.
@@ -153,7 +156,11 @@ The ELF file only names addresses; it has no types and no line numbers:
   cannot be used with `break NAME`; use `hbreak *ADDRESS`.
 - `info symbol ADDRESS` answers only for addresses in flash or RAM.
 - Never `load` the symbol ELF. With `--image` it holds 128 KiB of flash
-  contents; read-only mode refuses `load` anyway; a later full mode would write it.
+  contents, and a later full mode would write them. In read-only mode GDB
+  refuses to write into memory its map marks as ROM and stops with
+  `Load failed`. Without `--image` there is nothing to load (`load size 0`),
+  and the server refuses GDB's move of the PC to the entry address 0
+  (`Could not write register ""`). Nothing is written either way.
 
 ## Using GDB
 
@@ -169,14 +176,19 @@ The ELF file only names addresses; it has no types and no line numbers:
 
 - **Registers** are GDB's own layout for the MSP430: R0 (PC), R1 (SP), R2
   (SR), R3 (CG, always 0 and never written) and R4-R15, 20 bits wide (SR 16).
-  The server sends no target description.
+  The server sends no target description. In GDB their names are `$pc`,
+  `$sp`, `$sr`, `$cg` and `$r4`-`$r15`; `$r0`-`$r3` are not registers (GDB
+  prints `void` for them).
 - **Breakpoints** are the chip's eight EEM triggers, set only while the CPU
   is halted and armed when it resumes. GDB's `next`, `finish` and `until`
   need one trigger each for their temporary breakpoints; with all eight in
   use they fail.
 - **Software breakpoints** are refused. GDB sets a hardware breakpoint by
-  itself for code in memory its map marks as ROM (flash); a `break` on an
-  address in RAM asks for a software one, so use `hbreak` there.
+  itself for code in memory its map marks as ROM (flash), and says
+  "automatically using hardware breakpoints for read-only addresses". A
+  `break` on an address in RAM asks for a software one, so use `hbreak`
+  there. GDB reports the refusal when it resumes (`Cannot insert breakpoint
+  N.`) and does not resume.
 - **Source-level stepping** needs debug information that matches the flash;
   for firmware without it, step by instruction.
 - **Byte writes** to RAM or peripherals are word read-modify-writes. A byte
@@ -189,7 +201,9 @@ The ELF file only names addresses; it has no types and no line numbers:
   as with TI's tools; `continue` to a breakpoint instead. A step over an
   instruction that enters a low-power mode ends with a note that the CPU is
   halted there; a step that does not complete in time stops the CPU and says
-  so.
+  so. Ctrl-C during `stepi N`, or during `next` through code without line
+  information (GDB steps it one instruction at a time), stops after the
+  step under way.
 
 ### Reads with side effects
 
@@ -221,8 +235,11 @@ it had.
 
 GDB's memory map leaves out vacant memory (0x0000-0x00FF, 0x0940-0x0FFF,
 0x1B00-0x1BFF), the bootloader area (0x1000-0x17FF) and everything above
-main flash. Reads there are refused ("outside the target's memory map", or
-"the BSL area ... is never read"). Reading the USB buffer RAM
+main flash. GDB refuses reads and writes there itself, with `Cannot access
+memory at address ...`, and does not ask the server. `monitor read` gives
+the server's reason ("outside the target's memory map", or "the BSL area ...
+is never read"); so does the server's console after `set mem
+inaccessible-by-default off`, which makes GDB ask. Reading the USB buffer RAM
 (0x1C00-0x23FF) while the USB module is suspended (PLL off) may cause a bus
 error, according to the comments in TI's USB API.
 
@@ -231,7 +248,7 @@ error, according to the comments in TI's USB API.
 | Command | Effect |
 |---|---|
 | `monitor help` | list the commands |
-| `monitor reset` | reset the target and halt at the reset vector; then run `maintenance flush register-cache` so GDB reads the registers again. The program continues for a moment first: the open session is detached before the new attach. |
+| `monitor reset` | reset the target and halt at the reset vector; then run `flushregs` so GDB reads the registers again (GDB keeps them across a monitor command). Newer GDB versions also take `maintenance flush register-cache`; GDB 9 does not have it and runs `maintenance flush-symbol-cache` for it, which leaves the registers alone. The program continues for a moment first: the open session is detached before the new attach. Breakpoints stay set: GDB inserts them again when it resumes, and the server sets again those GDB keeps inserted (`set breakpoint always-inserted on`). |
 | `monitor read ADDR [WORDS]` | read 1-256 words (default 1) from an even address, including registers with side effects |
 | `monitor status` | device, mode, speed, state, hardware breakpoints in use |
 | `monitor speed KHZ` | SBW clock, 100-1000, for the next attach (`monitor reset` or the next connection) |
@@ -260,20 +277,27 @@ error, according to the comments in TI's USB API.
 ## Troubleshooting
 
 The server prints what it refused on its console; GDB shows only a generic
-error for the same packet.
+error for the same packet: `Cannot access memory at address ...` for memory,
+`Could not write register ""; remote failure reply 'E01'` for a register
+(this GDB's raw registers have empty names), `Cannot insert breakpoint N.`
+for a breakpoint. What GDB's memory map rules out, GDB refuses itself with
+the same `Cannot access memory` and nothing on the server's console: writes
+into flash, information memory and the device descriptor (`rom`), reads and
+writes of the bootloader area, vacant memory and everything above main
+flash, and `load` (`Load failed`).
 
 | Message | Meaning |
 |---|---|
-| `refused: write of ... read-only mode writes only RAM and peripheral registers, not ...` | The address is flash, the bootloader, the gap 0x1B00-0x1BFF, or one of the four peripheral blocks. |
-| `refused: read-only mode: the PC may only be set inside main flash ...` | `set var $pc = ...` or `jump ADDR` to an address outside main flash. |
+| `refused: write of ... read-only mode writes only RAM and peripheral registers, not ...` | One of the four peripheral blocks. (Flash, the bootloader and the gap 0x1B00-0x1BFF are refused by GDB itself.) |
+| `refused: read-only mode: the PC may only be set inside main flash ...` | `set var $pc = ...` or `jump ADDR` to an address outside main flash, or `load` of a symbol ELF without `--image` (entry address 0). |
 | `refused: software breakpoints are not allowed in read-only mode ...` | Use `hbreak`. |
 | `refused: all 8 hardware breakpoints are in use` | Delete a breakpoint. |
-| `refused: flash programming (load) is not allowed in read-only mode` | `load` is not available in this version. |
-| `refused: read of ... outside the target's memory map` | Vacant memory and everything outside the map are not read. |
-| `refused: read of ... the BSL area ... is never read` | The bootloader area is not read. |
+| `refused: flash programming (load) is not allowed in read-only mode` | `load` is not available in this version. With this server's memory map GDB refuses `load` itself (`Load failed`) and sends nothing; this message is for clients that program flash anyway. |
+| `refused: read of ... outside the target's memory map` | Vacant memory and everything outside the map are not read. Seen after `monitor read`, or with `set mem inaccessible-by-default off`. |
+| `refused: read of ... the BSL area ... is never read` | The bootloader area is not read. Seen as the previous row. |
 | `refused: read of NAME (...) clears ...` | See "Reads with side effects"; use `monitor read`. |
 | `refused: byte write at ... would read ...; write the whole word` | See "Using GDB", byte writes. |
-| `target lost (...); the debug session has ended` | The target was reset, lost power or the wires came off. The session is over; start `target remote` again. |
+| `target lost (...); the debug session has ended` | The target was reset, lost power or the wires came off. While it ran, GDB says `Program terminated with signal SIGLOST, Resource lost.` The session is over (`detach` says `The program is not being run.`); start `target remote` again. |
 | `unexpected device: ID bytes ...` | The target is not an MSP430F5529. The target was left running. |
 | `no MSP430 found (JTAG ID read as 0x..)` | See `docs/MSP430_SBW.md`, Troubleshooting; try a lower `--speed`. |
 | `the device's JTAG lock key is programmed; it cannot be debugged` | The device is locked. |
