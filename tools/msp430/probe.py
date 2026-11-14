@@ -49,6 +49,34 @@ ERASE_SEGMENT, ERASE_BANK, ERASE_MAIN = 0, 1, 2
 
 READ_SIZE = 4096  # bytes asked of the IN endpoint per read
 
+# USB timeouts. A command waits TIMEOUT_MS for its reply, except the debug
+# commands that may sync with the CPU on the probe (Debugger::sync_conditional,
+# lib/msp430/src/debug.cpp). At worst a sync makes 3000 EEM-control polls,
+# 30000 wait-signal polls and 10000 CPUSUSP polls: about 1.45 million JTAG
+# cycles with what comes around them, at 3.5 SBW slots per cycle (sbw.pio),
+# 20.3 s at 250 kHz, 50.8 s at 100 kHz. Those commands wait that long per
+# sync at the session's SBW speed, a quarter more, plus TIMEOUT_MS, and at
+# least SYNC_TIMEOUT_MIN_MS. DBG_ATTACH may sync twice: it first ends an open
+# debug session (a running CPU is halted). DBG_HALT, DBG_STEP, DBG_STATUS (on
+# a breakpoint stop) and DBG_DETACH (of a running CPU) sync once; DBG_RESUME
+# only releases the CPU.
+TIMEOUT_MS = 3000
+SYNC_TIMEOUT_MIN_MS = 15000
+SYNC_WORST_CYCLES = 1_450_000
+SLOTS_PER_CYCLE_X2 = 7  # 3.5 slots per JTAG cycle, doubled to keep integers
+MIN_SPEED_KHZ = 100     # the slowest SBW clock the probe accepts
+SYNCS = {OP_DBG_ATTACH: 2, OP_DBG_HALT: 1, OP_DBG_STEP: 1, OP_DBG_STATUS: 1, OP_DBG_DETACH: 1}
+
+
+def command_timeout_ms(op: int, speed_khz: int) -> int:
+    """The USB timeout for `op` in a debug session at `speed_khz`."""
+    syncs = SYNCS.get(op, 0)
+    if not syncs:
+        return TIMEOUT_MS
+    # worst case in ms: syncs * cycles * 3.5 / kHz; with a quarter more: * 5 / 4
+    worst = -(-syncs * SYNC_WORST_CYCLES * SLOTS_PER_CYCLE_X2 * 5 // (2 * 4 * speed_khz))
+    return max(SYNC_TIMEOUT_MIN_MS, TIMEOUT_MS + worst)
+
 STATUS_OK = 0
 STATUS_BAD_ARG = 1
 STATUS_BAD_STATE = 2
@@ -218,7 +246,7 @@ class UsbTransport:
             except usb.core.USBError as e:
                 raise ProbeError(f"USB error: {e}") from None
 
-    def transfer(self, request: bytes, timeout_ms: int = 3000) -> bytes:
+    def transfer(self, request: bytes, timeout_ms: int = TIMEOUT_MS) -> bytes:
         core = self._usb_core
         try:
             self._dev.write(self._out, request, timeout=timeout_ms)
@@ -248,10 +276,16 @@ class SbwProbe:
         self.max_words = 16
         self.read_words = 16
         self.write_words = 16
+        self.debug_khz = None  # SBW speed of the last DBG_ATTACH; None: none sent yet
 
-    def _cmd(self, op: int, payload: bytes = b"") -> bytes:
+    def _cmd(self, op: int, payload: bytes = b"", speed_khz: int | None = None) -> bytes:
+        """`speed_khz`: the SBW speed the command's syncs run at (see
+        command_timeout_ms); by default the debug session's, the slowest
+        possible before any DBG_ATTACH."""
+        khz = speed_khz or self.debug_khz or MIN_SPEED_KHZ
         try:
-            resp = self._t.transfer(bytes([VENDOR_CMD, op]) + payload)
+            resp = self._t.transfer(bytes([VENDOR_CMD, op]) + payload,
+                                    timeout_ms=command_timeout_ms(op, khz))
         except ProbeError as e:
             raise ProbeError(f"{OP_NAMES.get(op, f'command 0x{op:02X}')}: {e}") from None
         if resp == bytes([VENDOR_CMD]):
@@ -338,7 +372,11 @@ class SbwProbe:
         """Attach without reset (ATTACH_RUNNING) or reset and halt (ATTACH_RESET).
         ram_lo/ram_hi: the RAM a read-only session may write (the probe narrows
         it to the RAM it knows for the device)."""
-        data = self._cmd(OP_DBG_ATTACH, struct.pack("<BBHII", mode, 0, speed_khz, ram_lo, ram_hi))
+        # an open debug session is ended at its own speed first
+        slowest = min(speed_khz, self.debug_khz or speed_khz)
+        self.debug_khz = speed_khz
+        data = self._cmd(OP_DBG_ATTACH, struct.pack("<BBHII", mode, 0, speed_khz, ram_lo, ram_hi),
+                         speed_khz=slowest)
         if len(data) < 15:
             raise ProbeError(OUT_OF_STEP)
         identity = Identity(*struct.unpack("<BHIH", data[:9]))

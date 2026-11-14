@@ -259,6 +259,104 @@ class DebugClientTest(unittest.TestCase):
         self.assertTrue(info.features & probe_mod.FEATURE_DEBUG)
 
 
+class TimedFirmware(FakeFirmware):
+    """Records the USB timeout SbwProbe gives each request, by op."""
+
+    def __init__(self):
+        super().__init__()
+        self.timeouts = []  # (op, timeout_ms)
+
+    def transfer(self, request, timeout_ms=3000):
+        self.timeouts.append((request[1], timeout_ms))
+        return super().transfer(request, timeout_ms)
+
+
+class CommandTimeoutTest(unittest.TestCase):
+    """A sync with the CPU on the probe (Debugger::sync_conditional) takes
+    about 1.45 million JTAG cycles at worst: 3000 EEM polls, 30000 wait-signal
+    polls, 10000 CPUSUSP polls. At 3.5 SBW slots a cycle that is 20.3 s at
+    250 kHz. The commands that may sync wait for that, with a quarter more
+    and 3 s on top, at least 15 s; DBG_ATTACH may sync twice (the open
+    session's halt, then the attach); every other command keeps 3 s."""
+
+    SYNC_OPS = (probe_mod.OP_DBG_HALT, probe_mod.OP_DBG_STEP, probe_mod.OP_DBG_STATUS,
+                probe_mod.OP_DBG_DETACH)
+
+    def session(self, khz):
+        """Every client call of a debug session at `khz`; the timeouts by op."""
+        fw = TimedFirmware()
+        p = SbwProbe(fw)
+        p.info()
+        p.dbg_attach(probe_mod.ATTACH_RUNNING, khz, 0x1C00, 0x4400)
+        p.dbg_read_regs()
+        p.dbg_write_reg(4, 0x1234)
+        p.read_mem(0x2400, 1)
+        p.write_mem(0x2400, b"\x00\x00")
+        p.dbg_bp_set(0, 0x4600)
+        p.dbg_step()
+        p.dbg_resume()
+        p.dbg_status()
+        p.dbg_halt()
+        p.dbg_bp_clear()
+        p.dbg_detach()
+        p.connect(250, 0)
+        p.disconnect()
+        timeouts = {}
+        for op, ms in fw.timeouts:
+            timeouts.setdefault(op, set()).add(ms)
+        self.assertEqual(set(timeouts), set(range(19)) - {5, 6, 7, 8}, timeouts)
+        return {op: ms.pop() for op, ms in timeouts.items() if len(ms) == 1}
+
+    def test_commands_that_may_sync_wait_for_the_worst_case(self):
+        t = self.session(250)
+        for op in self.SYNC_OPS:
+            self.assertEqual(t[op], 28375, probe_mod.OP_NAMES[op])  # 3 s + 1.25 * 20.3 s
+            self.assertGreater(t[op], 20300)
+        self.assertEqual(t[probe_mod.OP_DBG_ATTACH], 53750)       # 3 s + 1.25 * 2 * 20.3 s
+
+    def test_the_other_commands_keep_3_s(self):
+        t = self.session(250)
+        for op in set(t) - set(self.SYNC_OPS) - {probe_mod.OP_DBG_ATTACH}:
+            self.assertEqual(t[op], 3000, probe_mod.OP_NAMES[op])
+        self.assertEqual(t[probe_mod.OP_DBG_RESUME], 3000)  # it releases the CPU, no sync
+
+    def test_the_timeout_follows_the_session_speed(self):
+        slow, fast = self.session(100), self.session(1000)
+        self.assertEqual(slow[probe_mod.OP_DBG_HALT], 66438)     # 3 s + 1.25 * 50.75 s
+        self.assertEqual(slow[probe_mod.OP_DBG_ATTACH], 129875)
+        self.assertEqual(fast[probe_mod.OP_DBG_HALT], 15000)     # 3 s + 1.25 * 5.1 s; the minimum
+        self.assertEqual(fast[probe_mod.OP_DBG_ATTACH], 15688)
+
+    def test_an_attach_detaches_the_open_session_at_its_own_speed(self):
+        fw = TimedFirmware()
+        p = SbwProbe(fw)
+        p.dbg_attach(probe_mod.ATTACH_RUNNING, 100, 0x1C00, 0x4400)
+        p.dbg_attach(probe_mod.ATTACH_RESET, 1000, 0x1C00, 0x4400)  # monitor reset, new speed
+        p.dbg_halt()
+        attach, again, halt = fw.timeouts
+        # the second attach first ends the session opened at 100 kHz
+        self.assertEqual(again, (probe_mod.OP_DBG_ATTACH, 129875))
+        self.assertEqual(halt, (probe_mod.OP_DBG_HALT, 15000))
+
+    def test_a_usb_transport_passes_the_timeout_on(self):
+        reads = []
+
+        class Device:
+            def write(self, ep, data, timeout=None):
+                reads.append(("write", timeout))
+
+            def read(self, ep, size, timeout=None):
+                reads.append(("read", timeout))
+                return b"\x90\x00\x00\x00\x00\x00"
+
+        t = probe_mod.UsbTransport.__new__(probe_mod.UsbTransport)
+        t._dev, t._out, t._in, t._usb_core = Device(), 0x01, 0x81, None
+        SbwProbe(t).dbg_resume()
+        SbwProbe(t).dbg_halt()
+        self.assertEqual(reads, [("write", 3000), ("read", 3000),
+                                 ("write", 66438), ("read", 66438)])
+
+
 class FakeFirmwareDebugRulesTest(unittest.TestCase):
     """The fake follows msp430::Session's debug rules."""
 
