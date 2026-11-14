@@ -556,19 +556,32 @@ class GdbServerCliTest(unittest.TestCase):
     def test_old_probe_firmware_is_refused(self):
         code, _, err, calls = self.run_server(["gdbserver"], FakeFirmware(version=1, features=1))
         self.assertEqual((code, calls), (1, []))
-        self.assertIn("does not support debugging", err)
+        self.assertIn("is not supported by this tool for debugging", err)
 
-    def test_a_probe_without_debug_support_is_refused_before_any_debug_command(self):
-        # protocol version 1, and version 2 without the debug feature bit
-        for fw in (FakeFirmware(version=1, features=1), FakeFirmware(version=2, features=1)):
-            t = Recorder(fw)
-            gdb = ScriptedGdb()
-            out, err = io.StringIO(), io.StringIO()
-            code = sbw.main(["gdbserver"], transport=t, out=out, err=err, serve=gdb)
-            self.assertEqual((code, gdb.calls), (1, []))
-            self.assertIn("update the probe firmware", err.getvalue())
-            self.assertEqual(t.commands, [DAP_DISCONNECT, sbw_op(probe_mod.OP_INFO)])
-            self.assertTrue(fw.closed)
+    def refused(self, fw):
+        """Runs gdbserver against fw, which must be refused after DAP_Disconnect
+        and INFO only; returns the error text."""
+        t = Recorder(fw)
+        gdb = ScriptedGdb()
+        out, err = io.StringIO(), io.StringIO()
+        code = sbw.main(["gdbserver"], transport=t, out=out, err=err, serve=gdb)
+        self.assertEqual((code, gdb.calls), (1, []))
+        self.assertEqual(t.commands, [DAP_DISCONNECT, sbw_op(probe_mod.OP_INFO)])
+        self.assertTrue(fw.closed)
+        return err.getvalue()
+
+    def test_protocol_versions_other_than_2_are_refused(self):
+        # version 1 has no debug ops; a later version may have changed them
+        for version, features in ((1, 1), (3, 3)):
+            err = self.refused(FakeFirmware(version=version, features=features))
+            self.assertIn(f"SBW protocol version {version} is not supported by this tool for "
+                          "debugging", err)
+            self.assertIn("update the tool or the probe firmware", err)
+
+    def test_a_probe_without_the_debug_feature_is_refused(self):
+        err = self.refused(FakeFirmware(version=2, features=1))
+        self.assertIn("does not support debugging", err)
+        self.assertIn("update the probe firmware", err)
 
     def test_a_whole_session_sends_no_connect_erase_or_flash_command(self):
         fw = FakeFirmware()

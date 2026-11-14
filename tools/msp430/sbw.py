@@ -237,11 +237,15 @@ def _gdbserver(args, probe: SbwProbe, out, err, serve) -> None:
     speed = args.gdb_speed or args.speed
     probe.dap_disconnect()
     info = probe.info()
-    if info.version < 2 or not info.features & probe_mod.FEATURE_DEBUG:
-        what = f"SBW protocol version {info.version}" + (
-            " without the debug feature" if info.version >= 2 else "")
-        raise FlashError(f"the probe firmware does not support debugging ({what}); update the "
-                         "probe firmware to this version of debugprobe-zephyr")
+    if info.version not in probe_mod.DEBUG_PROTOCOL_VERSIONS:
+        needs = " or ".join(str(v) for v in probe_mod.DEBUG_PROTOCOL_VERSIONS)
+        raise FlashError(f"the probe's SBW protocol version {info.version} is not supported by "
+                         f"this tool for debugging (it needs version {needs}); update the tool "
+                         "or the probe firmware")
+    if not info.features & probe_mod.FEATURE_DEBUG:
+        raise FlashError(f"the probe firmware does not support debugging (SBW protocol version "
+                         f"{info.version} without the debug feature); update the probe "
+                         "firmware to this version of debugprobe-zephyr")
     probe.configure(speed)
     mode = probe_mod.ATTACH_RESET if args.reset else probe_mod.ATTACH_RUNNING
     if args.reset:

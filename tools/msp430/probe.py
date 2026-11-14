@@ -17,6 +17,8 @@ VENDOR_CMD = 0x90
 PROTOCOL_VERSION = 2
 # The flash commands have not changed since version 1.
 FLASH_PROTOCOL_VERSIONS = tuple(range(1, PROTOCOL_VERSION + 1))
+# The debug commands came with version 2; a later version may change them.
+DEBUG_PROTOCOL_VERSIONS = (2,)
 USB_PACKET = 64
 ADDRESS_LIMIT = 1 << 20  # 20-bit addresses and register values
 
