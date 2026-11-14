@@ -24,7 +24,7 @@ class Device:
     tlv: tuple  # device descriptor (TLV), read-only
     ram: tuple  # all RAM, USB RAM included
     # ((start, end, name, effect), ...), whole words, sorted: registers whose
-    # read changes the device. Reads there are allowed; the host can warn.
+    # read changes the device. The GDB server refuses reads there (`monitor read` reads on purpose).
     read_side_effects: tuple
 
     def region(self, addr: int):

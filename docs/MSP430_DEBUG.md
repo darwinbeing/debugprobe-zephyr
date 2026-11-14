@@ -99,10 +99,13 @@ not affected. The same holds for TI's own tools. The normal ways out
 release the CPU.
 
 Do not run SWD tools against the probe while an MSP430 is attached: they
-drive the same two pins. Do not run another `sbw.py` command (or start
-another `gdbserver`) while GDB is attached either: every other command begins
-by closing the open session, which detaches the debugger, and resets the
-target. If the probe still holds a programming session from
+drive the same two pins. Do not run another `sbw.py` command while GDB
+is attached either: every other command begins by closing the open session,
+which detaches the debugger, and resets the target. A second `gdbserver` on
+the same port fails ("choose another with --port"). On another port it
+leaves the first session alone until GDB connects to it; then it takes the
+target over (the attach detaches the old session, and the program runs on
+until the new attach stops it) and resets it only with `--reset`. If the probe still holds a programming session from
 an earlier `sbw.py` command that was killed, `gdbserver` says so and does not
 attach: unplug and replug the probe.
 
@@ -124,7 +127,8 @@ Columns: `address` (1-5 hex digits, with or without `0x`; `-` skips the row),
 `const`, `data`; `struct`, `union`, `member` and `type` rows are skipped) and
 `size` (decimal or `0x` hex). Functions must be at even addresses, and a name
 may appear only once (an exact repeat of a row counts once). A table with an
-error is refused with a message that names the row. For example:
+error is refused with a message that names the row; for a duplicate name it
+names the symbol and both definitions, for a missing column only the file. For example:
 
 ```
 address	new_name	kind	size
@@ -143,13 +147,13 @@ firmware outside the repository.
 The ELF file only names addresses; it has no types and no line numbers:
 
 - GDB classes a symbol by the section it lies in, so a constant in flash is a
-  text symbol. `print` asks for a cast: `print *(unsigned short *)&demo_counter`
-  or `x/hx &demo_counter`.
+  text symbol. `print` asks for a cast: `print *(unsigned short *)&demo_table`
+  or `x/hx &demo_table`. No symbol has a type.
 - A function in RAM and an absolute symbol (one in neither flash nor RAM)
   cannot be used with `break NAME`; use `hbreak *ADDRESS`.
 - `info symbol ADDRESS` answers only for addresses in flash or RAM.
 - Never `load` the symbol ELF. With `--image` it holds 128 KiB of flash
-  contents; read-only mode refuses `load` anyway.
+  contents; read-only mode refuses `load` anyway; a later full mode would write it.
 
 ## Using GDB
 
@@ -192,23 +196,23 @@ The ELF file only names addresses; it has no types and no line numbers:
 GDB reads memory on its own (stack unwinding, caches), so a stray read of an
 interrupt vector register would clear a flag the firmware is waiting for. The
 server therefore refuses reads of these registers (the list is
-`read_side_effects` in `tools/msp430/devices.py`) and names what to read
-instead:
+`read_side_effects` in `tools/msp430/devices.py`), and its message names the
+`monitor read` command that reads one on purpose. What to read instead:
 
 | Register | A read clears | Read instead |
 |---|---|---|
 | `SYSJMBI0`, `SYSJMBI1` | the mailbox flags JMBINxFG | `SYSJMBC` |
-| `SYSBERRIV`, `SYSUNIV`, `SYSSNIV`, `SYSRSTIV` | the highest pending flag | `SFRIFG1`, `PMMIFG` |
+| `SYSBERRIV`, `SYSUNIV`, `SYSSNIV`, `SYSRSTIV` | the highest pending flag | `SFRIFG1`, `PMMIFG`, `FCTL3` (ACCVIFG, KEYV; readable); some sources have no other flag |
 | `P1IV`, `P2IV` | the highest pending flag | `P1IFG`, `P2IFG` |
 | `TA0IV`, `TA1IV`, `TA2IV`, `TB0IV` | the highest pending flag | `TAxCTL` (TAIFG), `TAxCCTLn` (CCIFG), likewise `TB0CTL`, `TB0CCTLn` |
-| `RTCIV` | the highest pending flag | `RTCCTL0` |
+| `RTCIV` | the highest pending flag | `RTCCTL0`, `RTCPS0CTL`, `RTCPS1CTL` |
 | `DMAIV` | the highest pending flag | `DMAxCTL` (DMAIFG) |
-| `UCA0RXBUF` ... `UCB1RXBUF` | UCRXIFG and the receive error flags | `UCAxIFG`, `UCBxIFG` (the byte itself cannot be read without consuming it) |
+| `UCA0RXBUF` ... `UCB1RXBUF` | UCRXIFG and the receive error flags | `UCAxIFG`, `UCBxIFG`, `UCAxSTAT`, `UCBxSTAT` for the error flags (the byte itself cannot be read without consuming it) |
 | `UCA0IV` ... `UCB1IV` | the highest pending flag | `UCAxIFG`, `UCBxIFG` |
-| `ADC12IV` | ADC12OV or ADC12TOV | `ADC12IFG` |
+| `ADC12IV` | ADC12OV or ADC12TOV | none: ADC12OV and ADC12TOV have no other flag |
 | `ADC12MEM0` ... `ADC12MEM15` | ADC12IFGx | `ADC12IFG` |
 | `CBIV` | the highest pending flag | `CBINT` |
-| `USBVECINT` | the highest pending flag | `USBIFG` |
+| `USBVECINT` | the highest pending flag | `USBIFG`, `USBIEPIFG`, `USBOEPIFG`, `USBPWRCTL`, `USBPLLIR` (and a timestamp source) |
 
 `monitor read ADDR [WORDS]` reads one on purpose, and says which side effect
 it had.
@@ -239,8 +243,11 @@ error, according to the comments in TI's USB API.
   and detach. A read of `WDTCTL` (0x015C) returns the saved low byte with the
   read password 0x69; a write is saved for the release and the watchdog stays
   held while halted.
-- MCLK, SMCLK and ACLK stop (EEM clock control 0x000E, the value TI's debug
-  stack writes when it takes the CPU). Timers clocked from them stop too. TI's
+- MCLK, SMCLK and ACLK stop (EEM clock control 0x000E, the value of TI's Bios
+  macros). The attach with `--reset` writes it, and so do the attach and the
+  halt when they stop an awake, running CPU; an attach to a CPU in a
+  low-power mode or one that is already stopped leaves the clocks as they
+  were. Timers clocked from them stop too. TI's
   stack also sets per-module clock control from its device database; this
   port leaves that out, so the modules keep their reset defaults. Whether
   Timer0_B runs while halted is to be measured in the acceptance, Phase 7 in
@@ -257,8 +264,8 @@ error for the same packet.
 
 | Message | Meaning |
 |---|---|
-| `refused: write of ... read-only mode writes only RAM and peripheral registers, not ...` | The address is flash, the bootloader, vacant memory, or one of the four peripheral blocks. |
-| `refused: read-only mode: the PC may only be set inside main flash ...` | `set var $pc = ...`, `jump` or `continue ADDR` to an address outside main flash. |
+| `refused: write of ... read-only mode writes only RAM and peripheral registers, not ...` | The address is flash, the bootloader, the gap 0x1B00-0x1BFF, or one of the four peripheral blocks. |
+| `refused: read-only mode: the PC may only be set inside main flash ...` | `set var $pc = ...` or `jump ADDR` to an address outside main flash. |
 | `refused: software breakpoints are not allowed in read-only mode ...` | Use `hbreak`. |
 | `refused: all 8 hardware breakpoints are in use` | Delete a breakpoint. |
 | `refused: flash programming (load) is not allowed in read-only mode` | `load` is not available in this version. |

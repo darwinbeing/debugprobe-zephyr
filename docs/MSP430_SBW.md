@@ -169,7 +169,9 @@ anyway.
 Ctrl-C closes the session before the tool exits. If the tool is killed, or the
 host crashes, the target stays halted under the probe's control and the probe
 keeps the two pins. Run any command again (for example `reset`): each command
-starts by closing whatever session was left open. Starting an SWD debugger or
+starts by closing whatever session was left open (`gdbserver` is the
+exception: it refuses a leftover programming session; unplug and replug the
+probe). Starting an SWD debugger or
 replugging the probe has the same effect.
 
 ## Troubleshooting

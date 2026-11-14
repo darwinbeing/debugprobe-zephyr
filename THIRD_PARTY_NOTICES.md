@@ -11,6 +11,7 @@ contains code ported from, and binary funclets copied from, TI's "MSP430
 Programming With the JTAG Interface" source package:
 
 - `lib/msp430/src/cpuxv2.cpp` (JTAG control sequences)
+- `lib/msp430/include/msp430/protocol.hpp` (JTAG instruction codes)
 - `lib/msp430/src/sbw_tap.cpp` (Spy-Bi-Wire entry sequences and shift framing)
 - `lib/msp430/src/funclets.cpp` (flash write and erase funclets, unchanged)
 
@@ -58,8 +59,9 @@ which contains code ported from TI's MSP Debug Stack open-source package
   port, and following the behaviour of the DLL files listed below.
 - `lib/msp430/src/sbw_tap.cpp`: the 32-bit shift for EEM registers, after
   `_hil_2w_SetReg_XBits32`.
-- `lib/msp430/include/msp430/protocol.hpp`: JTAG instruction codes and EEM
-  constants, after `JTAG_defs.h`.
+- `lib/msp430/include/msp430/protocol.hpp`: the `IR_EMEX_*` instruction codes,
+  after `JTAG_defs.h` (the other instruction codes there come from SLAU320,
+  see above), and the breakpoint count, from the device database below.
 
 The files of the package that these were ported from, or whose behaviour they
 follow, and the copyright line each carries:
