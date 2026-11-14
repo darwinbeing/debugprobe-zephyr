@@ -279,8 +279,8 @@ run on a target. The server has been driven by scripted GDB clients and by
 
 | Axis | Status |
 |---|---|
-| Host tests | 378/378 C++ (`scripts/run_host_tests.sh`, also under ASan); 431 Python, 13 of them skipped without msp430-elf-gdb (`python3 -m unittest discover -s tools/msp430/tests`) |
-| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on: rebuilt 2026-11-13 after the last firmware changes (`a3cb815`, `DBG_EEM_PEEK`; `7d624be`, the reset when the link check before a detach's restore fails; `1210beb`, only after two failed checks in a row), all three boards; rpi_pico with `CONFIG_PROBE_MSP430_SBW=n`: built at Task 15, and nothing that configuration compiles has changed since |
+| Host tests | 384/384 C++ (`scripts/run_host_tests.sh`, also under ASan); 431 Python, 13 of them skipped without msp430-elf-gdb (`python3 -m unittest discover -s tools/msp430/tests`) |
+| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on: rebuilt 2026-11-13 after the last firmware changes (`a3cb815`, `DBG_EEM_PEEK`; `7d624be`, the reset when the link check before a detach's restore fails; `1210beb`, only after two failed checks in a row; `7bfa278`, the bootcode area and the device ID read with TI's quick read), all three boards; rpi_pico with `CONFIG_PROBE_MSP430_SBW=n`: built at Task 15, and nothing that configuration compiles has changed since |
 | End-to-end with GDB | ✓ 2026-11-13, GNU gdb (Mitto Systems Limited - msp430-gcc 9.3.1.11) 9.1: connect, registers, breakpoint by symbol, stepi, memory, refusals (tools/msp430/tests/test_gdb_e2e.py); also `X` escaping, breakpoints after `monitor reset` (also with `always-inserted on`, which needed a server fix) and `flushregs`, console notes before stop replies, Ctrl-C during `stepi 1000` and `next` (stops after the step under way), SIGLOST, `load`, reads and writes GDB's memory map refuses itself, register names, `break NAME` after a `PUSHM.A` prologue and `break *NAME` at the first instruction |
 | On-target hardware | **Not run yet** — see the acceptance table below |
 

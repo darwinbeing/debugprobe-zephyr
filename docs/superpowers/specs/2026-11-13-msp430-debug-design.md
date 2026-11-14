@@ -502,3 +502,24 @@ already worked into the text above; the others take precedence over it.
     the link failed after the context was saved). `sbw.py gdbserver` also
     ends a debug session an earlier process left open with `DBG_DETACH 0`
     before it serves, and reports which of the two happened.
+27. **The bootcode area is read with TI's quick read (found on the board).**
+    Task 25 Step 5 stopped because the GDB server refused the device: on the
+    user's F5529 the debugger's address-register read (`ReadMemWordXv2`) of
+    the bootcode area 0x1A00–0x1AFF, the TLV with the device descriptor,
+    returned 0x3FFF for every word, so the attach reported device ID 0x3FFF
+    (the pointer 0x1A00 was right). A read-only diagnostic on the board
+    (attach without reset, `READ_MEM`, compared with the backups) found
+    information memory, main flash, the reset vector, RAM and the
+    peripheral registers read right. TI's DLL never reads that area with
+    `ReadMemWordsXv2`: `BootcodeRomAccess::doRead` uses `ID_ReadMemQuick`
+    (`SpecialMemoryTypes.cpp:63-66`; the F5xx device database maps 0x1A00,
+    size 0x100, to it, `MSP430F5xxx.h:77-82`), and the device descriptor is
+    read with `ID_ReadMemQuickXv2` after the conditional sync
+    (`DeviceHandleMSP430.cpp:507`; `ReadMemWordsXv2` only for the reset
+    vector, :450). Phase A's quick read always read it right. The debugger
+    now ports `ReadMemQuickXv2` (JTAG ID 0x91: the PC set to the address,
+    the quick reads, then the PC set to the safe address 0x0004; only the
+    CPU's PC moves, the saved context keeps the program's) and uses it for
+    the device-ID read of both attach modes and, in `READ_MEM` of a debug
+    session, for every word in 0x1A00–0x1AFF; ranges that cross the area's
+    edges are split, and the address-register read stays everywhere else.
