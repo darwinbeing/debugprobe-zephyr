@@ -2735,17 +2735,23 @@ TEST(debugger_eem_peek_checks_the_jtag_id_around_the_reads)
 	{
 		Fx f;
 		f.t.ones_after_shifts = 16; /* ... and after the IR scan and four 32-bit scans */
-		uint32_t v[2] = {};
+		f.t.eem[0x00] = 0x0004402A; /* both reads return it: the values are dropped */
+		uint32_t v[2] = {1, 2};
 		CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::TargetError);
 		CHECK_LOG(f.t.log, eem_peek_log(0x00));
+		CHECK_EQ(v[0], 0u);
+		CHECK_EQ(v[1], 0u);
 	}
 	{
 		Fx f; /* the capture after the reads out of phase */
 		f.t.jtag_id_script = {0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0x48};
-		uint32_t v[2] = {};
+		f.t.eem[0x00] = 0x8000FFFE;
+		uint32_t v[2] = {1, 2};
 		CHECK(f.d.eem_peek(0x00, 250000, f.id, v) == Status::TargetError);
 		CHECK_LOG(f.t.log, eem_peek_log(0x00));
 		CHECK(f.t.jtag_id_script.empty());
+		CHECK_EQ(v[0], 0u);
+		CHECK_EQ(v[1], 0u);
 	}
 	{
 		Fx f; /* the capture in front of the reads */
