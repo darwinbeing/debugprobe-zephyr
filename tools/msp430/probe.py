@@ -112,6 +112,12 @@ class Info:
     hw_breakpoints: int = 0  # protocol version 2
 
 
+def supports_debugging(info: Info) -> bool:
+    """The probe speaks the debug commands of this tool: a protocol version
+    in DEBUG_PROTOCOL_VERSIONS and the debug feature."""
+    return info.version in DEBUG_PROTOCOL_VERSIONS and bool(info.features & FEATURE_DEBUG)
+
+
 @dataclass(frozen=True)
 class Identity:
     jtag_id: int

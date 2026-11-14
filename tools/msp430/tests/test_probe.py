@@ -44,6 +44,16 @@ class SbwProbeTest(unittest.TestCase):
         info = SbwProbe(FakeFirmware(version=1, features=1)).info()
         self.assertEqual((info.version, info.features, info.hw_breakpoints), (1, 1, 0))
 
+    def test_supports_debugging_needs_a_debug_version_and_the_feature(self):
+        def info(version, features):
+            return probe_mod.Info(version, 0, 1016, features, 8 if version >= 2 else 0)
+
+        self.assertTrue(probe_mod.supports_debugging(info(2, 3)))
+        self.assertTrue(probe_mod.supports_debugging(info(2, probe_mod.FEATURE_DEBUG)))
+        for version, features in ((2, 1), (1, 3), (1, 1), (3, 3), (0, 3)):
+            self.assertFalse(probe_mod.supports_debugging(info(version, features)),
+                             (version, features))
+
     def test_configure_scales_chunks_with_speed(self):
         self.probe.info()
         self.probe.configure(250)

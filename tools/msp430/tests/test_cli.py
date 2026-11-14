@@ -1,7 +1,9 @@
 import contextlib
+import errno
 import hashlib
 import io
 import os
+import signal
 import socket
 import sys
 import tempfile
@@ -430,6 +432,21 @@ class Recorder:
         self.fw.close()
 
 
+class SignalOnOp(Recorder):
+    """A Recorder that raises `signum` in this process when the SBW op `op`
+    is sent, once (before the request reaches the fake firmware)."""
+
+    def __init__(self, fw, op, signum):
+        super().__init__(fw)
+        self.op, self.signum = op, signum
+
+    def transfer(self, request, timeout_ms=3000):
+        if self.signum is not None and bytes(request[:2]) == sbw_op(self.op):
+            signum, self.signum = self.signum, None
+            signal.raise_signal(signum)
+        return super().transfer(request, timeout_ms)
+
+
 class ScriptedGdb:
     """A serve() for sbw.main: one GDB connection over a socket pair that
     sends `packets` (all different: the server drops a repeat as a copy GDB
@@ -490,9 +507,17 @@ class GdbServerCliTest(unittest.TestCase):
         self.assertEqual(fw.ops, [("dap_disconnect",)])
         self.assertTrue(fw.closed)
 
+    def test_explicit_attach_is_the_default_mode(self):
+        fw = FakeFirmware()
+        code, out, err, _ = self.run_session(["gdbserver", "--attach"], fw, ScriptedGdb("D"))
+        self.assertEqual((code, err), (0, ""))  # no warning
+        self.assertEqual(fw.attaches[0][0], probe_mod.ATTACH_RUNNING)
+        self.assertIn("attached to MSP430F5529 without reset", out)
+
     def test_options(self):
         fw = FakeFirmware()
-        _, _, _, calls = self.run_server(["gdbserver", "--port", "4444", "--reset", "--speed", "500"], fw)
+        _, _, _, calls = self.run_server(
+            ["gdbserver", "--port", "4444", "--reset", "--speed", "500"], fw)
         server, port = calls[0]
         self.assertEqual((port, server.speed_khz, server.attach_mode), (4444, 500, 1))
         # the chunk sizes are configured for the speed (probe.configure)
@@ -525,38 +550,36 @@ class GdbServerCliTest(unittest.TestCase):
         self.assertTrue(err.getvalue().startswith("error: --allow-flash-write"))
         self.assertIn("B2", err.getvalue())
 
+    def refused_by_argparse(self, argv):
+        """argparse must refuse argv (exit 2) before anything is sent; returns its message."""
+        t = Recorder(FakeFirmware())
+        gdb = ScriptedGdb()
+        argparse_err = io.StringIO()
+        with contextlib.redirect_stderr(argparse_err):
+            with self.assertRaises(SystemExit) as cm:
+                sbw.main(argv, transport=t, serve=gdb)
+        self.assertEqual(cm.exception.code, 2, argv)
+        self.assertEqual((t.commands, gdb.calls), ([], []), argv)
+        return argparse_err.getvalue()
+
     def test_speed_outside_100_to_1000_khz_is_refused_before_anything_is_sent(self):
         for argv in (["gdbserver", "--speed", "99"], ["gdbserver", "--speed", "1001"],
                      ["gdbserver", "--speed", "fast"], ["--speed", "50", "gdbserver"]):
-            t = Recorder(FakeFirmware())
-            gdb = ScriptedGdb()
-            argparse_err = io.StringIO()
-            with contextlib.redirect_stderr(argparse_err):
-                with self.assertRaises(SystemExit) as cm:
-                    sbw.main(argv, transport=t, serve=gdb)
-            self.assertEqual(cm.exception.code, 2, argv)
-            self.assertIn("--speed", argparse_err.getvalue())
-            self.assertEqual((t.commands, gdb.calls), ([], []), argv)
+            self.assertIn("--speed", self.refused_by_argparse(argv))
 
     def test_a_port_outside_0_to_65535_is_refused_before_anything_is_sent(self):
         for port in ("-1", "65536", "gdb"):
-            t = Recorder(FakeFirmware())
-            gdb = ScriptedGdb()
-            argparse_err = io.StringIO()
-            with contextlib.redirect_stderr(argparse_err):
-                with self.assertRaises(SystemExit) as cm:
-                    sbw.main(["gdbserver", "--port", port], transport=t, serve=gdb)
-            self.assertEqual(cm.exception.code, 2, port)
-            self.assertIn("--port", argparse_err.getvalue())
-            self.assertEqual((t.commands, gdb.calls), ([], []), port)
+            self.assertIn("--port", self.refused_by_argparse(["gdbserver", "--port", port]))
         for port in (0, 65535):  # 0: any free port, which serve() prints
             _, _, _, calls = self.run_server(["gdbserver", "--port", str(port)], FakeFirmware())
             self.assertEqual(calls[0][1], port)
 
-    def test_old_probe_firmware_is_refused(self):
-        code, _, err, calls = self.run_server(["gdbserver"], FakeFirmware(version=1, features=1))
-        self.assertEqual((code, calls), (1, []))
-        self.assertIn("is not supported by this tool for debugging", err)
+    def test_abbreviated_options_are_refused_before_anything_is_sent(self):
+        # --r, --re, --res must not select reset mode
+        for argv in (["gdbserver", "--r"], ["gdbserver", "--re"], ["gdbserver", "--res"],
+                     ["gdbserver", "--att"], ["gdbserver", "--allow"],
+                     ["gdbserver", "--spe", "500"], ["gdbserver", "--po", "4444"]):
+            self.assertIn("unrecognized arguments", self.refused_by_argparse(argv))
 
     def refused(self, fw):
         """Runs gdbserver against fw, which must be refused after DAP_Disconnect
@@ -571,8 +594,9 @@ class GdbServerCliTest(unittest.TestCase):
         return err.getvalue()
 
     def test_protocol_versions_other_than_2_are_refused(self):
-        # version 1 has no debug ops; a later version may have changed them
-        for version, features in ((1, 1), (3, 3)):
+        # version 1 has no debug ops, whatever its feature bits say; a later
+        # version may have changed them
+        for version, features in ((1, 1), (1, 3), (3, 3)):
             err = self.refused(FakeFirmware(version=version, features=features))
             self.assertIn(f"SBW protocol version {version} is not supported by this tool for "
                           "debugging", err)
@@ -582,6 +606,23 @@ class GdbServerCliTest(unittest.TestCase):
         err = self.refused(FakeFirmware(version=2, features=1))
         self.assertIn("does not support debugging", err)
         self.assertIn("update the probe firmware", err)
+
+    def test_a_probe_still_in_a_programming_session_is_refused(self):
+        for state in (probe_mod.STATE_CONNECTED, probe_mod.STATE_FLASHING):
+            fw = FakeFirmware()
+            fw.state = state
+            err = self.refused(fw)
+            self.assertIn("the probe still holds a programming session from an earlier command",
+                          err)
+            self.assertIn("unplug and replug the probe", err)
+            self.assertIn("sbw.py reset", err)
+            self.assertEqual(fw.state, state)  # nothing was changed
+        # a debug session left open is not in the way: DBG_ATTACH ends it
+        for state in (probe_mod.STATE_DEBUG_HALTED, probe_mod.STATE_DEBUG_RUNNING):
+            fw = FakeFirmware()
+            fw.state = state
+            code, _, _, calls = self.run_server(["gdbserver"], fw)
+            self.assertEqual((code, len(calls)), (0, 1))
 
     def test_a_whole_session_sends_no_connect_erase_or_flash_command(self):
         fw = FakeFirmware()
@@ -630,7 +671,8 @@ class GdbServerCliTest(unittest.TestCase):
         fw = FakeFirmware()
         out, err = io.StringIO(), io.StringIO()
         code = sbw.main(["gdbserver"], transport=fw, out=out, err=err, serve=waiting_for_gdb)
-        self.assertEqual((code, err.getvalue()), (130, "interrupted; the GDB server has stopped\n"))
+        self.assertEqual((code, err.getvalue()),
+                         (130, "interrupted; the GDB server has stopped\n"))
         self.assertEqual(fw.attaches, [])
         self.assertTrue(fw.closed)
 
@@ -648,22 +690,85 @@ class GdbServerCliTest(unittest.TestCase):
         self.assertIn("error: the probe does not answer the MSP430 SBW command", err)
         self.assertTrue(fw.closed)
 
+    def test_a_port_in_use_suggests_another(self):
+        in_use = OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
+
         def port_in_use(server, port):
-            raise OSError(48, "Address already in use")
+            raise in_use
 
         fw = FakeFirmware()
         out, err = io.StringIO(), io.StringIO()
         code = sbw.main(["gdbserver"], transport=fw, out=out, err=err, serve=port_in_use)
-        self.assertEqual(code, 1)
-        self.assertIn("error: [Errno 48] Address already in use", err.getvalue())
+        self.assertEqual((code, err.getvalue()),
+                         (1, f"error: {in_use}; choose another with --port\n"))
         self.assertTrue(fw.closed)
+
+    def stopped_by(self, signum, op, packets):
+        """gdbserver with `signum` raised when `op` is sent; the signal's own
+        handler stays in place of the default action (which ends the process)
+        and must be back afterwards. Returns code, out, err and the fake."""
+        received = []
+
+        def stand_in(signo, frame):
+            received.append(signo)
+
+        previous = signal.signal(signum, stand_in)
+        try:
+            fw = FakeFirmware()
+            out, err = io.StringIO(), io.StringIO()
+            code = sbw.main(["gdbserver"], transport=SignalOnOp(fw, op, signum), out=out,
+                            err=err, serve=ScriptedGdb(*packets))
+            self.assertIs(signal.getsignal(signum), stand_in)
+        finally:
+            signal.signal(signum, previous)
+        self.assertEqual(received, [])  # the server's handler had it
+        return code, out.getvalue(), err.getvalue(), fw
+
+    def test_sigterm_and_sighup_stop_the_server_as_ctrl_c_does(self):
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            name = signal.Signals(signum).name
+            code, out, err, fw = self.stopped_by(signum, probe_mod.OP_DBG_READ_REGS, ["g"])
+            self.assertEqual((code, err),
+                             (128 + signum, f"{name} received; the GDB server has stopped\n"))
+            self.assertEqual((fw.detaches, fw.state), ([probe_mod.DETACH_RUN], 0))
+            self.assertIn("detached; the program continues where it stopped", out)
+            self.assertTrue(fw.closed)
+            # before the server runs: nothing to detach
+            code, _, err, fw = self.stopped_by(signum, probe_mod.OP_INFO, [])
+            self.assertEqual((code, err, fw.attaches), (128 + signum, f"{name} received\n", []))
+            self.assertTrue(fw.closed)
+
+    def test_signal_handlers_are_only_changed_while_the_server_runs(self):
+        before = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+        seen = {}
+
+        def look(server, port):
+            seen.update({s: signal.getsignal(s) for s in before})
+
+        self.assertEqual(sbw.main(["gdbserver"], transport=FakeFirmware(), out=io.StringIO(),
+                                  err=io.StringIO(), serve=look), 0)
+        self.assertTrue(all(seen[s] is not before[s] for s in before), seen)
+        self.assertEqual({s: signal.getsignal(s) for s in before}, before)
+        run(["info"], FakeFirmware())
+        self.assertEqual({s: signal.getsignal(s) for s in before}, before)
 
     def test_info_reports_debugging(self):
         code, out, _ = run(["info"], FakeFirmware())
         self.assertEqual(code, 0)
-        self.assertIn("probe: SBW protocol version 2, debugging supported, 8 hardware breakpoints", out)
+        self.assertIn("probe: SBW protocol version 2, debugging supported, "
+                      "8 hardware breakpoints", out)
         code, out, _ = run(["info"], FakeFirmware(version=1, features=1))
         self.assertIn("probe: SBW protocol version 1, no debugging support", out)
+        # the debug feature bit means nothing below protocol version 2
+        code, out, _ = run(["info"], FakeFirmware(version=1, features=3))
+        self.assertIn("probe: SBW protocol version 1, no debugging support", out)
+
+    def test_info_sends_dap_disconnect_info_connect_and_disconnect(self):
+        t = Recorder(FakeFirmware())
+        self.assertEqual(sbw.main(["info"], transport=t, out=io.StringIO(), err=io.StringIO()), 0)
+        self.assertEqual(t.commands, [DAP_DISCONNECT, sbw_op(probe_mod.OP_INFO),
+                                      sbw_op(probe_mod.OP_CONNECT),
+                                      sbw_op(probe_mod.OP_DISCONNECT)])
 
 
 if __name__ == "__main__":
