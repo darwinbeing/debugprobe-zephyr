@@ -725,10 +725,7 @@ class GdbServer:
         if not words or words == ["help"]:
             text = HELP
         elif words == ["reset"]:
-            self._attach(probe_mod.ATTACH_RESET)
-            text = (f"target reset, halted at 0x{self.stop_pc:05X}; "
-                    "run 'maintenance flush register-cache' so that GDB reads the "
-                    "registers again\n")
+            text = self._monitor_reset()
         elif words[0] == "read":
             text = self._monitor_read(words[1:])
         elif words[0] == "mode" and len(words) == 2 and words[1] in ("readonly", "full"):
@@ -755,6 +752,27 @@ class GdbServer:
             text = f"unknown monitor command '{command}'\n" + HELP
         self._send("O" + text.encode().hex())
         return "OK"
+
+    def _monitor_reset(self) -> str:
+        """monitor reset: attach again, with reset. The attach clears every
+        EEM trigger, so the hardware breakpoints GDB has inserted are set
+        again: with "set breakpoint always-inserted on" GDB does not insert
+        them again on resume (by default it removes them at each stop, and
+        none is set here). GDB keeps its register cache across a monitor
+        command; GDB 9 has no "maintenance flush register-cache" (it runs
+        "maintenance flush-symbol-cache" by prefix match), flushregs works."""
+        inserted = list(self.slots)
+        self._attach(probe_mod.ATTACH_RESET)
+        again = 0
+        for index, addr in enumerate(inserted):
+            if addr is not None and index < len(self.slots):
+                self.probe.dbg_bp_set(index, addr)
+                self.slots[index] = addr
+                again += 1
+        rearmed = (f"; {again} hardware breakpoint{'s' if again > 1 else ''} set again"
+                   if again else "")
+        return (f"target reset, halted at 0x{self.stop_pc:05X}{rearmed}; "
+                "run 'flushregs' so that GDB reads the registers again\n")
 
     def _monitor_read(self, args: list) -> str:
         """monitor read ADDR [WORDS]: inside the memory map and out of the BSL

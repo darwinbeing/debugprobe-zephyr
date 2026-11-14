@@ -350,9 +350,28 @@ class MonitorTest(ServerFixture):
         self.start()
         text = self.monitor("reset")
         self.assertIn("halted at 0x0441A", text)
-        self.assertIn("maintenance flush register-cache", text)
+        # GDB 9 runs "maintenance flush-symbol-cache" for "maintenance flush
+        # register-cache" (prefix match); flushregs works in every version
+        self.assertIn("run 'flushregs'", text)
+        self.assertNotIn("maintenance", text)
+        self.assertNotIn("set again", text)
         self.assertEqual([a[0] for a in self.fw.attaches], [0, 1])
         self.assertEqual(self.gdb.cmd("?"), "T0500:1a440000;")
+
+    def test_reset_sets_the_inserted_breakpoints_again(self):
+        # with "set breakpoint always-inserted on" GDB inserts a breakpoint
+        # once and does not insert it again on resume; the attach of the
+        # reset clears every EEM trigger
+        self.start()
+        self.assertEqual(self.gdb.cmd("Z1,4600,2"), "OK")
+        self.assertEqual(self.gdb.cmd("Z1,4700,2"), "OK")
+        self.assertEqual(self.gdb.cmd("z1,4600,2"), "OK")  # slot 0 free, slot 1 in use
+        text = self.monitor("reset")
+        self.assertIn("1 hardware breakpoint set again", text)
+        self.assertEqual(self.fw.breakpoints, {1: 0x4700})
+        self.assertEqual(self.gdb.cmd("c"), "T05hwbreak:;00:00470000;")
+        self.assertEqual(self.gdb.cmd("z1,4700,2"), "OK")
+        self.assertEqual(self.fw.breakpoints, {})
 
 
 # ---- the addenda ----
