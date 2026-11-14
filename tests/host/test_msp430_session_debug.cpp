@@ -814,11 +814,14 @@ TEST(session_dbg_read_mem_keeps_the_context)
 	f.attach();
 	f.tap.memory[0x4400] = 0xBEEF;
 	CHECK_BYTES(f.run(read_req(0x4400, 1)), (Bytes{0x90, 0x00, 0xEF, 0xBE}));
-	CHECK(!log_has(f.tap, "ir:c2")); /* not ReadMemQuick, which moves the PC */
+	/* main flash: ReadMemQuickXv2 (correction 28); it moves the CPU's PC, not
+	 * the saved one, which DBG_STATUS reports */
+	CHECK(log_has(f.tap, "ir:c2"));
 	CHECK(f.s.state() == State::DebugHalted);
 	CHECK_BYTES(f.run({0x90, 0x0D}), (Bytes{0x90, 0x00, 0x01, 0x01, 0xFF, 0x20, 0x45, 0, 0}));
 	/* reads have no whitelist: flash, information memory, the controller */
 	f.tap.log.clear();
+	f.tap.memory[0x1800] = 0x0000; /* FakeTap's quick read gives 0xFFFF for unset words */
 	CHECK_BYTES(f.run(read_req(0x1800, 1)), (Bytes{0x90, 0x00, 0x00, 0x00}));
 	CHECK_BYTES(f.run(read_req(0x0144, 1)), (Bytes{0x90, 0x00, 0x58, 0x96}));
 	CHECK_BYTES(f.run(read_req(0xFFFFE, 1)), (Bytes{0x90, 0x00, 0x00, 0x00}));
@@ -832,9 +835,10 @@ TEST(session_dbg_read_mem_keeps_the_context)
 	CHECK(f.tap.log.empty());
 }
 
-/* READ_MEM and WRITE_MEM in a debug session go through the Debugger's
- * ReadMemWordsXv2 / WriteMemWordsXv2 ports (test_debugger.cpp has these
- * transcripts), not through Phase A's quick read and write. */
+/* READ_MEM and WRITE_MEM in a debug session go through the Debugger
+ * (test_debugger.cpp has these transcripts): its WriteMemWordsXv2 port, its
+ * ReadMemQuickXv2 port for memory and ReadMemWordsXv2 for peripherals
+ * (correction 28), not through Phase A's quick read and write. */
 TEST(session_dbg_mem_ops_go_through_the_debugger)
 {
 	Fx f;
@@ -847,7 +851,11 @@ TEST(session_dbg_mem_ops_go_through_the_debugger)
 	f.tap.log.clear();
 	f.tap.memory[0x2400] = 0x1234;
 	CHECK_BYTES(f.run(read_req(0x2400, 1)), (Bytes{0x90, 0x00, 0x34, 0x12}));
-	CHECK_LOG(f.tap.log, Log{"tclk:0", ir(0xC8), d16(0x0501), ir(0xC1), d20(0x2400), "tclk:1",
+	CHECK_LOG(f.tap.log, quick_read(0x2400, 1) + Log{"ir:28", "dr16:0000"});
+	f.tap.log.clear();
+	f.tap.memory[0x0200] = 0x5678;
+	CHECK_BYTES(f.run(read_req(0x0200, 1)), (Bytes{0x90, 0x00, 0x78, 0x56}));
+	CHECK_LOG(f.tap.log, Log{"tclk:0", ir(0xC8), d16(0x0501), ir(0xC1), d20(0x0200), "tclk:1",
 				 "tclk:0", ir(0x42), d16(0), "tclk:1", "tclk:0", "tclk:1", "ir:28",
 				 "dr16:0000"});
 	CHECK(f.s.state() == State::DebugHalted);
@@ -1380,7 +1388,7 @@ TEST(session_target_error_on_a_dead_link_resets_instead_of_restoring)
 		} else {
 			f.tap.cntrl_sig = 0x0000; /* the data line reads all zeros */
 		}
-		CHECK_BYTES(f.run(read_req(0x2400, 1)), kTargetError);
+		CHECK_BYTES(f.run(read_req(0x0200, 1)), kTargetError);
 		CHECK(f.s.state() == State::Idle);
 		CHECK(f.tap.mem_writes.empty());
 		CHECK(f.tap.cpu_words.empty()); /* no SR or PC fed */
@@ -1389,14 +1397,14 @@ TEST(session_target_error_on_a_dead_link_resets_instead_of_restoring)
 		CHECK_LOG(last(f.tap.log, tail.size()), tail);
 		CHECK_EQ(count_log(f.tap, "close"), 1u);
 		f.tap.log.clear();
-		CHECK_BYTES(f.run(read_req(0x2400, 1)), kBadState);
+		CHECK_BYTES(f.run(read_req(0x0200, 1)), kBadState);
 		CHECK(f.tap.log.empty());
 	}
 	{
 		Fx f; /* healthy link: the restore of today */
 		f.attach();
 		f.tap.cntrl_sig_script = {0x0000}; /* READ_MEM's check alone fails */
-		CHECK_BYTES(f.run(read_req(0x2400, 1)), kTargetError);
+		CHECK_BYTES(f.run(read_req(0x0200, 1)), kTargetError);
 		CHECK(f.tap.cntrl_sig_script.empty());
 		CHECK(f.s.state() == State::Idle);
 		const Log tail = detach_run(0x4520, 0x0008, 0x6904);

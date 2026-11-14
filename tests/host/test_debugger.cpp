@@ -869,14 +869,15 @@ TEST(debugger_read_mem_follows_mspds_read_mem_words)
 {
 	Fx f;
 	f.attached();
-	f.t.memory[0x2400] = 0x1234;
-	f.t.memory[0x2402] = 0xABCD;
+	/* peripherals: memory goes through the quick read (correction 28) */
+	f.t.memory[0x0200] = 0x1234;
+	f.t.memory[0x0202] = 0xABCD;
 	uint8_t out[4] = {};
-	REQUIRE(f.d.read_mem(0x2400, 2, out) == Status::Ok);
+	REQUIRE(f.d.read_mem(0x0200, 2, out) == Status::Ok);
 	/* read mode first (not in ReadMemWordsXv2), then the macro */
 	const Log want = Log{"tclk:0", ir(0xC8), d16(0x0501),
-			     ir(0xC1), d20(0x2400), "tclk:1", "tclk:0", ir(0x42), d16(0),
-			     ir(0xC1), d20(0x2402), "tclk:1", "tclk:0", ir(0x42), d16(0),
+			     ir(0xC1), d20(0x0200), "tclk:1", "tclk:0", ir(0x42), d16(0),
+			     ir(0xC1), d20(0x0202), "tclk:1", "tclk:0", ir(0x42), d16(0),
 			     "tclk:1", "tclk:0", "tclk:1", "ir:28", "dr16:0000"};
 	CHECK_LOG(f.t.log, want);
 	const uint8_t want_bytes[] = {0x34, 0x12, 0xCD, 0xAB};
@@ -999,7 +1000,7 @@ TEST(debugger_detach_after_a_failed_check_on_a_healthy_link_restores_the_context
 	f.attached();
 	f.t.cntrl_sig_script = {0x0000}; /* read_mem's check alone fails */
 	uint8_t buf[2] = {};
-	REQUIRE(f.d.read_mem(0x2400, 1, buf) == Status::TargetError);
+	REQUIRE(f.d.read_mem(0x0200, 1, buf) == Status::TargetError);
 	CHECK(f.scripts_consumed());
 	f.t.log.clear();
 	CHECK(f.d.detach(DetachAction::Run) == Status::Ok);
@@ -1058,9 +1059,9 @@ TEST(debugger_read_mem_sets_read_mode_first)
 	f.t.ir_shift(msp430::kIrCntrlSig16Bit);
 	f.t.dr_shift16(0x0500);
 	f.t.log.clear();
-	f.t.memory[0x2400] = 0x1234;
+	f.t.memory[0x0200] = 0x1234; /* a peripheral: ReadMemWordsXv2 */
 	uint8_t out[2] = {};
-	REQUIRE(f.d.read_mem(0x2400, 1, out) == Status::Ok);
+	REQUIRE(f.d.read_mem(0x0200, 1, out) == Status::Ok);
 	CHECK_LOG(first(f.t.log, 3), (Log{"tclk:0", ir(0xC8), d16(0x0501)}));
 	const uint8_t want[] = {0x34, 0x12};
 	CHECK_BYTES(out, want);
@@ -1124,8 +1125,9 @@ TEST(debugger_memory_access_crosses_a_64k_boundary)
 	f.t.memory[0x20000] = 0x2222;
 	uint8_t out[4] = {};
 	REQUIRE(f.d.read_mem(0x1FFFE, 2, out) == Status::Ok);
-	CHECK(contains(f.t.log, Log{ir(0xC1), d20(0x1FFFE)}));
-	CHECK(contains(f.t.log, Log{ir(0xC1), d20(0x20000)}));
+	/* main flash: the quick read, its PC moving on across 64K */
+	CHECK_LOG(f.t.log, quick_read(0x1FFFE, 2) + link_check());
+	CHECK(f.t.quick_reads == (std::vector<uint32_t>{0x1FFFE, 0x20000}));
 	const uint8_t want[] = {0x11, 0x11, 0x22, 0x22};
 	CHECK_BYTES(out, want);
 	f.t.log.clear();
@@ -2918,7 +2920,120 @@ TEST(debugger_quick_read_follows_mspds_read_mem_quick)
 	CHECK_EQ(f.d.pc(), 0x4520u);
 }
 
-TEST(debugger_read_mem_into_the_bootcode_area_switches_to_the_quick_read)
+/* ---- memory (information memory, RAM, main flash): the quick read too ----
+ * TI's DLL reads flash (MainMemoryAccessBase.cpp:65) and lockable RAM
+ * (LockableRamMemoryAccess.cpp:76) with ReadMemQuick on devices that support
+ * it, as the F5xx does (MSP430F5xxx.h:120, quickMemRead); plain RAM
+ * (RandomMemoryAccess, MemoryAreaBase.cpp:231) word by word. The probe reads
+ * the F5529's information memory, bootcode area, RAM and main flash with the
+ * quick read (design spec correction 28): 23 JTAG cycles a word instead of
+ * about 80. Peripherals, the BSL area and vacant addresses stay with
+ * ReadMemWordsXv2: the quick read goes through the CPU's fetch path, which must
+ * not reach registers whose read has side effects. */
+
+TEST(debugger_read_mem_reads_ram_flash_and_information_memory_with_the_quick_read)
+{
+	for (const uint32_t a : {0x1800u, 0x19FCu, 0x1C00u, 0x2400u, 0x43FCu, 0x4400u, 0x243FCu}) {
+		Fx f;
+		f.attached();
+		f.t.memory[a] = 0x1234;
+		f.t.memory[a + 2] = 0xABCD;
+		f.t.cpu_words.clear();
+		uint8_t out[4] = {};
+		REQUIRE(f.d.read_mem(a, 2, out) == Status::Ok);
+		CHECK_LOG(f.t.log, quick_read(a, 2) + link_check());
+		const uint8_t want[] = {0x34, 0x12, 0xCD, 0xAB};
+		CHECK_BYTES(out, want);
+		CHECK(f.t.addr_reads.empty());
+		CHECK(f.t.quick_reads == (std::vector<uint32_t>{a, a + 2}));
+		CHECK(f.t.mem_writes.empty());
+		CHECK_EQ(f.d.pc(), 0x4520u); /* the saved context is untouched */
+	}
+}
+
+TEST(debugger_read_mem_reads_peripherals_bsl_and_vacant_addresses_word_by_word)
+{
+	for (const uint32_t a : {0x0200u, 0x0FFCu, 0x1000u, 0x17FCu, 0x1B00u, 0x1BFCu, 0x24400u}) {
+		Fx f;
+		f.attached();
+		f.t.memory[a] = 0x1234;
+		f.t.memory[a + 2] = 0xABCD;
+		uint8_t out[4] = {};
+		REQUIRE(f.d.read_mem(a, 2, out) == Status::Ok);
+		CHECK_LOG(f.t.log, read_words(a, 2) + link_check());
+		const uint8_t want[] = {0x34, 0x12, 0xCD, 0xAB};
+		CHECK_BYTES(out, want);
+		CHECK(f.t.quick_reads.empty());
+		CHECK(f.t.addr_reads == (std::vector<uint32_t>{a, a + 2}));
+	}
+}
+
+TEST(debugger_read_mem_reads_ram_and_flash_in_one_quick_read)
+{
+	Fx f;
+	f.attached();
+	for (uint32_t a = 0x43F8; a < 0x4408; a += 2) {
+		f.t.memory[a] = static_cast<uint16_t>(a);
+	}
+	uint8_t out[16] = {};
+	REQUIRE(f.d.read_mem(0x43F8, 8, out) == Status::Ok);
+	CHECK_LOG(f.t.log, quick_read(0x43F8, 8) + link_check());
+	CHECK_EQ(out[0], 0xF8);
+	CHECK_EQ(out[15], 0x44);
+	CHECK(f.t.addr_reads.empty());
+}
+
+TEST(debugger_read_mem_switches_between_word_and_quick_reads_at_the_ram_edge)
+{
+	Fx f;
+	f.attached();
+	f.t.memory[0x1BFC] = 0x1111;
+	f.t.memory[0x1BFE] = 0x2222;
+	f.t.memory[0x1C00] = 0x3333;
+	f.t.memory[0x1C02] = 0x4444;
+	uint8_t out[8] = {};
+	REQUIRE(f.d.read_mem(0x1BFC, 4, out) == Status::Ok);
+	CHECK_LOG(f.t.log, read_words(0x1BFC, 2) + quick_read(0x1C00, 2) + link_check());
+	const uint8_t want[] = {0x11, 0x11, 0x22, 0x22, 0x33, 0x33, 0x44, 0x44};
+	CHECK_BYTES(out, want);
+	CHECK(f.t.addr_reads == (std::vector<uint32_t>{0x1BFC, 0x1BFE}));
+	CHECK(f.t.quick_reads == (std::vector<uint32_t>{0x1C00, 0x1C02}));
+}
+
+TEST(debugger_quick_read_of_ram_keeps_the_programs_pc)
+{
+	Fx f;
+	f.attached();
+	uint8_t out[4] = {};
+	REQUIRE(f.d.read_mem(0x2400, 2, out) == Status::Ok);
+	uint32_t regs[16] = {};
+	f.t.captured = {0x43F0, 0x0000};
+	REQUIRE(f.d.read_regs(regs) == Status::Ok);
+	CHECK_EQ(regs[0], 0x4520u);
+	const uint32_t pc = f.d.pc();
+	f.t.log.clear();
+	CHECK(f.d.detach(DetachAction::Run) == Status::Ok);
+	CHECK_LOG(f.t.log, detach_run(pc, 0x0008, 0x6904));
+}
+
+TEST(debugger_quick_read_of_memory_detects_a_dead_link)
+{
+	for (const bool id_lost : {true, false}) {
+		Fx f;
+		f.attached();
+		if (id_lost) {
+			f.t.jtag_id = 0xFF;
+		} else {
+			f.t.cntrl_sig = 0x0000;
+		}
+		uint8_t buf[4] = {};
+		CHECK(f.d.read_mem(0x2400, 2, buf) == Status::TargetError);
+		CHECK(f.d.read_mem(0x4400, 2, buf) == Status::TargetError);
+		CHECK(f.t.mem_writes.empty());
+	}
+}
+
+TEST(debugger_read_mem_reads_information_memory_and_the_bootcode_area_in_one_quick_read)
 {
 	Fx f;
 	f.attached();
@@ -2929,12 +3044,13 @@ TEST(debugger_read_mem_into_the_bootcode_area_switches_to_the_quick_read)
 	f.t.memory[0x1A06] = 0x1219; /* 0x1A04: 0x2955 */
 	uint8_t out[12] = {};
 	REQUIRE(f.d.read_mem(0x19FC, 6, out) == Status::Ok);
-	CHECK_LOG(f.t.log, read_words(0x19FC, 2) + quick_read(0x1A00, 4) + link_check());
+	CHECK_LOG(f.t.log, quick_read(0x19FC, 6) + link_check());
 	const uint8_t want[] = {0x11, 0x11, 0x22, 0x22, 0x06, 0x06, 0x59, 0x08, 0x55, 0x29,
 				0x19, 0x12};
 	CHECK_BYTES(out, want);
-	CHECK(f.t.addr_reads == (std::vector<uint32_t>{0x19FC, 0x19FE}));
-	CHECK(f.t.quick_reads == (std::vector<uint32_t>{0x1A00, 0x1A02, 0x1A04, 0x1A06}));
+	CHECK(f.t.addr_reads.empty());
+	CHECK(f.t.quick_reads ==
+	      (std::vector<uint32_t>{0x19FC, 0x19FE, 0x1A00, 0x1A02, 0x1A04, 0x1A06}));
 }
 
 TEST(debugger_read_mem_out_of_the_bootcode_area_switches_back)

@@ -523,3 +523,26 @@ already worked into the text above; the others take precedence over it.
     the device-ID read of both attach modes and, in `READ_MEM` of a debug
     session, for every word in 0x1A00–0x1AFF; ranges that cross the area's
     edges are split, and the address-register read stays everywhere else.
+28. **Memory is read with the quick read too, for speed (2026-11-14).** A
+    backup of the board's external SPI flash through the debugger (the
+    firmware's own read routine called per 2 KB, the result read from RAM)
+    ran at 1.7 KB/s at 250 kHz, 3.1 KB/s at 500 kHz and 5.6 KB/s at
+    1000 kHz (measured on the user's F5529): `ReadMemWordXv2` needs about 80
+    JTAG cycles a word, `ReadMemQuickXv2` 23. `READ_MEM` of a debug session
+    now uses the quick read (correction 27's port) for information memory
+    0x1800–0x19FF, the bootcode area, RAM 0x1C00–0x43FF and main flash
+    0x4400–0x243FF, and `ReadMemWordsXv2` for peripherals, the BSL area and
+    vacant addresses; a range that crosses from one kind to the other is
+    split. TI's DLL reads flash (`MainMemoryAccessBase.cpp:65`) and lockable
+    RAM (`LockableRamMemoryAccess.cpp:76`) with the quick read on devices
+    with `quickMemRead`, as the F5xx (`MSP430F5xxx.h:120`), but plain RAM
+    (`RandomMemoryAccess`, `MemoryAreaBase.cpp:231`) word by word: reading
+    RAM quickly departs from the DLL. The quick read goes through the CPU's
+    fetch path, so it is never used for registers whose read has side
+    effects. While the CPU is halted the EEM is off, and a resume clears the
+    EEM's stop state (`kClearStop`), so the fetches cannot raise a
+    breakpoint; only the CPU's PC moves (to the address, then 0x0004), the
+    saved context keeps the program's. Host tests pin the split and the
+    transcripts; on the board the change is checked read-only (main flash
+    against its image, information memory against the backup, RAM read
+    twice and a pattern written to free RAM read back).

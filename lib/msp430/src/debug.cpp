@@ -48,6 +48,16 @@
  *    0x3FFF throughout that area (measured on the board, design spec
  *    correction 27). ReadMemQuickXv2 sets the CPU's PC to the address and
  *    then to SAFE_PC_ADDRESS; the saved context keeps the program's PC;
+ *  - read_mem also reads information memory 0x1800-0x19FF, RAM
+ *    0x1C00-0x43FF and main flash 0x4400-0x243FF with ReadMemQuickXv2, for
+ *    speed (23 JTAG cycles a word instead of about 80; design spec
+ *    correction 28). The DLL does so for flash (MainMemoryAccessBase.cpp:65)
+ *    and lockable RAM (LockableRamMemoryAccess.cpp:76) on devices with
+ *    quickMemRead, as the F5xx (MSP430F5xxx.h:120), but reads plain RAM
+ *    (RandomMemoryAccess: MemoryAreaBase.cpp:231) word by word. Peripherals,
+ *    the BSL area and vacant addresses stay with ReadMemWordsXv2: the quick
+ *    read goes through the CPU's fetch path, which must not reach registers
+ *    whose read has side effects;
  *  - read_mem and write_mem refuse an odd address, an address above 20 bits
  *    or words past 0xFFFFF with BadArg before any TAP traffic, and do
  *    nothing for no words. The macros take any address and wrap at 20 bits
@@ -251,8 +261,7 @@ constexpr uint16_t kSafePc = 0x0004;      /* SAFE_PC_ADDRESS (JTAG_defs.h) */
 /* The F5xx bootcode area (device database MSP430F5xxx.h:77-82, Name::bootCode,
  * 0x1A00 size 0x100: the TLV with the device descriptor). Read only with
  * ReadMemQuickXv2 (see read_mem). */
-constexpr uint32_t kBootcodeLo = 0x1A00;
-constexpr uint32_t kBootcodeHi = 0x1B00;
+constexpr uint32_t kBootcodeHi = 0x1B00; /* the area starts at 0x1A00 */
 constexpr uint16_t kAltRomAddr = 0x0FF6;  /* ReadCpuRegXv2, altRomAddressForCpuRead */
 constexpr uint16_t kResetVector = 0xFFFE;
 constexpr uint16_t kSrCpuOff = 0x0010;
@@ -312,9 +321,18 @@ constexpr bool word_range_ok(uint32_t addr, size_t nwords)
 	return (addr & 1u) == 0 && addr < kAddressSpace && nwords <= (kAddressSpace - addr) / 2u;
 }
 
-constexpr bool in_bootcode(uint32_t addr)
+/* MSP430F5529 memory read with ReadMemQuickXv2 by read_mem: information
+ * memory and the bootcode area (MSP430F5xxx.h, Name::information 0x1800 size
+ * 0x200, Name::bootCode 0x1A00 size 0x100), RAM (USB RAM 0x1C00 and system
+ * RAM 0x2400, 10 KB in all) and main flash (0x4400, 128 KB; MSP430F55xx.cpp,
+ * MSP430F5529). Not peripherals, BSL or vacant addresses (see read_mem). */
+constexpr uint32_t kInfoLo = 0x1800;
+constexpr uint32_t kRamLo = 0x1C00;
+constexpr uint32_t kMainHi = 0x24400;
+
+constexpr bool read_quickly(uint32_t addr)
 {
-	return addr >= kBootcodeLo && addr < kBootcodeHi;
+	return (addr >= kInfoLo && addr < kBootcodeHi) || (addr >= kRamLo && addr < kMainHi);
 }
 
 } // namespace
@@ -1065,13 +1083,14 @@ void Debugger::read_quick(uint32_t addr, size_t nwords, uint8_t *dst)
 	tap_.ir_shift(kIrAddrCapture);
 }
 
-/* ReadMemWordsXv2 (read_words), except in the bootcode area 0x1A00-0x1AFF:
- * there ReadMemQuickXv2 (read_quick), as TI's DLL reads that area
- * (SpecialMemoryTypes.cpp:63-66, BootcodeRomAccess::doRead uses
- * ID_ReadMemQuick; MSP430F5xxx.h:77-82 maps 0x1A00 size 0x100 to it). Through
- * the address register an F5529 reads 0x3FFF there (correction 27). A range
- * that crosses the area's edges is split. The range checks and the link
- * check at the end are not in MSPDS (see the header). */
+/* ReadMemQuickXv2 (read_quick) for memory: the bootcode area 0x1A00-0x1AFF,
+ * as TI's DLL reads it (SpecialMemoryTypes.cpp:63-66, BootcodeRomAccess::
+ * doRead uses ID_ReadMemQuick; MSP430F5xxx.h:77-82 maps 0x1A00 size 0x100 to
+ * it; through the address register an F5529 reads 0x3FFF there, correction
+ * 27), and information memory, RAM and main flash for speed (correction 28).
+ * ReadMemWordsXv2 (read_words) elsewhere. A range that crosses from one kind
+ * to the other is split. The range checks and the link check at the end are
+ * not in MSPDS (see the header). */
 Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
 {
 	if (!attached_) {
@@ -1088,12 +1107,12 @@ Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
 	}
 	for (size_t done = 0; done < nwords;) {
 		const uint32_t a = addr + 2u * static_cast<uint32_t>(done);
-		const bool boot = in_bootcode(a);
+		const bool quick = read_quickly(a);
 		size_t n = 1;
-		while (done + n < nwords && in_bootcode(a + 2u * static_cast<uint32_t>(n)) == boot) {
+		while (done + n < nwords && read_quickly(a + 2u * static_cast<uint32_t>(n)) == quick) {
 			++n;
 		}
-		if (boot) {
+		if (quick) {
 			read_quick(a, n, dst + 2 * done);
 		} else {
 			read_words(a, n, dst + 2 * done);
