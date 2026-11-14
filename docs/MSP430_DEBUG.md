@@ -1,0 +1,293 @@
+# Debugging an MSP430F5529 with GDB (read-only mode)
+
+The probe can debug an MSP430F5529 over Spy-Bi-Wire: halt, resume,
+single-step, CPU registers, memory, and up to eight hardware breakpoints.
+`sbw.py gdbserver` speaks GDB's remote protocol and drives the probe; the
+debugger is `msp430-elf-gdb` from TI's MSP430-GCC package. Wiring and
+electrical checks are those of `docs/MSP430_SBW.md`.
+
+**Status.** This is the first debugging version (phase B1). It is implemented
+and tested on the host, against a fake probe and a fake target. It has not run
+against a real target or a real `msp430-elf-gdb` yet; the acceptance record in
+`docs/PROJECT_STATUS.md` (Phase 7) says what has been checked. Statements below
+about GDB's own behaviour come from its documentation and its source and may
+need correcting after that run.
+
+This version has one mode, **read-only**. It is meant for boards whose
+firmware must not change.
+
+## What read-only means
+
+Flash (main flash, information memory, bootloader) is never written for you.
+Three layers refuse it independently:
+
+1. GDB is told that flash is read-only memory (the memory map marks it
+   `rom`), so it does not write there on its own.
+2. The server refuses every write outside RAM and the permitted peripheral
+   registers, every PC change outside main flash, software breakpoints and
+   `load`, before anything is sent to the probe.
+3. The probe firmware refuses the same writes again (status `PROTECTED`), and
+   inside a debug session also its erase and flash-write operations.
+
+What can be written:
+
+- RAM, 0x1C00-0x43FF (USB buffer RAM included);
+- peripheral registers below 0x1000, except four blocks: the power
+  management module PMM (0x0120-0x013F), the flash controller
+  (0x0140-0x014F), the system module SYS (0x0180-0x019F) and the DMA
+  controller (0x0500-0x053F). A byte write to `PMMCTL0` resets the chip,
+  `SYSCTL` can move the interrupt vectors into RAM, and a DMA transfer could
+  write the flash controller.
+
+The PC may only be set to an address in main flash (0x4400-0x243FF), or left
+where it is. The bootloader area (0x1000-0x17FF) is neither read nor written.
+
+What it does not guarantee: the firmware under debug runs normally when
+resumed, and may write its own information memory. Code you place by other
+means, such as a changed return address on the stack, runs too. A device the
+probe does not know (anything but the F5529) is refused every write and every
+PC change.
+
+## Starting
+
+```bash
+python3 tools/msp430/sbw.py gdbserver            # attach to the running program
+python3 tools/msp430/sbw.py gdbserver --reset    # reset, halt at the reset vector
+```
+
+Options (`python3 tools/msp430/sbw.py gdbserver --help`):
+
+| Option | Meaning |
+|---|---|
+| `--port PORT` | TCP port on 127.0.0.1, default 3333; 0 picks a free one. The server never listens on another address. |
+| `--attach` | Attach to the running program without reset (the default). |
+| `--reset` | Reset the target and halt at the reset vector each time GDB connects. Excludes `--attach`. |
+| `--speed KHZ` | SBW clock, 100-1000, default 250. The global `--speed` before the command works too. |
+
+`--allow-flash-write` belongs to a later version and is refused. Abbreviated
+options are not accepted either.
+
+The server waits for GDB, attaches when GDB connects and detaches when GDB
+leaves. It prints the lines to type into GDB. In a second terminal:
+
+```
+msp430-elf-gdb -nx symbols.elf
+(gdb) set remotetimeout 10
+(gdb) set remote hardware-breakpoint-limit 8
+(gdb) target remote :3333
+```
+
+`symbols.elf` is the file `symelf.py` writes (next section), or your own
+build's ELF file. The longer `remotetimeout` is for the attach, which can take
+longer than GDB's default of two seconds.
+
+Attaching without reset stops the program where it is. Nothing is reset and
+the target's other state (watchdog setting, low-power mode, peripherals) is
+kept as TI's debug stack keeps it. When GDB detaches (`detach`, `kill`,
+`quit`, or the connection drops) the server detaches too and the program
+continues where it stopped, without a reset. Stop the server with Ctrl-C;
+SIGTERM and SIGHUP do the same. It detaches first, and exits with status 130
+(Ctrl-C) or 128 plus the signal number.
+
+**Do not unplug the probe, power it off, or kill the host tool without a
+detach while the target runs with breakpoints set.** If the link dies while
+the target stays powered, the breakpoints stay armed in the chip's emulation
+module (EEM) and the firmware stops at the next one with no debugger to
+release it. Only a reset or a power cycle of the target frees it; flash is
+not affected. The same holds for TI's own tools. The normal ways out
+(`detach` or `quit` in GDB, Ctrl-C in the host tool) switch the EEM off and
+release the CPU.
+
+Do not run SWD tools against the probe while an MSP430 is attached: they
+drive the same two pins. Do not run another `sbw.py` command (or start
+another `gdbserver`) while GDB is attached either: every other command begins
+by closing the open session, which detaches the debugger, and resets the
+target. If the probe still holds a programming session from
+an earlier `sbw.py` command that was killed, `gdbserver` says so and does not
+attach: unplug and replug the probe.
+
+## Symbols for firmware without an ELF file
+
+GDB needs an ELF file to know the MSP430X architecture (20-bit addresses) and
+the symbol names. For firmware that exists only as a flash image,
+`symelf.py` writes a symbol-only ELF file from name tables:
+
+```bash
+python3 tools/msp430/symelf.py names.tsv -o symbols.elf
+python3 tools/msp430/symelf.py names.tsv more.tsv -o symbols.elf --image firmware.hex --force
+```
+
+Each table is tab-separated UTF-8 text with a header row; blank lines and
+lines starting with `#` are skipped, quotes are ordinary characters.
+Columns: `address` (1-5 hex digits, with or without `0x`; `-` skips the row),
+`new_name` (or `name`), and optionally `kind` (`func`, the default; `var`,
+`const`, `data`; `struct`, `union`, `member` and `type` rows are skipped) and
+`size` (decimal or `0x` hex). Functions must be at even addresses, and a name
+may appear only once (an exact repeat of a row counts once). A table with an
+error is refused with a message that names the row. For example:
+
+```
+address	new_name	kind	size
+0x4400	demo_start	func	0x20
+0x4420	demo_blink	func	0x18
+0x2400	demo_counter	var	2
+0x4500	demo_table	const	16
+```
+
+Main flash becomes the `.text` section and RAM the `.bss` section; with
+`--image` (Intel HEX or TI-TXT) `.text` also holds the image's main-flash
+bytes, so that `disassemble` works before a target is attached. `--force`
+replaces an existing output file. Keep tables and images of third-party
+firmware outside the repository.
+
+The ELF file only names addresses; it has no types and no line numbers:
+
+- GDB classes a symbol by the section it lies in, so a constant in flash is a
+  text symbol. `print` asks for a cast: `print *(unsigned short *)&demo_counter`
+  or `x/hx &demo_counter`.
+- A function in RAM and an absolute symbol (one in neither flash nor RAM)
+  cannot be used with `break NAME`; use `hbreak *ADDRESS`.
+- `info symbol ADDRESS` answers only for addresses in flash or RAM.
+- Never `load` the symbol ELF. With `--image` it holds 128 KiB of flash
+  contents; read-only mode refuses `load` anyway.
+
+## Using GDB
+
+| Task | GDB |
+|---|---|
+| Registers | `info registers`, `p $r12`, `set var $r12 = 5` |
+| Memory | `x/16xh 0x2400`, `x/hx &demo_counter` |
+| Stop a running program | Ctrl-C |
+| Continue | `continue` |
+| One instruction | `stepi`, `nexti` |
+| Breakpoint | `break demo_blink` or `hbreak *0x4420` |
+| Leave, program keeps running | `detach` |
+
+- **Registers** are GDB's own layout for the MSP430: R0 (PC), R1 (SP), R2
+  (SR), R3 (CG, always 0 and never written) and R4-R15, 20 bits wide (SR 16).
+  The server sends no target description.
+- **Breakpoints** are the chip's eight EEM triggers, set only while the CPU
+  is halted and armed when it resumes. GDB's `next`, `finish` and `until`
+  need one trigger each for their temporary breakpoints; with all eight in
+  use they fail.
+- **Software breakpoints** are refused. GDB sets a hardware breakpoint by
+  itself for code in memory its map marks as ROM (flash); a `break` on an
+  address in RAM asks for a software one, so use `hbreak` there.
+- **Source-level stepping** needs debug information that matches the flash;
+  for firmware without it, step by instruction.
+- **Byte writes** to RAM or peripherals are word read-modify-writes. A byte
+  write whose neighbouring byte is a register with a read side effect (below)
+  is refused; write the whole word.
+- **Single steps** end at the first instruction of an interrupt handler when
+  interrupts are enabled and one is pending, as with TI's tools. The
+  watchdog runs with the firmware's own setting during each step, so many
+  steps in a row with the watchdog enabled can end in a watchdog reset, again
+  as with TI's tools; `continue` to a breakpoint instead. A step over an
+  instruction that enters a low-power mode ends with a note that the CPU is
+  halted there; a step that does not complete in time stops the CPU and says
+  so.
+
+### Reads with side effects
+
+GDB reads memory on its own (stack unwinding, caches), so a stray read of an
+interrupt vector register would clear a flag the firmware is waiting for. The
+server therefore refuses reads of these registers (the list is
+`read_side_effects` in `tools/msp430/devices.py`) and names what to read
+instead:
+
+| Register | A read clears | Read instead |
+|---|---|---|
+| `SYSJMBI0`, `SYSJMBI1` | the mailbox flags JMBINxFG | `SYSJMBC` |
+| `SYSBERRIV`, `SYSUNIV`, `SYSSNIV`, `SYSRSTIV` | the highest pending flag | `SFRIFG1`, `PMMIFG` |
+| `P1IV`, `P2IV` | the highest pending flag | `P1IFG`, `P2IFG` |
+| `TA0IV`, `TA1IV`, `TA2IV`, `TB0IV` | the highest pending flag | `TAxCTL` (TAIFG), `TAxCCTLn` (CCIFG), likewise `TB0CTL`, `TB0CCTLn` |
+| `RTCIV` | the highest pending flag | `RTCCTL0` |
+| `DMAIV` | the highest pending flag | `DMAxCTL` (DMAIFG) |
+| `UCA0RXBUF` ... `UCB1RXBUF` | UCRXIFG and the receive error flags | `UCAxIFG`, `UCBxIFG` (the byte itself cannot be read without consuming it) |
+| `UCA0IV` ... `UCB1IV` | the highest pending flag | `UCAxIFG`, `UCBxIFG` |
+| `ADC12IV` | ADC12OV or ADC12TOV | `ADC12IFG` |
+| `ADC12MEM0` ... `ADC12MEM15` | ADC12IFGx | `ADC12IFG` |
+| `CBIV` | the highest pending flag | `CBINT` |
+| `USBVECINT` | the highest pending flag | `USBIFG` |
+
+`monitor read ADDR [WORDS]` reads one on purpose, and says which side effect
+it had.
+
+### Memory the server does not show
+
+GDB's memory map leaves out vacant memory (0x0000-0x00FF, 0x0940-0x0FFF,
+0x1B00-0x1BFF), the bootloader area (0x1000-0x17FF) and everything above
+main flash. Reads there are refused ("outside the target's memory map", or
+"the BSL area ... is never read"). Reading the USB buffer RAM
+(0x1C00-0x23FF) while the USB module is suspended (PLL off) may cause a bus
+error, according to the comments in TI's USB API.
+
+## Monitor commands
+
+| Command | Effect |
+|---|---|
+| `monitor help` | list the commands |
+| `monitor reset` | reset the target and halt at the reset vector; then run `maintenance flush register-cache` so GDB reads the registers again. The program continues for a moment first: the open session is detached before the new attach. |
+| `monitor read ADDR [WORDS]` | read 1-256 words (default 1) from an even address, including registers with side effects |
+| `monitor status` | device, mode, speed, state, hardware breakpoints in use |
+| `monitor speed KHZ` | SBW clock, 100-1000, for the next attach (`monitor reset` or the next connection) |
+| `monitor mode readonly` | the only mode of this version; `monitor mode full` says it is not available |
+
+## While the CPU is halted
+
+- The watchdog is held, and gets the firmware's own setting back on resume
+  and detach. A read of `WDTCTL` (0x015C) returns the saved low byte with the
+  read password 0x69; a write is saved for the release and the watchdog stays
+  held while halted.
+- MCLK, SMCLK and ACLK stop (EEM clock control 0x000E, the value TI's debug
+  stack writes when it takes the CPU). Timers clocked from them stop too. TI's
+  stack also sets per-module clock control from its device database; this
+  port leaves that out, so the modules keep their reset defaults. Whether
+  Timer0_B runs while halted is to be measured in the acceptance, Phase 7 in
+  `docs/PROJECT_STATUS.md`.
+- A CPU in a low-power mode is taken over without waking it; its status
+  register is restored on resume.
+- The probe answers memory and register requests only while the CPU is
+  halted. While the target runs, stop it first (Ctrl-C in GDB).
+
+## Troubleshooting
+
+The server prints what it refused on its console; GDB shows only a generic
+error for the same packet.
+
+| Message | Meaning |
+|---|---|
+| `refused: write of ... read-only mode writes only RAM and peripheral registers, not ...` | The address is flash, the bootloader, vacant memory, or one of the four peripheral blocks. |
+| `refused: read-only mode: the PC may only be set inside main flash ...` | `set var $pc = ...`, `jump` or `continue ADDR` to an address outside main flash. |
+| `refused: software breakpoints are not allowed in read-only mode ...` | Use `hbreak`. |
+| `refused: all 8 hardware breakpoints are in use` | Delete a breakpoint. |
+| `refused: flash programming (load) is not allowed in read-only mode` | `load` is not available in this version. |
+| `refused: read of ... outside the target's memory map` | Vacant memory and everything outside the map are not read. |
+| `refused: read of ... the BSL area ... is never read` | The bootloader area is not read. |
+| `refused: read of NAME (...) clears ...` | See "Reads with side effects"; use `monitor read`. |
+| `refused: byte write at ... would read ...; write the whole word` | See "Using GDB", byte writes. |
+| `target lost (...); the debug session has ended` | The target was reset, lost power or the wires came off. The session is over; start `target remote` again. |
+| `unexpected device: ID bytes ...` | The target is not an MSP430F5529. The target was left running. |
+| `no MSP430 found (JTAG ID read as 0x..)` | See `docs/MSP430_SBW.md`, Troubleshooting; try a lower `--speed`. |
+| `the device's JTAG lock key is programmed; it cannot be debugged` | The device is locked. |
+| `the probe firmware does not support debugging` | Flash the probe with a firmware built from this version. |
+| `the probe's SBW protocol version N is not supported by this tool for debugging` | The probe and the tool are from different versions; update the older one. |
+| `the probe still holds a programming session from an earlier command` | Unplug and replug the probe. |
+| `... choose another with --port` | The port is in use. |
+
+Exit status of `gdbserver`: 1 on failure, 2 for a usage error, 130 after
+Ctrl-C, 128 plus the signal number after SIGTERM or SIGHUP.
+
+## How it works
+
+`lib/msp430/src/debug.cpp` ports the CPUXv2 debug sequences of TI's MSP
+Debug Stack (MSPDS-OPEN-SOURCE 3.15.1.1): taking a running CPU under JTAG
+control and saving its context, reset and halt, register and memory access
+that keep the context, single step, release with EEM breakpoints armed, and
+stop detection. The deliberate differences from TI's code are listed in the
+header of that file. The sequences are exposed as operations 0x09-0x12 of the
+CMSIS-DAP vendor command 0x90 (protocol version 2). `lib/msp430/src/session.cpp`
+enforces the write rules above. `tools/msp430/gdbserver.py` translates GDB's
+remote protocol into those operations. The design is
+`docs/superpowers/specs/2026-11-13-msp430-debug-design.md`; TI's licence
+notice is in `THIRD_PARTY_NOTICES.md`.

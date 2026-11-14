@@ -258,6 +258,47 @@ Things to look at during bring-up, from the code reviews:
 - Run once with `CONFIG_THREAD_ANALYZER=y` and read the USB thread's stack peak
   (static worst case: about 1.2 KB of 2 KB).
 
+## Phase 7 — MSP430F5529 debugging over SBW, read-only (B1)
+
+**Implemented:** `msp430::Debugger` (`lib/msp430/src/debug.cpp`, port of the
+CPUXv2 macros of TI's MSP Debug Stack 3.15.1.1), debug operations 0x09-0x12
+of vendor command 0x90 (protocol version 2) with the `PROTECTED` write rules
+(RAM and peripheral registers only, without the PMM, flash controller, SYS
+and DMA blocks; the PC only into main flash) and the lock on the flash
+operations, GDB remote-protocol server (`tools/msp430/gdbserver.py`,
+`sbw.py gdbserver`), symbol-only ELF writer (`tools/msp430/symelf.py`).
+Design: `docs/superpowers/specs/2026-11-13-msp430-debug-design.md`; plan:
+`docs/superpowers/plans/2026-11-13-msp430-debug-b1.md`; user guide:
+`docs/MSP430_DEBUG.md`; TI's licence notice: `THIRD_PARTY_NOTICES.md`.
+
+**Status: implemented and tested on the host only.** Nothing of this phase has
+run on a target, and `msp430-elf-gdb` is not installed yet (plan Tasks 22
+and 23); the server has only been driven by scripted GDB clients against a
+fake probe.
+
+| Axis | Status |
+|---|---|
+| Host tests | 357/357 C++ (`scripts/run_host_tests.sh`, also under ASan); 374/374 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
+| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on, rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n`: built after the last firmware change (Task 15); not rebuilt since, documentation only |
+| End-to-end with GDB | Not run: GDB not installed (Tasks 22-23) |
+| On-target hardware | **Not run yet** — see the acceptance table below |
+
+### Phase 7 hardware acceptance (rpi_pico + MSP430F5529 board, read-only)
+
+Main flash and information memory are compared with the Phase 6 backups
+before the first step and after the last. Nothing below has been run.
+
+| # | Step | Result |
+|---|---|---|
+| 0 | Flash and information memory equal the backups before the session | — |
+| 1 | `sbw.py info` shows protocol version 2, debugging supported, 8 hardware breakpoints | — |
+| 2 | Attach without reset, read registers, detach: the firmware keeps running | — |
+| 3 | Halt and resume 50 times while it runs; it keeps working; whether a timer runs while halted | — |
+| 4 | Hardware breakpoint on a function by symbol; the firmware reaches it and stops there; step, inspect, continue | — |
+| 5 | Reset and halt at the reset vector, step through the start-up, continue | — |
+| 6 | Refusals: `load`, a write into flash, a software breakpoint | — |
+| 7 | Flash and information memory equal the backups after the session | — |
+
 ---
 
 ## Verified on hardware vs pending
@@ -291,6 +332,9 @@ Things to look at during bring-up, from the code reviews:
    re-applied on connect). It needs a probe whose SWD pins are free.
 
 4. **MSP430 Spy-Bi-Wire on rpi_pico2 and rpi_debug_probe** — built, not run.
+
+5. **MSP430 debugging (phase 7)** — host-tested only; needs `msp430-elf-gdb`
+   (plan Tasks 22-23) and the on-target acceptance above (Task 25).
 
 ---
 

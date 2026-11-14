@@ -4,7 +4,7 @@ The probe can erase, program, verify and read an MSP430F5529 through its
 two-wire Spy-Bi-Wire (SBW) interface. It uses the same two pins as SWD and the
 same USB interface. SWD/CMSIS-DAP debugging works as before; the only visible
 difference is the idle state of the two pins (see "How it works"). Debugging
-of MSP430 targets (breakpoints, single-step) is not implemented yet.
+MSP430 targets with GDB is described in `docs/MSP430_DEBUG.md`.
 
 **`flash` and `erase` destroy what is in the target's flash. Before the first
 write to a board, follow "First use on a board" below and make a backup you
@@ -84,6 +84,9 @@ Details:
   different data, without an error.
 - **Every command resets the target**, including `info` and `read`: taking
   control of the CPU involves a power-on reset, and releasing it a JTAG reset.
+  The exception is `gdbserver`, which attaches without reset unless given
+  `--reset` (`docs/MSP430_DEBUG.md`). Any other command closes a debug session
+  that is open, which detaches the debugger.
 
 Exit status: 0 on success, 1 on failure, 2 for a usage error, 130 when
 interrupted with Ctrl-C.

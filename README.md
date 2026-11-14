@@ -30,6 +30,10 @@ pins and a small Python tool:
 board, read `docs/MSP430_SBW.md`: it covers wiring, electrical checks, and how
 to make and check a backup (`selftest`, `read`, `trial`).
 
+`sbw.py gdbserver` debugs an MSP430F5529 with `msp430-elf-gdb` (halt, step,
+registers, memory, hardware breakpoints) without ever writing its flash; see
+`docs/MSP430_DEBUG.md`.
+
 ## Fresh machine setup (T2 topology)
 
 ```bash
