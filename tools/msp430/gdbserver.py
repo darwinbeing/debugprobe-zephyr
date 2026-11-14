@@ -194,7 +194,7 @@ class GdbServer:
                 self._put(b"+")
             reply = self._dispatch(payload)
             if reply is not None:
-                self._reply(payload, reply)
+                self._reply(reply, payload)
         elif kind == "bad":
             self._put(b"-")
         elif kind == "ack":
@@ -257,14 +257,17 @@ class GdbServer:
         self._last = rsp.frame(payload)
         self._put(self._last)
 
-    def _reply(self, request: bytes, reply) -> None:
-        """Send the reply to `request`. When an answer takes longer than GDB's
+    def _reply(self, reply, request: bytes | None = None) -> None:
+        """Send the reply to `request` (None: to the packet that started the
+        run or step being ended). When an answer takes longer than GDB's
         remotetimeout, GDB sends the packet again, or a nack, while it waits.
         Those copies and nacks, already received, are dropped first (a copy
         is not acknowledged either): answering them would put every later
-        reply one packet behind."""
+        reply one packet behind. Acks received by now are for earlier
+        replies; the new reply replaces the one they would clear."""
         self._drain()
-        self._backlog = [e for e in self._backlog if e != ("packet", request) and e[0] != "nack"]
+        self._backlog = [e for e in self._backlog
+                         if e[0] not in ("nack", "ack") and e != ("packet", request)]
         self._send(reply)
 
     def _note(self, text: str) -> None:
@@ -320,18 +323,19 @@ class GdbServer:
         if not self.attached:
             return
         self.attached = False
-        with _sigint_ignored():
-            for attempt in (1, 2):
-                try:
+        for attempt in (1, 2):
+            try:
+                # inside the try: a Ctrl-C while the guard is put up retries
+                with _sigint_ignored():
                     self.probe.dbg_detach(probe_mod.DETACH_RUN)
-                    self.say("detached; the program continues where it stopped")
-                    return
-                except KeyboardInterrupt:
-                    if attempt == 2:
-                        raise
-                except ProbeError as e:
-                    self.say(f"detach failed: {e}")
-                    return
+                self.say("detached; the program continues where it stopped")
+                return
+            except KeyboardInterrupt:
+                if attempt == 2:
+                    raise
+            except ProbeError as e:
+                self.say(f"detach failed: {e}")
+                return
 
     def _lost(self, e) -> None:
         """The probe answered TARGET_ERROR: it has ended the session itself."""
@@ -353,14 +357,14 @@ class GdbServer:
         except StatusError as e:
             if e.status == probe_mod.STATUS_TARGET_ERROR:
                 self._lost(e)
-                self._send("E03")
+                self._reply("E03", p)
                 raise SessionEnded() from None
             self.say(f"error: {e}")
             return "E01"
         except ProbeError as e:
             # the probe's state is unknown: answer, end the session, detach if still attached
             self.say(f"error: {e}; the debug session has ended")
-            self._send("E03")
+            self._reply("E03", p)
             raise SessionEnded() from None
 
     def _dispatch_text(self, s: str, p: bytes):
@@ -405,12 +409,12 @@ class GdbServer:
             raise Refused("flash programming (load) is not allowed in read-only mode")
         if s == "D" or s.startswith("D;"):
             self._detach()
-            self._send("OK")
+            self._reply("OK", p)
             raise SessionEnded()
         if s in ("k", "vKill") or s.startswith("vKill;"):
             self._detach()
             if s != "k":
-                self._send("OK")
+                self._reply("OK", p)
             raise SessionEnded()
         if s.startswith("qRcmd,"):
             return self._monitor(bytes.fromhex(s[6:]).decode("utf-8", "replace"))
@@ -638,9 +642,10 @@ class GdbServer:
         probe halted it. A step over an instruction that enters a low-power
         mode ends like this too, though the instruction executed."""
         st = self.probe.dbg_status()
+        interrupted = self._take_interrupts()  # a Ctrl-C during the step ends with it
         if self._regs()[2] & SR_CPUOFF:
             self._note("the CPU entered a low-power mode during the step; it is halted there")
-            return self._stopped(SIGTRAP, st.pc)
+            return self._stopped(SIGINT if interrupted else SIGTRAP, st.pc)
         self._note("the step did not complete in time; the CPU was stopped")
         return self._stopped(SIGINT, st.pc)
 
@@ -664,12 +669,13 @@ class GdbServer:
                 pc = self.probe.dbg_halt()
             except ProbeError as halt_error:
                 return self._run_failed(halt_error, may_halt=False)
+            self._take_interrupts()  # a Ctrl-C during the run ends with it
             self._note(f"error: {e}; the CPU was stopped")
             return self._stopped(SIGINT, pc)
         else:
             text = f"error: {e}; the debug session has ended"
         self._note(text)
-        self._send(f"X{SIGLOST:02x}")
+        self._reply(f"X{SIGLOST:02x}")
         raise SessionEnded()
 
     # ---- breakpoints ----

@@ -940,6 +940,117 @@ class LeavingTest(ServerFixture):
         self.assertEqual(self.fw.state, 0)
 
 
+class DuringOp:
+    """FakeFirmware behind a transport that calls `action` once, while the
+    firmware handles `op` (GDB sends something while the probe works)."""
+
+    def __init__(self, fw, op, action):
+        self.fw, self.op, self.action = fw, op, action
+
+    def transfer(self, request, timeout_ms=3000):
+        if self.op is not None and request[1:2] == bytes([self.op]):
+            self.op = None
+            self.action()
+        return self.fw.transfer(request, timeout_ms)
+
+
+class ReviewTwoTest(ServerFixture):
+    """A Ctrl-C that arrives while a step times out or a poll fails belongs
+    to that step or run; a session's last reply is sent once."""
+
+    def ctrl_c_during(self, op):
+        self.server.probe = SbwProbe(DuringOp(self.fw, op, lambda: self.gdb.sock.sendall(b"\x03")))
+
+    def nack_during(self, op):
+        self.server.probe = SbwProbe(DuringOp(self.fw, op, lambda: self.gdb.sock.sendall(b"-")))
+
+    def next_continue_runs(self, resumes):
+        self.fw.fail_op = {}
+        self.assertEqual(self.gdb.cmd("Z1,4600,2"), "OK")
+        self.assertEqual(self.gdb.cmd("c"), "T05hwbreak:;00:00460000;")
+        self.assertEqual(self.fw.resumes, resumes)
+
+    def test_ctrl_c_during_a_step_that_times_out(self):
+        self.fw.fail_op = {14: TIMEOUT}
+        self.fw.step_timeout_pc = 0x4ABC
+        self.ctrl_c_during(probe_mod.OP_DBG_STEP)
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"vCont;s:1"))
+        self.assertTrue(self.gdb.reply().startswith("O"))
+        self.assertEqual(self.gdb.reply(), "T0200:bc4a0000;")
+        self.next_continue_runs(1)
+
+    def test_ctrl_c_during_a_step_into_a_low_power_mode_is_an_interrupt(self):
+        self.fw.fail_op = {14: TIMEOUT}
+        self.fw.step_timeout_pc = 0x4522
+        self.fw.regs[2] = 0x00D8  # CPUOFF
+        self.ctrl_c_during(probe_mod.OP_DBG_STEP)
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"vCont;s:1"))
+        self.assertIn("low-power mode", console(self.gdb.reply()))
+        self.assertEqual(self.gdb.reply(), "T0200:22450000;")
+        self.fw.regs[2] = 0x0008
+        self.next_continue_runs(1)
+
+    def test_ctrl_c_during_a_failing_poll(self):
+        self.fw.fail_op = {13: TIMEOUT}
+        self.ctrl_c_during(probe_mod.OP_DBG_STATUS)
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"c"))
+        self.assertIn("the CPU was stopped", console(self.gdb.reply()))
+        self.assertEqual(self.gdb.reply(), "T0200:bc4a0000;")
+        self.next_continue_runs(2)
+
+    def test_a_slow_m_ending_in_target_error_gets_one_E03(self):
+        self.fw.fail_op = {3: TARGET_ERROR}
+        self.nack_during(probe_mod.OP_READ_MEM)  # GDB's remotetimeout expired
+        self.start()
+        self.assertEqual(self.gdb.cmd("m4400,2"), "E03")
+        self.assertIsNone(self.gdb.reply())  # nothing more: the connection closes
+
+    def test_a_lost_run_gets_one_X1d(self):
+        self.fw.lost_on_poll = True
+        self.nack_during(probe_mod.OP_DBG_STATUS)
+        self.start()
+        self.gdb.sock.sendall(rsp.frame(b"c"))
+        self.assertTrue(self.gdb.reply().startswith("O"))
+        self.assertEqual(self.gdb.reply(), "X1d")
+        self.assertIsNone(self.gdb.reply())
+
+    def slow_detach(self, packet):
+        self.nack_during(probe_mod.OP_DBG_DETACH)
+        self.start()
+        self.assertEqual(self.gdb.cmd(packet), "OK")
+        self.assertIsNone(self.gdb.reply())
+        self.assertEqual(self.fw.detaches, [0])
+
+    def test_a_slow_D_gets_one_OK(self):
+        self.slow_detach("D")
+
+    def test_a_slow_vkill_gets_one_OK(self):
+        self.slow_detach("vKill;1")
+
+    def test_ctrl_c_while_the_sigint_guard_is_installed_still_detaches(self):
+        real = gdbserver._sigint_ignored
+        calls = []
+
+        def guard():
+            calls.append(1)
+            if len(calls) == 1:
+                raise KeyboardInterrupt  # the second Ctrl-C lands here
+            return real()
+
+        gdbserver._sigint_ignored = guard
+        try:
+            self.start()
+            self.assertEqual(self.gdb.cmd("D"), "OK")
+            self.thread.join(5)
+        finally:
+            gdbserver._sigint_ignored = real
+        self.assertEqual(self.fw.detaches, [0])
+        self.assertEqual(len(calls), 2)
+
+
 class DetachSignalTest(unittest.TestCase):
     def test_the_detach_ignores_ctrl_c_on_the_main_thread(self):
         fw = FakeFirmware()
