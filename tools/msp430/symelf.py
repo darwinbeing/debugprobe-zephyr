@@ -3,14 +3,18 @@
 
     symelf.py names.tsv [objnames.tsv ...] -o symbols.elf [--image backup.hex]
 
-Each table is tab-separated with a header row. Columns used:
-  address   hex, with or without 0x; "-" (a type, not a symbol) skips the row
+Each table is tab-separated UTF-8 text (a byte-order mark is ignored) with a
+header row. Quotes are ordinary characters. Blank lines and lines starting
+with # (comments) are skipped. Columns used:
+  address   1 to 5 hex digits, with or without 0x; "-" (a type, not a
+            symbol) skips the row, an empty address is an error
   new_name  the symbol name (or a column called "name")
   kind      optional: func (the default when the column is missing), var,
             const, data; struct, union and member rows are skipped
-  size      optional, decimal or 0x hex; 0 when missing
-A name may appear once; an exact repeat of a row counts once, and a name that
-appears again with another address, kind or size is an error.
+  size      optional, decimal or 0x hex, below 0x100000; 0 when missing
+Functions must be at even addresses. A name may appear once; an exact repeat
+of a row counts once, and a name that appears again with another address,
+kind or size is an error.
 
 The file is an ELF32 for the MSP430X (EM_MSP430) with the attributes
 msp430-elf-gdb reads to choose the MSP430X instruction set and the large code
@@ -25,6 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
 import struct
 import sys
 
@@ -45,19 +50,50 @@ ISA_MSP430X, MODEL_LARGE = 2, 2
 FUNC_KINDS = {"func", "function", "code"}
 OBJECT_KINDS = {"var", "const", "data", "object"}
 SKIP_KINDS = {"struct", "union", "member", "type"}
+SPACE = 0x100000  # the MSP430X's 20-bit address space
+ADDRESS = re.compile(r"(?:0[xX])?[0-9A-Fa-f]{1,5}")
+HEX = re.compile(r"(?:0[xX])?[0-9A-Fa-f]+")
+SIZE = re.compile(r"0[xX][0-9A-Fa-f]+|[0-9]+")
 
 
 class SymbolError(Exception):
     """A table cannot be turned into symbols; the message names the row."""
 
 
+def _address(text: str, where: str) -> int:
+    if ADDRESS.fullmatch(text):
+        return int(text, 16)
+    if HEX.fullmatch(text) and int(text, 16) >= SPACE:
+        raise SymbolError(f"{where}: address 0x{int(text, 16):X} outside the 20-bit space")
+    raise SymbolError(f"{where}: bad address '{text}'")
+
+
+def _size(text: str, where: str) -> int:
+    if not text:
+        return 0
+    if not SIZE.fullmatch(text):
+        raise SymbolError(f"{where}: bad size '{text}'")
+    size = int(text, 16) if text[:2] in ("0x", "0X") else int(text, 10)
+    if size >= SPACE:
+        raise SymbolError(f"{where}: size {text} outside 0 to 0x{SPACE - 1:X}")
+    return size
+
+
 def read_table(path: str) -> list:
     """[(name, address, size, STT_FUNC | STT_OBJECT)] from one table."""
-    with open(path, newline="", encoding="utf-8") as f:
-        rows = list(csv.reader(f, delimiter="\t"))
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f, delimiter="\t", quoting=csv.QUOTE_NONE)
+            rows = [(reader.line_num, row) for row in reader]
+    except UnicodeDecodeError:
+        raise SymbolError(f"{path}: not UTF-8 text") from None
+    except csv.Error as e:
+        raise SymbolError(f"{path}: {e}") from None
+    rows = [(line, row) for line, row in rows
+            if any(cell.strip() for cell in row) and not row[0].lstrip().startswith("#")]
     if not rows:
         raise SymbolError(f"{path}: empty table")
-    header = [h.strip() for h in rows[0]]
+    header = [h.strip() for h in rows[0][1]]
     if "address" not in header:
         raise SymbolError(f"{path}: no 'address' column")
     name_col = "new_name" if "new_name" in header else "name"
@@ -65,34 +101,32 @@ def read_table(path: str) -> list:
         raise SymbolError(f"{path}: no 'new_name' or 'name' column")
     col = {h: i for i, h in enumerate(header)}
     symbols = []
-    for line, row in enumerate(rows[1:], start=2):
-        if not row or not any(cell.strip() for cell in row):
-            continue
+    for line, row in rows[1:]:
+        where = f"{path}:{line}"
 
-        def cell(name, default=""):
+        def cell(name):
             i = col.get(name)
-            return row[i].strip() if i is not None and i < len(row) else default
+            return row[i].strip() if i is not None and i < len(row) else ""
 
         addr_text = cell("address")
-        kind = cell("kind", "func").lower() or "func"
-        if addr_text in ("", "-") or kind in SKIP_KINDS:
+        kind = cell("kind").lower() or "func"
+        if addr_text == "-" or kind in SKIP_KINDS:
             continue
         if kind in FUNC_KINDS:
             stype = STT_FUNC
         elif kind in OBJECT_KINDS:
             stype = STT_OBJECT
         else:
-            raise SymbolError(f"{path}:{line}: unknown kind '{kind}'")
+            raise SymbolError(f"{where}: unknown kind '{kind}'")
         name = cell(name_col)
         if not name:
-            raise SymbolError(f"{path}:{line}: no name")
-        try:
-            addr = int(addr_text, 16)
-            size = int(cell("size", "0") or "0", 0)
-        except ValueError:
-            raise SymbolError(f"{path}:{line}: bad address or size") from None
-        if not 0 <= addr < 0x100000:
-            raise SymbolError(f"{path}:{line}: address 0x{addr:X} outside the 20-bit space")
+            raise SymbolError(f"{where}: no name")
+        if not addr_text:
+            raise SymbolError(f"{where}: no address ('-' skips a row)")
+        addr = _address(addr_text, where)
+        size = _size(cell("size"), where)
+        if stype == STT_FUNC and addr & 1:
+            raise SymbolError(f"{where}: function at odd address 0x{addr:05X}")
         symbols.append((name, addr, size, stype))
     return symbols
 

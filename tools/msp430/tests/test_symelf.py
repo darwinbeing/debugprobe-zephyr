@@ -58,7 +58,7 @@ class SymElfTest(unittest.TestCase):
     def path(self, name, text=None):
         p = os.path.join(self.tmp.name, name)
         if text is not None:
-            with open(p, "w") as f:
+            with open(p, "wb" if isinstance(text, bytes) else "w") as f:
                 f.write(text)
         return p
 
@@ -66,6 +66,25 @@ class SymElfTest(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         code = symelf.main(list(args), out=out, err=err)
         return code, out.getvalue(), err.getvalue()
+
+    def table_error(self, text):
+        """Run the tool on one table it must refuse; the error output."""
+        out = self.path("x.elf")
+        if os.path.exists(out):
+            os.remove(out)
+        code, _, err = self.run_tool(self.path("t.tsv", text), "-o", out)
+        self.assertEqual(code, 1)
+        self.assertFalse(os.path.exists(out))
+        self.assertTrue(err.startswith("error: ") and err.count("\n") == 1, err)  # no traceback
+        return err
+
+    def table_symbols(self, text):
+        """Run the tool on one table it must accept; (summary line, symbols)."""
+        out = self.path("ok.elf")
+        code, summary, err = self.run_tool(self.path("t.tsv", text), "-o", out, "--force")
+        self.assertEqual((code, err), (0, ""))
+        with open(out, "rb") as f:
+            return summary, read_elf(f.read())["symbols"]
 
     def test_symbols_and_sections(self):
         elf_path = self.path("sym.elf")
@@ -134,6 +153,51 @@ class SymElfTest(unittest.TestCase):
         far = self.path("far.tsv", "address\tname\n100000\tf\n")
         self.assertIn("outside the 20-bit space", self.run_tool(far, "-o", out)[2])
         self.assertFalse(os.path.exists(out))
+
+    def test_table_errors(self):
+        cases = [
+            ("", "t.tsv: empty table"),
+            ("# only a comment\n\n", "t.tsv: empty table"),
+            ("address\tlabel\n4400\tf\n", "t.tsv: no 'new_name' or 'name' column"),
+            ("address\tnew_name\n4400\t\n", "t.tsv:2: no name"),
+            ("address\tnew_name\n\tf\n", "t.tsv:2: no address"),
+            ("address\tnew_name\nzz\tf\n", "t.tsv:2: bad address 'zz'"),
+            ("address\tnew_name\n+4400\tf\n", "t.tsv:2: bad address '+4400'"),
+            ("address\tnew_name\n44_00\tf\n", "t.tsv:2: bad address '44_00'"),
+            ("address\tnew_name\n004400\tf\n", "t.tsv:2: bad address '004400'"),
+            ("address\tnew_name\n0x\tf\n", "t.tsv:2: bad address '0x'"),
+            ("address\tnew_name\n0x100000\tf\n", "t.tsv:2: address 0x100000 outside the 20-bit space"),
+            ("address\tnew_name\tsize\n4400\tf\tten\n", "t.tsv:2: bad size 'ten'"),
+            ("address\tnew_name\tsize\n4400\tf\t-1\n", "t.tsv:2: bad size '-1'"),
+            ("address\tnew_name\tsize\n4400\tf\t0x100000\n", "t.tsv:2: size 0x100000 outside 0 to 0xFFFFF"),
+            ("address\tnew_name\tsize\n4400\tf\t4294967296\n", "t.tsv:2: size 4294967296 outside 0 to 0xFFFFF"),
+            ("address\tnew_name\n4401\tf\n", "t.tsv:2: function at odd address 0x04401"),
+            ("# a comment\naddress\tnew_name\n\n# another\n4401\tf\n", "t.tsv:5: function at odd address"),
+            (b"address\tnew_name\tpurpose\n4400\tf\tna\xefve\n", "t.tsv: not UTF-8 text"),
+            ("address\tnew_name\tpurpose\n4400\tf\t" + "x" * 200000 + "\n", "t.tsv: field larger than"),
+        ]
+        for text, message in cases:
+            with self.subTest(text=text[:60]):
+                self.assertIn(message, self.table_error(text))
+
+    def test_table_format(self):
+        # Quotes are ordinary characters: an unbalanced one swallows no rows.
+        summary, _ = self.table_symbols('address\tnew_name\tpurpose\n4400\tdemo_a\t"says hi\n'
+                                        '4500\tdemo_b\tdemo\n4600\tdemo_c\tdemo "x\n')
+        self.assertIn("3 functions, 0 objects", summary)
+        summary, syms = self.table_symbols("﻿address\tnew_name\n0x4400\tdemo_func\n")
+        self.assertIn("1 functions, 0 objects", summary)
+        self.assertEqual(syms["demo_func"][0], 0x4400)
+        # Comments, blank lines, '-', odd objects and sizes.
+        summary, syms = self.table_symbols(
+            "# demo table\naddress\tnew_name\tkind\tsize\n\n# 4400\tdemo_commented\tfunc\n"
+            "-\tdemo_skipped\tfunc\t\n0X4400\tdemo_func\tfunc\t\n2405\tdemo_byte\tvar\t1\n"
+            "2406\tdemo_buf\tdata\t0x20\n2426\tdemo_word\tvar\t010\n")
+        self.assertIn("1 functions, 3 objects", summary)
+        self.assertEqual(sorted(syms), ["demo_buf", "demo_byte", "demo_func", "demo_word"])
+        self.assertEqual(syms["demo_byte"][:3], (0x2405, 1, 1))
+        self.assertEqual(syms["demo_buf"][:2], (0x2406, 0x20))
+        self.assertEqual(syms["demo_word"][:2], (0x2426, 10))
 
     def test_refuses_to_overwrite_without_force(self):
         out = self.path("x.elf", "keep")
