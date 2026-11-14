@@ -1231,9 +1231,9 @@ TEST(session_target_error_from_a_lost_running_target_sends_nothing_more)
 }
 
 /* A TargetError from a memory, register or breakpoint operation leaves the
- * Debugger attached (the CPU is no longer under JTAG control afterwards): the
- * Session detaches with Run, as Debugger::attach does for the same failure,
- * so the pins are released and the CPU is not left halted; no reset. */
+ * Debugger attached (the link check failed afterwards): the Session detaches
+ * with Run, as Debugger::attach does for the same failure, so the pins are
+ * released and the CPU is not left halted; no reset. */
 TEST(session_target_error_while_halted_ends_the_session)
 {
 	{
@@ -1254,11 +1254,9 @@ TEST(session_target_error_while_halted_ends_the_session)
 		f.attach();
 		f.tap.cntrl_sig = 0x0000;
 		CHECK_BYTES(f.run(write_req(0x2400, 2)), kTargetError);
-		/* checked before the first write: the only write is the release's
-		 * WDTCTL restore */
-		for (const auto &w : f.tap.mem_writes) {
-			CHECK_EQ(w.first, FakeTap::kWdtctl);
-		}
+		/* checked before the first write, and the link check before the
+		 * release fails as well: nothing written, not even WDTCTL */
+		CHECK(f.tap.mem_writes.empty());
 		CHECK(f.s.state() == State::Idle);
 		REQUIRE(!f.tap.log.empty());
 		CHECK(f.tap.log.back() == "close");
@@ -1308,6 +1306,46 @@ TEST(session_target_error_while_halted_ends_the_session)
 		CHECK(f.tap.log.back() == "close");
 		CHECK_EQ(count_log(f.tap, "close"), 1u);
 		CHECK_BYTES(f.run({0x90, 0x0D}), kBadState);
+	}
+}
+
+/* The detach that follows such a TargetError makes the link check again
+ * before it restores SR, WDTCTL and PC: on a dead link it feeds nothing and
+ * writes nothing (EEM off, released, pins released); on a healthy link (the
+ * access's own check alone failed) it restores the context as before. */
+TEST(session_target_error_on_a_dead_link_restores_nothing)
+{
+	for (const bool id_lost : {true, false}) {
+		Fx f;
+		f.attach();
+		f.tap.cpu_words.clear();
+		if (id_lost) {
+			f.tap.jtag_id = 0xFF; /* the data line reads all ones */
+		} else {
+			f.tap.cntrl_sig = 0x0000; /* the data line reads all zeros */
+		}
+		CHECK_BYTES(f.run(read_req(0x2400, 1)), kTargetError);
+		CHECK(f.s.state() == State::Idle);
+		CHECK(f.tap.mem_writes.empty());
+		CHECK(f.tap.cpu_words.empty()); /* no SR or PC fed */
+		const Log tail = clear_triggers() + link_check(!id_lost) + kAbandon;
+		CHECK_LOG(last(f.tap.log, tail.size()), tail);
+		CHECK_EQ(count_log(f.tap, "close"), 1u);
+		f.tap.log.clear();
+		CHECK_BYTES(f.run(read_req(0x2400, 1)), kBadState);
+		CHECK(f.tap.log.empty());
+	}
+	{
+		Fx f; /* healthy link: the restore of today */
+		f.attach();
+		f.tap.cntrl_sig_script = {0x0000}; /* READ_MEM's check alone fails */
+		CHECK_BYTES(f.run(read_req(0x2400, 1)), kTargetError);
+		CHECK(f.tap.cntrl_sig_script.empty());
+		CHECK(f.s.state() == State::Idle);
+		const Log tail = detach_run(0x4520, 0x0008, 0x6904);
+		CHECK_LOG(last(f.tap.log, tail.size()), tail);
+		REQUIRE(f.tap.mem_writes.size() == 1u);
+		CHECK(f.tap.mem_writes[0] == (std::pair<uint32_t, uint16_t>{0x015C, 0x5A04}));
 	}
 }
 

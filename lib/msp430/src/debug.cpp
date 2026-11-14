@@ -25,9 +25,12 @@
  *  - "check for Init State" after a sync is Cpuxv2::in_full_emulation(),
  *    which also checks the JTAG ID; read_mem, write_mem, read_regs,
  *    write_reg, set_breakpoint and clear_breakpoint end with the same check
- *    (EemDataExchangeXv2 checks nothing). write_mem also makes it before its
- *    first write, as Phase A's Cpuxv2::write_word does, and writes nothing
- *    if it fails. ReadMemWordsXv2 and WriteMemWordsXv2 check nothing;
+ *    (EemDataExchangeXv2 checks nothing). write_mem also makes it once
+ *    before its first write and writes nothing if it fails, but not before
+ *    each word as Phase A's Cpuxv2::write_word does (WriteMem_430Xv2 with
+ *    the check in front): a link that dies during the transfer shows in the
+ *    check after the last word. ReadMemWordsXv2 and WriteMemWordsXv2 check
+ *    nothing;
  *  - read_mem sets the CPU to read (control signal 0x0501) before the
  *    first address, as SLAU320's ReadMem_430Xv2 and Phase A's
  *    Cpuxv2::read_mem do; ReadMemWordsXv2 relies on the operation before
@@ -61,6 +64,32 @@
  *    lines 198-201), then the CPU gets another power-on reset (EEM off,
  *    ReleaseDevice_430Xv2(V_RESET), as detach(Reset)) and starts at its
  *    reset vector;
+ *  - before the CPU is let go with anything fed to it, the init-state check
+ *    (Cpuxv2::in_full_emulation(), JTAG ID 0x91 and a control-signal bit of
+ *    0x0301: a link check) is made once more: in detach(Run) before the
+ *    context (SR, WDTCTL, PC) is restored, and before the release at the PC
+ *    after a failed sync (above). If it fails, nothing is fed over the
+ *    link: EEM control 0x0006, IR_CNTRL_SIG_RELEASE and the pins released,
+ *    nothing written to the target's memory (abandon(), as for a lost
+ *    target below). Session::abort ends a debug session with detach(Run)
+ *    after a memory, register or breakpoint access returned TargetError, so
+ *    the link that failed there gets no restore fed over it. MSPDS and the
+ *    DLL check nothing before RestoreContext_ReleaseJtagXv2;
+ *  - detach(Run) of a CPU that is already halted disarms every trigger
+ *    block and turns the sequencer off, restores SR, WDTCTL and the PC and
+ *    releases the CPU with EEM control 0x0006, as the DLL's run() does
+ *    without breakpoints to poll (DebugManagerMSP430.cpp:291). The DLL's
+ *    Close does that only for a CPU that was running (State with stop, then
+ *    Run(FREE_RUN), DLL430_OldApiV3.cpp:556-567); for a halted one it only
+ *    moves the PC to a safe place, 0x0004 with SR 0
+ *    (DLL430_OldApiV3.cpp:568-574, DebugManagerMSP430::setPCtoSafeLocation,
+ *    DebugManagerMSP430.cpp:873-891), before it stops JTAG;
+ *  - after the reset-and-halt sync the interrupt-request flag that step()
+ *    passes on as SingleStepXv2's irRequest is 0, as SR is. The DLL keeps
+ *    the value of its last conditional sync or step
+ *    (DebugManagerMSP430.cpp:622, 739): its reset
+ *    (DeviceHandleMSP430::reset, DeviceHandleMSP430.cpp:296-301) takes only
+ *    PC and SR from SyncJtag_AssertPor_SaveContextXv2;
  *  - the PC derived from the MAB (MAB - 4, or - 2 in a low-power mode) is
  *    kept to 20 bits; MSPDS computes it in 32 bits, so a MAB below 4 wraps
  *    to 0xFFFFFFFx there and to 0xFFFFx here;
@@ -435,15 +464,16 @@ void Debugger::write_control(uint16_t value)
 	tap_.dr_shift16(value);
 }
 
-/* EemDataExchangeXv2.c:66-86, one read; IR_EMEX_DATA_EXCHANGE32 must be
- * selected. */
+/* EemDataExchangeXv2.c:83-84, one read; IR_EMEX_DATA_EXCHANGE32 must be
+ * selected (line 70). */
 uint32_t Debugger::eem_read(uint8_t reg)
 {
 	tap_.dr_shift32(static_cast<uint32_t>(reg | kEemRead));
 	return tap_.dr_shift32(0);
 }
 
-/* EemDataExchangeXv2.c:88-106, one write */
+/* EemDataExchangeXv2.c:104-105, one write; IR_EMEX_DATA_EXCHANGE32 must be
+ * selected (line 70). */
 void Debugger::eem_write(uint8_t reg, uint32_t value)
 {
 	tap_.dr_shift32(reg);
@@ -453,8 +483,9 @@ void Debugger::eem_write(uint8_t reg, uint32_t value)
 /* ---- context save and restore ---- */
 
 /* Not in MSPDS: release a CPU that is not in full emulation (not yet
- * synchronized, or running when its JTAG ID was lost), without writing
- * anything to the target's memory, and let go of the pins. EEM
+ * synchronized, or running when its JTAG ID was lost), or one whose link
+ * check failed just before a release, without feeding it anything or
+ * writing anything to the target's memory, and let go of the pins. EEM
  * registers only: the EEM is turned off, then trigger block 0 goes back if
  * step() has borrowed it (once the reset path has switched the system
  * clocks to JCK, the caller switches them back first,
@@ -474,9 +505,14 @@ void Debugger::abandon()
  * same low-power correction as a normal release (here from the control
  * signal's CPUOFF, as SR was not read); EEM off. Trigger block 0 goes back
  * first if step() has borrowed it (the sync has turned the EEM off).
- * Lets go of the pins. */
+ * Lets go of the pins. The link check comes first: if it fails, nothing is
+ * fed over the link and the CPU is let go as abandon() does. */
 void Debugger::release_unsaved(uint32_t pc, bool cpuoff)
 {
+	if (!cpu_.in_full_emulation()) {
+		abandon();
+		return;
+	}
 	give_back_trigger_block_0();
 	release_at(pc, cpuoff, kEmuClkEn | kClearStop);
 	tap_.close();
@@ -780,7 +816,10 @@ Status Debugger::attach(AttachMode mode, uint32_t slot_hz, Identity &id)
 
 /* A running CPU is stopped first and then let go with its context restored,
  * as the DLL's Close does (DLL430_OldApiV3.cpp:556-567: State with stop,
- * then Run(FREE_RUN), EEM control 0x0006). */
+ * then Run(FREE_RUN), EEM control 0x0006). A halted one is let go the same
+ * way, and every trigger is disarmed; neither is in the DLL's Close (see the
+ * header). Before the restore, the link check (not in MSPDS, see the
+ * header): after a TargetError the link may have failed. */
 void Debugger::detach(DetachAction action)
 {
 	if (!attached_) {
@@ -792,8 +831,12 @@ void Debugger::detach(DetachAction action)
 	clear_triggers();
 	if (action == DetachAction::Reset) {
 		release_with_reset();
+	} else if (!cpu_.in_full_emulation()) {
+		abandon(); /* nothing fed over a failed link */
 	} else {
-		restore_and_release(kEmuClkEn | kClearStop); /* DLL run(): EEM off */
+		/* EEM off (0x0006), as the DLL's run() without breakpoints to poll,
+		 * DebugManagerMSP430.cpp:291 */
+		restore_and_release(kEmuClkEn | kClearStop);
 		tap_.close();
 	}
 	attached_ = false;
@@ -945,7 +988,7 @@ Status Debugger::write_mem(uint32_t addr, size_t nwords, const uint8_t *src)
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
 
-/* Trigger block `index` set up through EemDataExchangeXv2.c:88-106 as
+/* Trigger block `index` set up through EemDataExchangeXv2.c:104-105 as
  * SyncJtag_Conditional_SaveContextXv2.c:130-137 sets up trigger block 0 for
  * "next instruction fetch", with the exact address (mask none, as the DLL's
  * code breakpoint); combination `index` holds trigger `index` alone. The
@@ -1103,7 +1146,7 @@ void Debugger::give_back_trigger_block_0()
 }
 
 /* SingleStepXv2.c:57-164 with the parameters the DLL passes
- * (DebugManagerMSP430::singleStep, DebugManagerMSP430.cpp:578-596):
+ * (DebugManagerMSP430::singleStep, DebugManagerMSP430.cpp:578-591):
  * RestoreContext_ReleaseJtagXv2 with EEM control 0x0007, mdb = 0,
  * releaseJtag = 0, ulpDebug = 0; irRequest from the last sync. The timeout,
  * the JTAG ID check after a release without a trigger and trigger block 0

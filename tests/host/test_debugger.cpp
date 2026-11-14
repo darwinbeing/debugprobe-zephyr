@@ -264,7 +264,8 @@ TEST(debugger_attach_refuses_a_watchdog_without_its_password)
 	CHECK(!f.d.attached());
 	/* The CPU is in full emulation: it is let go at the PC where it stopped,
 	 * with SR and WDTCTL untouched. The flash controller is not polled. */
-	const Log want = read_word(0x015C) + release_at(0x4520, false, 0x0006) + Log{"close"};
+	const Log want =
+		read_word(0x015C) + link_check() + release_at(0x4520, false, 0x0006) + Log{"close"};
 	CHECK_LOG(last(f.t.log, want.size()), want);
 	CHECK(!contains(f.t.log, Log{"dr20:00144"}));
 }
@@ -282,8 +283,43 @@ TEST(debugger_attach_with_a_failed_init_state_check_releases_at_the_pc)
 	CHECK(f.t.cntrl_sig_script.empty());
 	CHECK(f.t.mem_writes.empty());
 	CHECK(!f.d.attached());
-	const Log want = Log{"ir:30", "dr16:000e", "ir:28", "dr16:0000"} +
+	/* the link check again before the PC is fed: it passes now */
+	const Log want = Log{"ir:30", "dr16:000e", "ir:28", "dr16:0000"} + link_check() +
 			 release_at(0x4520, false, 0x0006) + Log{"close"};
+	CHECK_LOG(last(f.t.log, want.size()), want);
+}
+
+TEST(debugger_attach_with_a_dead_link_at_the_init_state_check_feeds_nothing)
+{
+	Fx f;
+	f.running_cpu();
+	/* as above, but the control signal stays at 0 from the init-state check
+	 * on: the link check before the release fails too */
+	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301, 0x0301, 0x0301, 0x0301};
+	f.t.cntrl_sig = 0x0000;
+	CHECK(f.d.attach(AttachMode::Running, 250000, f.id) == Status::TargetError);
+	CHECK(f.t.cntrl_sig_script.empty());
+	CHECK(f.t.mem_writes.empty());
+	CHECK(!f.d.attached());
+	const Log want = Log{"ir:30", "dr16:000e", "ir:28", "dr16:0000"} + link_check() + kAbandon;
+	CHECK_LOG(last(f.t.log, want.size()), want);
+	CHECK(!contains(f.t.log, Log{d16(0x4303)})); /* no PC fed (SetPcXv2's NOP) */
+}
+
+TEST(debugger_attach_with_a_watchdog_misread_on_a_dead_link_feeds_nothing)
+{
+	Fx f;
+	f.running_cpu();
+	/* the init-state check passes (ninth control-signal read), the WDTCTL read
+	 * has no password, and the link check before the release fails */
+	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301,
+				0x0301, 0x0301, 0x0301, 0x0301, 0x0000};
+	f.t.memory[0x015C] = 0x0000;
+	CHECK(f.d.attach(AttachMode::Running, 250000, f.id) == Status::TargetError);
+	CHECK(f.t.cntrl_sig_script.empty());
+	CHECK(f.t.mem_writes.empty());
+	CHECK(!f.d.attached());
+	const Log want = read_word(0x015C) + link_check() + kAbandon;
 	CHECK_LOG(last(f.t.log, want.size()), want);
 }
 
@@ -297,7 +333,8 @@ TEST(debugger_attach_failure_in_a_low_power_mode_releases_at_pc_minus_2)
 	CHECK(f.d.attach(AttachMode::Running, 250000, f.id) == Status::TargetError);
 	CHECK(f.t.mem_writes.empty());
 	/* PC = MAB - 2, released 2 lower as a normal release does (Note 1411) */
-	const Log want = read_word(0x015C) + release_at(0x453C, true, 0x0006) + Log{"close"};
+	const Log want =
+		read_word(0x015C) + link_check() + release_at(0x453C, true, 0x0006) + Log{"close"};
 	CHECK_LOG(last(f.t.log, want.size()), want);
 }
 
@@ -369,8 +406,7 @@ TEST(debugger_attach_when_the_cpu_enters_a_low_power_mode_before_the_save)
 	f.t.log.clear();
 	f.d.detach(DetachAction::Run);
 	/* released 2 lower again (Note 1411) */
-	CHECK_LOG(f.t.log, clear_triggers() + restore_release(0x453C, 0x0018, 0x6904, 0x0006) +
-				   Log{"close"});
+	CHECK_LOG(f.t.log, detach_run(0x453C, 0x0018, 0x6904));
 }
 
 TEST(debugger_attach_passes_on_identify_failures)
@@ -395,8 +431,7 @@ TEST(debugger_detach_restores_the_context_and_lets_the_program_run)
 	Fx f;
 	f.attached();
 	f.d.detach(DetachAction::Run);
-	CHECK_LOG(f.t.log, clear_triggers() + restore_release(0x4520, 0x0008, 0x6904, 0x0006) +
-				   Log{"close"});
+	CHECK_LOG(f.t.log, detach_run(0x4520, 0x0008, 0x6904));
 	CHECK(!f.d.attached());
 	/* the watchdog gets its original bits back, without HOLD */
 	REQUIRE(!f.t.mem_writes.empty());
@@ -422,14 +457,12 @@ TEST(debugger_detach_clocks_a_cpu_in_halt_with_0403)
 {
 	Fx f;
 	f.attached();
-	/* the control-signal reads of SetPcXv2 and of the release clock; the
-	 * second shows HALT (0x0002) */
-	f.t.cntrl_sig_script = {0x0301, 0x0303};
+	/* the control-signal reads of the link check, of SetPcXv2 and of the
+	 * release clock; the third shows HALT (0x0002) */
+	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0303};
 	f.d.detach(DetachAction::Run);
 	CHECK(f.t.cntrl_sig_script.empty());
-	CHECK_LOG(f.t.log, clear_triggers() +
-				   restore_release(0x4520, 0x0008, 0x6904, 0x0006, true) +
-				   Log{"close"});
+	CHECK_LOG(f.t.log, detach_run(0x4520, 0x0008, 0x6904, true));
 }
 
 TEST(debugger_detach_with_reset)
@@ -482,9 +515,6 @@ Log assert_por_log(unsigned wdt)
 /* EEM off, then ReleaseDevice_430Xv2(V_RESET) (Cpuxv2::disconnect) */
 const Log kResetRelease = {"ir:30", "dr16:0006", "ir:c8", "dr16:0c01", "dr16:0401", "ir:a8",
 			   "close"};
-
-/* abandon(): EEM off, released */
-const Log kAbandon = {"ir:30", "dr16:0006", "ir:a8", "close"};
 
 } // namespace
 
@@ -619,11 +649,29 @@ TEST(debugger_reset_and_halt_with_a_late_init_state_failure_releases_at_the_rese
 	CHECK(f.scripts_consumed());
 	CHECK(!f.d.attached());
 	/* the context is saved: released as detach(Run) does, at the reset
-	 * vector's target with SR 0 and the watchdog as the POR left it */
-	const Log want = Log{"ir:28", "dr16:0000"} + clear_triggers() +
-			 restore_release(0x441A, 0x0000, 0x6904, 0x0006) + Log{"close"};
+	 * vector's target with SR 0 and the watchdog as the POR left it (the
+	 * link check before the restore passes now) */
+	const Log want = Log{"ir:28", "dr16:0000"} + detach_run(0x441A, 0x0000, 0x6904);
 	CHECK_LOG(last(f.t.log, want.size()), want);
 	CHECK_EQ(f.t.eem[0x88], 0x000Eu);
+}
+
+TEST(debugger_reset_and_halt_with_a_late_dead_link_feeds_nothing)
+{
+	Fx f;
+	/* as above, but the control signal stays at 0 from attach's check on */
+	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301};
+	f.t.cntrl_sig = 0x0000;
+	CHECK(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	CHECK(!f.d.attached());
+	const Log want = Log{"ir:28", "dr16:0000"} + clear_triggers() + link_check() + kAbandon;
+	CHECK_LOG(last(f.t.log, want.size()), want);
+	/* the only memory writes are the sync's: the watchdog hold */
+	for (const auto &w : f.t.mem_writes) {
+		CHECK_EQ(w.first, 0x015Cu);
+		CHECK_EQ(w.second, 0x5A84);
+	}
 }
 
 namespace {
@@ -730,8 +778,7 @@ TEST(debugger_written_pc_and_sr_are_restored_on_detach)
 	f.d.detach(DetachAction::Run);
 	/* SR goes to the CPU as written; with CPUOFF set the PC is released 2
 	 * lower (Note 1411) */
-	CHECK_LOG(f.t.log, clear_triggers() + restore_release(0x4600, 0x0018, 0x6904, 0x0006) +
-				   Log{"close"});
+	CHECK_LOG(f.t.log, detach_run(0x4600, 0x0018, 0x6904));
 	CHECK(contains(f.t.log, set_pc(0x45FE)));
 }
 
@@ -877,6 +924,52 @@ TEST(debugger_write_mem_reports_a_link_that_dies_during_the_transfer)
 	CHECK(f.scripts_consumed());
 	CHECK_LOG(f.t.log, (Log{"ir:28", "dr16:0000"} + write_word(0x2400, 0x1234) +
 			    Log{"ir:28", "dr16:0000"}));
+}
+
+/* Session::abort follows a TargetError from a memory, register or breakpoint
+ * access with detach(Run). Its restore (SR, WDTCTL, PC) would go over the link
+ * that just failed: the link check is made again first, and if it fails the
+ * CPU is let go as abandon() does, nothing fed to it or written to its memory
+ * (not in MSPDS). */
+TEST(debugger_detach_after_a_dead_link_restores_nothing)
+{
+	for (const bool id_lost : {true, false}) {
+		Fx f;
+		f.attached();
+		if (id_lost) {
+			f.t.jtag_id = 0xFF; /* the data line reads all ones */
+		} else {
+			f.t.cntrl_sig = 0x0000; /* the data line reads all zeros */
+		}
+		uint8_t buf[2] = {};
+		REQUIRE(f.d.read_mem(0x2400, 1, buf) == Status::TargetError);
+		REQUIRE(f.d.attached());
+		f.t.log.clear();
+		f.t.cpu_words.clear();
+		f.d.detach(DetachAction::Run);
+		CHECK(!f.d.attached());
+		CHECK(!f.d.running());
+		CHECK(f.d.stop_reason() == StopReason::None);
+		CHECK(f.t.mem_writes.empty());
+		CHECK(f.t.cpu_words.empty()); /* no SR or PC fed */
+		CHECK_LOG(f.t.log, clear_triggers() + link_check(!id_lost) + kAbandon);
+	}
+}
+
+TEST(debugger_detach_after_a_failed_check_on_a_healthy_link_restores_the_context)
+{
+	Fx f;
+	f.attached();
+	f.t.cntrl_sig_script = {0x0000}; /* read_mem's check alone fails */
+	uint8_t buf[2] = {};
+	REQUIRE(f.d.read_mem(0x2400, 1, buf) == Status::TargetError);
+	CHECK(f.scripts_consumed());
+	f.t.log.clear();
+	f.d.detach(DetachAction::Run);
+	CHECK(!f.d.attached());
+	CHECK_LOG(f.t.log, detach_run(0x4520, 0x0008, 0x6904));
+	REQUIRE(f.t.mem_writes.size() == 1u);
+	CHECK(f.t.mem_writes[0] == (std::pair<uint32_t, uint16_t>{0x015C, 0x5A04}));
 }
 
 TEST(debugger_memory_access_needs_an_attached_cpu)
@@ -1615,8 +1708,7 @@ TEST(debugger_detach_halts_a_running_cpu_first)
 	/* as the DLL's Close: stopped (SyncJtag_Conditional_SaveContextXv2), then
 	 * run with its context restored and the EEM off */
 	CHECK_LOG(f.t.log, Log{"ir:28", "ir:d0", "dr16:0000"} + eem_stop(1, kTb0Zero) +
-				   sync_tail(0x6904, 0x0008) + clear_triggers() +
-				   restore_release(0x4520, 0x0008, 0x6904, 0x0006) + Log{"close"});
+				   sync_tail(0x6904, 0x0008) + detach_run(0x4520, 0x0008, 0x6904));
 }
 
 TEST(debugger_detach_with_reset_halts_a_running_cpu_first)
@@ -1703,7 +1795,8 @@ TEST(debugger_halt_refuses_a_watchdog_without_its_password)
 	CHECK(!f.d.running());
 	CHECK(f.t.mem_writes.empty());
 	CHECK(!contains(f.t.log, Log{"dr20:00144"})); /* no flash-controller wait */
-	const Log want = read_word(0x015C) + release_at(0x4520, false, 0x0006) + Log{"close"};
+	const Log want =
+		read_word(0x015C) + link_check() + release_at(0x4520, false, 0x0006) + Log{"close"};
 	CHECK_LOG(last(f.t.log, want.size()), want);
 }
 
@@ -2180,8 +2273,8 @@ TEST(debugger_step_with_a_failed_init_state_check_gives_trigger_block_0_back)
 	CHECK(tb0_holds(f.t, kTb0Bp));
 	/* in full emulation with the EEM off (0x000E): trigger block 0 back,
 	 * then released at the PC where it stopped, SR and WDTCTL unwritten */
-	const Log tail = Log{ir(0x30), d16(0x000E), ir(0x28), d16(0)} + step_give_back(kTb0Bp) +
-			 release_at(0x4520, false, 0x0006) + Log{"close"};
+	const Log tail = Log{ir(0x30), d16(0x000E), ir(0x28), d16(0)} + link_check() +
+			 step_give_back(kTb0Bp) + release_at(0x4520, false, 0x0006) + Log{"close"};
 	CHECK_LOG(last(f.t.log, tail.size()), tail);
 	CHECK(f.t.mem_writes.size() == 1u); /* the release's WDTCTL */
 }
@@ -2278,8 +2371,7 @@ TEST(debugger_step_after_an_sr_write_clearing_cpuoff_uses_the_trigger)
  * released); the new session then starts from the identify step. */
 TEST(debugger_attach_detaches_an_open_session_first)
 {
-	const Log detach_halted = clear_triggers() +
-				  restore_release(0x4520, 0x0008, 0x6904, 0x0006) + Log{"close"};
+	const Log detach_halted = detach_run(0x4520, 0x0008, 0x6904);
 	const Log new_session = identify_log() + eem_stop(1, kTb0Zero) +
 				sync_tail(0x6904, 0x0008) + read_word(0x1A04) + clear_triggers() +
 				Log{"ir:28", "dr16:0000"};

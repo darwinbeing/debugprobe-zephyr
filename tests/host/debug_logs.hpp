@@ -222,4 +222,25 @@ inline Log restore_release(unsigned pc, unsigned sr, unsigned wdt, unsigned eem_
 	       release_at(pc, (sr & 0x0010u) != 0, eem_control, halt);
 }
 
+/* The link check, Cpuxv2::in_full_emulation() (not in MSPDS): the IR capture's
+ * JTAG ID, then, if it is 0x91, the control signal. `id_ok` false: the ID was
+ * wrong and the control signal is not read. */
+inline Log link_check(bool id_ok = true)
+{
+	return id_ok ? Log{ir(0x28), d16(0)} : Log{ir(0x28)};
+}
+
+/* Debugger::abandon() (not in MSPDS): EEM off, the CPU released where it is,
+ * the pins released; nothing fed to the CPU or written to its memory. */
+inline const Log kAbandon = {"ir:30", "dr16:0006", "ir:a8", "close"};
+
+/* detach(Run) of a halted CPU on a healthy link: the triggers cleared, the
+ * link check, the context restored with the EEM off (0x0006), the pins
+ * released. `halt` as for release_at. */
+inline Log detach_run(unsigned pc, unsigned sr, unsigned wdt, bool halt = false)
+{
+	return clear_triggers() + link_check() + restore_release(pc, sr, wdt, 0x0006, halt) +
+	       Log{"close"};
+}
+
 } // namespace dbglog

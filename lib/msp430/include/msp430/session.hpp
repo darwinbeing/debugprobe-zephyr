@@ -65,7 +65,9 @@ public:
 	 * write is in progress it re-synchronizes and wipes the funclet RAM
 	 * first, which takes a few hundred milliseconds. A debug session is
 	 * detached with DetachAction::Run: a running CPU is halted first, then
-	 * the program continues where it stopped. */
+	 * the program continues where it stopped (if the link check before the
+	 * restore fails, the CPU is let go where it is with nothing restored;
+	 * see Debugger::detach). */
 	void abort();
 
 	/* Callers that mirror the session state (LED, pin ownership) must read

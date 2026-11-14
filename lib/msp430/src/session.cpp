@@ -178,9 +178,11 @@ size_t Session::handle(std::span<const uint8_t> request, std::span<uint8_t> resp
 	}
 	/* The target is in an unknown state (lost synchronization). Close the
 	 * session so the pins are released; the host must connect again. A
-	 * debugger still attached here (the CPU left JTAG control during a
-	 * memory, register or breakpoint access) is detached with Run, as
-	 * Debugger::attach does for the same failure. */
+	 * debugger still attached here (the link check failed after a memory,
+	 * register or breakpoint access) is detached with Run, as
+	 * Debugger::attach does for the same failure: it makes the link check
+	 * again and restores the context only if it passes; otherwise it feeds
+	 * nothing over the link and lets the CPU go where it is. */
 	if (st == Status::TargetError && state_ != State::Idle) {
 		abort();
 	}

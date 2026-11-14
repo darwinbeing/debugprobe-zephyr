@@ -10,6 +10,11 @@
  * erase or flash-write code. write_mem, though, writes any address it is
  * given; keeping it off flash, the PMM, the flash controller, the SYS and
  * DMA registers is Session's job.
+ *
+ * "The link check" below is Cpuxv2::in_full_emulation(): the JTAG ID that an
+ * IR shift captures is 0x91, and the control signal then read has at least
+ * one of the bits 0x0301 set. It tests the Spy-Bi-Wire link (a dead link
+ * reads all ones or all zeros), not what the CPU is doing. Not in MSPDS.
  */
 #include <cstddef>
 #include <cstdint>
@@ -38,15 +43,23 @@ public:
 	 * whose power-on reset left the CPU at a safe address (or, after a
 	 * failed init-state check, in an unknown state), it gets another
 	 * power-on reset as detach(Reset) does; after that with its context
-	 * restored, as detach(Run) does. With Reset, system clocks already
-	 * switched to the JTAG clock are switched back before any release. */
+	 * restored, as detach(Run) does. Before the CPU gets its PC or its
+	 * context back, the link check is made again; if it fails, nothing is
+	 * fed over the link: an attempt is made to turn the EEM off, and the CPU
+	 * is released where it is with nothing written to it. With Reset,
+	 * system clocks already switched to the JTAG clock are switched back
+	 * before any release. */
 	Status attach(AttachMode mode, uint32_t slot_hz, Identity &id);
 	/* A running CPU is halted first (halt()); if that fails, the CPU has
 	 * been let go as halt() describes and nothing more is done: with Reset,
 	 * no reset happens and the program keeps running as it is. Then the
 	 * triggers are cleared and the EEM sequencer is turned off, and Run:
-	 * the context is restored and the program continues where it stopped,
-	 * EEM off; Reset: power-on reset and run. Releases the pins. Does
+	 * the link check, then the context (SR, WDTCTL, PC) is restored and the
+	 * program continues where it stopped, EEM off; if the link check fails
+	 * (after a TargetError from a memory, register or breakpoint access,
+	 * for example), nothing is restored over the link: an attempt is made to
+	 * turn the EEM off, and the CPU is released where it is with nothing
+	 * written to it. Reset: power-on reset and run. Releases the pins. Does
 	 * nothing when not attached. */
 	void detach(DetachAction action);
 
@@ -115,16 +128,16 @@ public:
 
 	/* R0 (PC) and R2 (SR) come from the saved context, R3 reads 0. Values
 	 * are 20 bits wide (SR 16). BadState when not attached, Running while
-	 * the CPU runs; TargetError if the CPU is no longer under JTAG control
-	 * afterwards (`regs` is filled anyway). */
+	 * the CPU runs; TargetError if the link check afterwards fails (`regs`
+	 * is filled anyway). */
 	Status read_regs(uint32_t regs[16]);
 	/* R0 and R2 change the saved context, which is written back on release;
 	 * the others are written to the CPU, SP with bit 0 cleared (as the DLL
 	 * does). BadState and Running as read_regs; BadArg for an index above
 	 * 15, R3, a value above 20 bits, an odd PC or an SR above 16 bits;
-	 * TargetError if the CPU is no longer under JTAG control after a write
-	 * to the CPU. Any even 20-bit PC is accepted; in a read-only session,
-	 * keeping the PC inside main flash is Session's job. */
+	 * TargetError if the link check after a write to the CPU fails. Any
+	 * even 20-bit PC is accepted; in a read-only session, keeping the PC
+	 * inside main flash is Session's job. */
 	Status write_reg(unsigned index, uint32_t value);
 	/* `nwords` words from `addr` on, little-endian byte pairs, one per word.
 	 * Plain bus accesses: reading interrupt-vector registers, RXBUF or
@@ -136,11 +149,12 @@ public:
 	 * byte is ignored), so the watchdog stays held while the CPU is halted.
 	 * BadState when not attached, Running while the CPU runs, BadArg (no
 	 * TAP traffic) for an odd address, an address above 20 bits or words
-	 * past 0xFFFFF; no words: Ok, no TAP traffic. TargetError if the CPU is
-	 * no longer under JTAG control afterwards: read_mem fills `dst` anyway;
-	 * write_mem has sent every word, but those after the link died did not
-	 * arrive. write_mem makes the same check before its first write and
-	 * returns TargetError without writing anything if it fails. Other
+	 * past 0xFFFFF; no words: Ok, no TAP traffic. TargetError if the link
+	 * check afterwards fails: read_mem fills `dst` anyway; write_mem has
+	 * sent every word, but those after the link died did not arrive.
+	 * write_mem makes the link check once before its first write too (not
+	 * before each word) and returns TargetError without writing anything if
+	 * it fails. Other
 	 * address checks are the caller's: write_mem writes any address it is
 	 * given, flash, the PMM, the flash controller, the SYS and DMA
 	 * registers included; keeping it off them is Session's job. */
@@ -156,17 +170,16 @@ public:
 	 * or one above 20 bits. TargetError if the trigger block's value does
 	 * not read back (no such trigger block, or a dead link): an attempt is
 	 * made to disarm it, and a breakpoint this index held before no longer
-	 * counts as set; or if the CPU is no longer under JTAG control
-	 * afterwards: the breakpoint is armed and counts as set (detach clears
-	 * every trigger block). */
+	 * counts as set; or if the link check afterwards fails: the breakpoint
+	 * is armed and counts as set (detach clears every trigger block). */
 	Status set_breakpoint(unsigned index, uint32_t addr);
 	/* Disarm breakpoint `index` (its combination register and BREAKREACT
 	 * bit cleared), Ok also when it was not set; kAllBreakpoints disarms
 	 * every trigger block and turns the EEM sequencer off. BadState and
 	 * Running as set_breakpoint; BadArg (no TAP traffic) for any other
-	 * index of kHwBreakpoints or more. TargetError if the CPU is no longer
-	 * under JTAG control afterwards: the writes have been sent, and the
-	 * breakpoint no longer counts as set. */
+	 * index of kHwBreakpoints or more. TargetError if the link check
+	 * afterwards fails: the writes have been sent, and the breakpoint no
+	 * longer counts as set. */
 	Status clear_breakpoint(unsigned index);
 
 private:
