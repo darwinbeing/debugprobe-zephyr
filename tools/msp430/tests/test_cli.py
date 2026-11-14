@@ -434,16 +434,17 @@ class Recorder:
 
 class SignalOnOp(Recorder):
     """A Recorder that raises `signum` in this process when the SBW op `op`
-    is sent, once (before the request reaches the fake firmware)."""
+    is sent, the first `times` times (before the request reaches the fake
+    firmware)."""
 
-    def __init__(self, fw, op, signum):
+    def __init__(self, fw, op, signum, times=1):
         super().__init__(fw)
-        self.op, self.signum = op, signum
+        self.op, self.signum, self.times = op, signum, times
 
     def transfer(self, request, timeout_ms=3000):
-        if self.signum is not None and bytes(request[:2]) == sbw_op(self.op):
-            signum, self.signum = self.signum, None
-            signal.raise_signal(signum)
+        if self.times > 0 and bytes(request[:2]) == sbw_op(self.op):
+            self.times -= 1
+            signal.raise_signal(self.signum)
         return super().transfer(request, timeout_ms)
 
 
@@ -703,10 +704,11 @@ class GdbServerCliTest(unittest.TestCase):
                          (1, f"error: {in_use}; choose another with --port\n"))
         self.assertTrue(fw.closed)
 
-    def stopped_by(self, signum, op, packets):
-        """gdbserver with `signum` raised when `op` is sent; the signal's own
-        handler stays in place of the default action (which ends the process)
-        and must be back afterwards. Returns code, out, err and the fake."""
+    def stopped_by(self, signum, op, packets, times=1):
+        """gdbserver with `signum` raised when `op` is sent (the first `times`
+        times); the signal's own handler stays in place of the default action
+        (which ends the process) and must be back afterwards. Returns code,
+        out, err and the fake."""
         received = []
 
         def stand_in(signo, frame):
@@ -716,8 +718,8 @@ class GdbServerCliTest(unittest.TestCase):
         try:
             fw = FakeFirmware()
             out, err = io.StringIO(), io.StringIO()
-            code = sbw.main(["gdbserver"], transport=SignalOnOp(fw, op, signum), out=out,
-                            err=err, serve=ScriptedGdb(*packets))
+            code = sbw.main(["gdbserver"], transport=SignalOnOp(fw, op, signum, times),
+                            out=out, err=err, serve=ScriptedGdb(*packets))
             self.assertIs(signal.getsignal(signum), stand_in)
         finally:
             signal.signal(signum, previous)
@@ -737,6 +739,15 @@ class GdbServerCliTest(unittest.TestCase):
             code, _, err, fw = self.stopped_by(signum, probe_mod.OP_INFO, [])
             self.assertEqual((code, err, fw.attaches), (128 + signum, f"{name} received\n", []))
             self.assertTrue(fw.closed)
+
+    def test_sigterm_and_sighup_during_the_detach_do_not_cut_it_off(self):
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            # on every try of DBG_DETACH: ignored while it is under way, so the
+            # first try completes
+            code, out, err, fw = self.stopped_by(signum, probe_mod.OP_DBG_DETACH, ["D"], 2)
+            self.assertEqual((code, err), (0, ""), signal.Signals(signum).name)
+            self.assertEqual((fw.detaches, fw.state), ([probe_mod.DETACH_RUN], 0))
+            self.assertIn("detached; the program continues where it stopped", out)
 
     def test_signal_handlers_are_only_changed_while_the_server_runs(self):
         before = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}

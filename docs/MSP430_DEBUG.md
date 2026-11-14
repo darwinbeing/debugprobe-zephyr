@@ -91,7 +91,8 @@ kept as TI's debug stack keeps it. When GDB detaches (`detach`, `kill`,
 `quit`, or the connection drops) the server detaches too and the program
 continues where it stopped, without a reset. Stop the server with Ctrl-C;
 SIGTERM and SIGHUP do the same. It detaches first, and exits with status 130
-(Ctrl-C) or 128 plus the signal number.
+(Ctrl-C) or 128 plus the signal number. While it detaches, these three
+signals are ignored, so that nothing cuts the detach off.
 
 **Do not unplug the probe, power it off, or kill the host tool without a
 detach while the target runs with breakpoints set.** If the link dies while

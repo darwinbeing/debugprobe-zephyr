@@ -1090,8 +1090,8 @@ class ReviewTwoTest(ServerFixture):
     def test_a_slow_vkill_gets_one_OK(self):
         self.slow_detach("vKill;1")
 
-    def test_ctrl_c_while_the_sigint_guard_is_installed_still_detaches(self):
-        real = gdbserver._sigint_ignored
+    def test_ctrl_c_while_the_signal_guard_is_installed_still_detaches(self):
+        real = gdbserver._signals_ignored
         calls = []
 
         def guard():
@@ -1100,39 +1100,108 @@ class ReviewTwoTest(ServerFixture):
                 raise KeyboardInterrupt  # the second Ctrl-C lands here
             return real()
 
-        gdbserver._sigint_ignored = guard
+        gdbserver._signals_ignored = guard
         try:
             self.start()
             self.assertEqual(self.gdb.cmd("D"), "OK")
             self.thread.join(5)
         finally:
-            gdbserver._sigint_ignored = real
+            gdbserver._signals_ignored = real
         self.assertEqual(self.fw.detaches, [0])
         self.assertEqual(len(calls), 2)
 
 
+GUARDED = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP")
+                if hasattr(signal, name))
+
+
 class DetachSignalTest(unittest.TestCase):
-    def test_the_detach_ignores_ctrl_c_on_the_main_thread(self):
-        fw = FakeFirmware()
-        seen = []
+    def server(self, fw, on_detach=None):
+        """A server whose transport calls on_detach(server) while DBG_DETACH
+        is sent."""
+        holder = []
 
         class Watch:
             def transfer(self, request, timeout_ms=3000):
-                if request[1:2] == bytes([probe_mod.OP_DBG_DETACH]):
-                    seen.append(signal.getsignal(signal.SIGINT))
+                if on_detach is not None and request[1:2] == bytes([probe_mod.OP_DBG_DETACH]):
+                    on_detach(holder[0])
                 return fw.transfer(request, timeout_ms)
 
-        server = gdbserver.GdbServer(SbwProbe(Watch()), devices.MSP430F5529, out=io.StringIO())
+        holder.append(gdbserver.GdbServer(SbwProbe(Watch()), devices.MSP430F5529,
+                                          out=io.StringIO()))
+        return holder[0]
+
+    def test_the_detach_ignores_ctrl_c_sigterm_and_sighup_on_the_main_thread(self):
+        fw = FakeFirmware()
+        seen = []
+        server = self.server(fw, lambda s: seen.append([signal.getsignal(n) for n in GUARDED]))
         mine, gdb = socket.socketpair()
         gdb.close()  # GDB went away at once
-        before = signal.getsignal(signal.SIGINT)
+        before = [signal.getsignal(n) for n in GUARDED]
         try:
             server.serve_connection(mine)
         finally:
             mine.close()
-        self.assertEqual(seen, [signal.SIG_IGN])
-        self.assertIs(signal.getsignal(signal.SIGINT), before)
+        self.assertEqual(seen, [[signal.SIG_IGN] * len(GUARDED)])
+        self.assertEqual([signal.getsignal(n) for n in GUARDED], before)  # put back
         self.assertEqual(fw.detaches, [0])
+
+    def test_the_guard_puts_back_a_handler_python_did_not_install_as_the_default(self):
+        calls = []
+
+        class Signal:  # stands in for the signal module inside gdbserver
+            SIG_IGN, SIG_DFL = signal.SIG_IGN, signal.SIG_DFL
+
+            def signal(self, signum, handler):
+                calls.append((signum, handler))
+                return None  # what signal.signal() returns for such a handler
+
+        real = gdbserver.signal
+        gdbserver.signal = Signal()
+        try:
+            with gdbserver._signals_ignored():
+                pass
+        finally:
+            gdbserver.signal = real
+        self.assertEqual(calls, [(n, signal.SIG_IGN) for n in GUARDED] +
+                         [(n, signal.SIG_DFL) for n in GUARDED])
+
+    def test_attached_is_cleared_only_once_dbg_detach_was_answered(self):
+        fw = FakeFirmware()
+        during = []
+        server = self.server(fw, lambda s: during.append(s.attached))
+        server._attach(probe_mod.ATTACH_RUNNING)
+        real = gdbserver._signals_ignored
+
+        def interrupted():
+            raise KeyboardInterrupt  # each attempt cut off before DBG_DETACH is sent
+
+        gdbserver._signals_ignored = interrupted
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                server._detach()
+        finally:
+            gdbserver._signals_ignored = real
+        self.assertTrue(server.attached)  # the detach is still due
+        self.assertEqual(fw.detaches, [])
+        server._detach()  # e.g. serve_connection's own, on the way out
+        self.assertEqual(during, [True])
+        self.assertFalse(server.attached)
+        self.assertEqual(fw.detaches, [0])
+        server._detach()  # nothing more is sent
+        self.assertEqual(fw.detaches, [0])
+
+    def test_a_failed_detach_is_final(self):
+        fw = FakeFirmware()
+        server = self.server(fw)
+        server._attach(probe_mod.ATTACH_RUNNING)
+        fw.fail_op = {probe_mod.OP_DBG_DETACH: TIMEOUT}
+        server._detach()
+        self.assertFalse(server.attached)
+        self.assertIn("detach failed: DBG_DETACH failed: TIMEOUT", server.out.getvalue())
+        fw.fail_op = {}
+        server._detach()  # not sent again
+        self.assertEqual((fw.detaches, fw.state), ([], 3))
 
 
 class StopReplyTest(ServerFixture):

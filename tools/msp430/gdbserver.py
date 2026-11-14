@@ -83,18 +83,30 @@ def _addr_len(text: str):
     return _hex(addr), _hex(length)
 
 
+# Signals that stop the server (sbw.py makes SIGTERM and SIGHUP take Ctrl-C's
+# way out); SIGHUP does not exist everywhere.
+GUARDED_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP")
+                        if hasattr(signal, name))
+
+
 @contextlib.contextmanager
-def _sigint_ignored():
-    """Ctrl-C is ignored inside (on the main thread, where Python delivers it):
-    the detach that lets the target's program run again must not be cut off."""
+def _signals_ignored():
+    """Ctrl-C, SIGTERM and SIGHUP are ignored inside (on the main thread,
+    where Python delivers them; elsewhere nothing changes): the detach that
+    lets the target's program run again must not be cut off. Their handlers
+    are put back afterwards; one not installed from Python, which cannot be
+    put back, becomes the default."""
     if threading.current_thread() is not threading.main_thread():
         yield
         return
-    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    previous = {}
     try:
+        for signum in GUARDED_SIGNALS:
+            previous[signum] = signal.signal(signum, signal.SIG_IGN)
         yield
     finally:
-        signal.signal(signal.SIGINT, previous)
+        for signum, handler in previous.items():
+            signal.signal(signum, signal.SIG_DFL if handler is None else handler)
 
 
 def _reg_value(text: str) -> int:
@@ -317,23 +329,27 @@ class GdbServer:
                  f"{len(self.slots)} hardware breakpoints")
 
     def _detach(self) -> None:
-        """DBG_DETACH with Run, if the probe may have a session for us. Ctrl-C
-        does not cut it off: ignored on the main thread, and the detach is
-        sent once more if a KeyboardInterrupt comes through anyway."""
+        """DBG_DETACH with Run, if the probe may have a session for us.
+        Ctrl-C, SIGTERM and SIGHUP do not cut it off: ignored on the main
+        thread, and the detach is sent once more if a KeyboardInterrupt comes
+        through anyway. `attached` stays set until the probe has answered
+        DBG_DETACH or the detach has failed for good, so a detach cut off
+        twice is still due (serve_connection detaches on its way out)."""
         if not self.attached:
             return
-        self.attached = False
         for attempt in (1, 2):
             try:
                 # inside the try: a Ctrl-C while the guard is put up retries
-                with _sigint_ignored():
+                with _signals_ignored():
                     self.probe.dbg_detach(probe_mod.DETACH_RUN)
+                    self.attached = False
                 self.say("detached; the program continues where it stopped")
                 return
             except KeyboardInterrupt:
                 if attempt == 2:
                     raise
             except ProbeError as e:
+                self.attached = False
                 self.say(f"detach failed: {e}")
                 return
 
