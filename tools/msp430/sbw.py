@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Program an MSP430F5529 over Spy-Bi-Wire with a debugprobe-zephyr probe.
+"""Program and debug an MSP430F5529 over Spy-Bi-Wire with a debugprobe-zephyr probe.
 
     sbw.py info
     sbw.py flash firmware.hex [--erase main|segments|none] [--no-verify]
@@ -9,8 +9,11 @@
     sbw.py selftest
     sbw.py trial --backup FILE
     sbw.py reset
+    sbw.py gdbserver [--port 3333] [--attach | --reset] [--speed KHZ]
 
-Every command resets the target. See docs/MSP430_SBW.md for wiring.
+Every command except gdbserver resets the target; gdbserver attaches to the
+running program unless --reset is given. See docs/MSP430_SBW.md for wiring
+and docs/MSP430_DEBUG.md for debugging.
 """
 from __future__ import annotations
 
@@ -19,7 +22,9 @@ import hashlib
 import os
 import sys
 
+import devices
 import flasher
+import gdbserver
 import image
 import probe as probe_mod
 from flasher import FlashError
@@ -41,6 +46,16 @@ def _speed(text: str) -> int:
         raise argparse.ArgumentTypeError(f"invalid speed {text!r}") from None
     if not 100 <= value <= 1000:
         raise argparse.ArgumentTypeError("must be between 100 and 1000 kHz")
+    return value
+
+
+def _port(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid port {text!r}") from None
+    if not 0 <= value <= 0xFFFF:
+        raise argparse.ArgumentTypeError("must be between 0 and 65535")
     return value
 
 
@@ -82,6 +97,19 @@ def _parser() -> argparse.ArgumentParser:
                    help="a dump of all of main flash (read 0x4400 0x20000 -o FILE)")
 
     sub.add_parser("reset", help="reset the target and let it run")
+
+    g = sub.add_parser("gdbserver", help="GDB server for debugging; read-only: flash is never written")
+    g.add_argument("--port", type=_port, default=3333,
+                   help="TCP port on 127.0.0.1 (default 3333; 0: any free port)")
+    how = g.add_mutually_exclusive_group()
+    how.add_argument("--attach", action="store_true",
+                     help="attach to the running program without reset (default)")
+    how.add_argument("--reset", action="store_true",
+                     help="reset the target and halt at the reset vector")
+    g.add_argument("--speed", type=_speed, dest="gdb_speed", metavar="KHZ",
+                   help="SBW clock in kHz, 100-1000 (same as the global --speed)")
+    g.add_argument("--allow-flash-write", action="store_true",
+                   help="full mode (phase B2; not available in this version)")
     return p
 
 
@@ -131,6 +159,9 @@ def _prepare(args):
                              f"the address space (0x{ADDR_LIMIT:05X})")
         if os.path.exists(args.out) and not args.force:
             raise FlashError(f"{args.out} already exists; choose another name or pass --force")
+    if args.cmd == "gdbserver" and args.allow_flash_write:
+        raise FlashError("--allow-flash-write (full mode) comes with phase B2; this version is "
+                         "read-only and never writes flash")
     return None
 
 
@@ -141,7 +172,12 @@ def _run(args, probe: SbwProbe, out, segments) -> None:
         out.write(f"{device.name}: JTAG ID 0x{identity.jtag_id:02X}, core ID "
                   f"0x{identity.core_id:04X}, device ID bytes {identity.device_id & 0xFF:02X}h "
                   f"{identity.device_id >> 8:02X}h\n")
-        if args.cmd == "flash":
+        if args.cmd == "info":
+            info = probe.last_info
+            debug = (f"debugging supported, {info.hw_breakpoints} hardware breakpoints"
+                     if info.features & probe_mod.FEATURE_DEBUG else "no debugging support")
+            out.write(f"probe: SBW protocol version {info.version}, {debug}\n")
+        elif args.cmd == "flash":
             progress = _Progress(out)
             try:
                 written = flasher.program(probe, device, segments, erase=args.erase,
@@ -185,7 +221,7 @@ def _run(args, probe: SbwProbe, out, segments) -> None:
         elif args.cmd == "verify":
             flasher.verify_segments(probe, segments)
             out.write("verified\n")
-        # "info" and "reset" need nothing more: the session itself resets the target.
+        # "reset" needs nothing more: the session itself resets the target.
     finally:
         # Always release the target (it is halted once CONNECT succeeded).
         try:
@@ -194,13 +230,39 @@ def _run(args, probe: SbwProbe, out, segments) -> None:
             pass
 
 
-def main(argv=None, transport=None, out=sys.stdout, err=sys.stderr) -> int:
+def _gdbserver(args, probe: SbwProbe, out, err, serve) -> None:
+    """Check the probe, then serve GDB connections until Ctrl-C. No CONNECT
+    (a Phase A session would reset the target): DAP_Disconnect and INFO here,
+    then only what the debug session needs."""
+    speed = args.gdb_speed or args.speed
+    probe.dap_disconnect()
+    info = probe.info()
+    if info.version < 2 or not info.features & probe_mod.FEATURE_DEBUG:
+        what = f"SBW protocol version {info.version}" + (
+            " without the debug feature" if info.version >= 2 else "")
+        raise FlashError(f"the probe firmware does not support debugging ({what}); update the "
+                         "probe firmware to this version of debugprobe-zephyr")
+    probe.configure(speed)
+    mode = probe_mod.ATTACH_RESET if args.reset else probe_mod.ATTACH_RUNNING
+    if args.reset:
+        err.write("warning: --reset: the target is reset each time GDB connects; its firmware "
+                  "restarts from the reset vector\n")
+    server = gdbserver.GdbServer(probe, devices.MSP430F5529, speed_khz=speed,
+                                 attach_mode=mode, out=out)
+    args.serving = True  # from here on Ctrl-C stops the server (which detaches first)
+    serve(server, args.port)
+
+
+def main(argv=None, transport=None, out=sys.stdout, err=sys.stderr, serve=gdbserver.serve) -> int:
     args = _parser().parse_args(argv)
     try:
         segments = _prepare(args)
         t = transport if transport is not None else probe_mod.UsbTransport(args.serial)
         try:
-            _run(args, SbwProbe(t), out, segments)
+            if args.cmd == "gdbserver":
+                _gdbserver(args, SbwProbe(t), out, err, serve)
+            else:
+                _run(args, SbwProbe(t), out, segments)
         finally:
             try:
                 t.close()
@@ -210,7 +272,9 @@ def main(argv=None, transport=None, out=sys.stdout, err=sys.stderr) -> int:
         err.write(f"error: {e}\n")
         return 1
     except KeyboardInterrupt:
-        if args.cmd == "trial" and getattr(args, "trial_base", None) is not None:
+        if args.cmd == "gdbserver" and getattr(args, "serving", False):
+            err.write("interrupted; the GDB server has stopped\n")
+        elif args.cmd == "trial" and getattr(args, "trial_base", None) is not None:
             err.write("interrupted; " + flasher._trial_cleanup(args.trial_base) + "\n")
         elif args.cmd in ("flash", "erase") and getattr(args, "session_open", False):
             err.write("interrupted; the target's flash may be partially erased or programmed\n")
