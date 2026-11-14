@@ -25,7 +25,7 @@ OBJECTS = ("address\told_name\tnew_name\tkind\tconfidence\tmeaning\n"
 def read_elf(data):
     """A small readelf: header fields, sections by name, symbols."""
     assert data[:4] == b"\x7fELF" and data[4] == 1 and data[5] == 1
-    (e_type, e_machine, _, e_entry, _, e_shoff, e_flags, _, _, e_phnum, e_shentsize, e_shnum,
+    (e_type, e_machine, e_version, e_entry, _, e_shoff, e_flags, _, _, e_phnum, e_shentsize, e_shnum,
      e_shstrndx) = struct.unpack_from("<HHIIIIIHHHHHH", data, 16)
     shdrs = [struct.unpack_from("<10I", data, e_shoff + i * e_shentsize) for i in range(e_shnum)]
     shstr = shdrs[e_shstrndx]
@@ -37,12 +37,14 @@ def read_elf(data):
     sections = {name_at(names, s[0]): s for s in shdrs[1:]}
     sym, strt = sections[".symtab"], sections[".strtab"]
     strings = data[strt[4]:strt[4] + strt[5]]
-    symbols = {}
+    symbols, other = {}, {}
     for off in range(sym[4] + 16, sym[4] + sym[5], 16):
-        st_name, value, size, info, _, shndx = struct.unpack_from("<IIIBBH", data, off)
+        st_name, value, size, info, st_other, shndx = struct.unpack_from("<IIIBBH", data, off)
         symbols[name_at(strings, st_name)] = (value, size, info & 0xF, info >> 4, shndx)
-    return {"type": e_type, "machine": e_machine, "entry": e_entry, "flags": e_flags,
-            "phnum": e_phnum, "sections": sections, "symbols": symbols,
+        other[name_at(strings, st_name)] = st_other
+    return {"type": e_type, "machine": e_machine, "version": e_version, "entry": e_entry,
+            "flags": e_flags, "phnum": e_phnum, "sections": sections, "symbols": symbols,
+            "other": other, "null_symbol": data[sym[4]:sym[4] + 16],
             "index": {name_at(names, s[0]): i for i, s in enumerate(shdrs) if i}}
 
 
@@ -107,6 +109,23 @@ class SymElfTest(unittest.TestCase):
         self.assertNotIn("t_demo", syms)
         self.assertNotIn("demo_member", syms)
 
+    def test_elf_header_and_symbol_table(self):
+        elf_path = self.path("sym.elf")
+        self.run_tool(self.names, self.objects, "-o", elf_path)
+        with open(elf_path, "rb") as f:
+            data = f.read()
+        elf = read_elf(data)
+        # ELF32, little-endian, version 1, OS/ABI 255 (standalone, as msp430-elf-gcc writes)
+        self.assertEqual(data[4:16], bytes([1, 1, 1, 255]) + bytes(8))
+        self.assertEqual(elf["version"], 1)
+        symtab = elf["sections"][".symtab"]
+        self.assertEqual(symtab[6], elf["index"][".strtab"])  # sh_link
+        self.assertEqual(symtab[7], 1)  # sh_info: every symbol after the null symbol is global
+        self.assertEqual(symtab[9], 16)  # sh_entsize
+        self.assertEqual(elf["null_symbol"], bytes(16))
+        self.assertEqual({s[3] for s in elf["symbols"].values()}, {1})  # STB_GLOBAL
+        self.assertEqual(set(elf["other"].values()), {0})  # st_other: default visibility
+
     def test_attributes_select_msp430x_large(self):
         attr = symelf.attributes()
         self.assertEqual(attr[0:1], b"A")
@@ -128,8 +147,8 @@ class SymElfTest(unittest.TestCase):
         hex_path = self.path("fw.hex")
         image.save(hex_path, [Segment(0x4400, b"\x31\x40\x00\x44"), Segment(0xFFFE, b"\x1A\x44")])
         elf_path = self.path("sym.elf")
-        code, out, _ = self.run_tool(self.names, "--image", hex_path, "-o", elf_path)
-        self.assertEqual(code, 0)
+        code, out, err = self.run_tool(self.names, "--image", hex_path, "-o", elf_path)
+        self.assertEqual((code, err), (0, ""))
         self.assertIn("main flash from the image", out)
         with open(elf_path, "rb") as f:
             data = f.read()
@@ -141,6 +160,33 @@ class SymElfTest(unittest.TestCase):
         self.assertEqual(body[4], 0xFF)
         self.assertEqual(body[0xFFFE - 0x4400:0x10000 - 0x4400], b"\x1A\x44")
         self.assertEqual(elf["entry"], 0x441A)
+
+    def test_image_segments_across_main_flash_edges(self):
+        hex_path = self.path("edges.hex")
+        image.save(hex_path, [Segment(0x43FE, b"\xAA\xBB\x31\x40"), Segment(0x243FE, b"\x01\x02\x03\x04")])
+        elf_path = self.path("sym.elf")
+        code, _, err = self.run_tool(self.names, "--image", hex_path, "-o", elf_path)
+        self.assertEqual((code, err), (0, ""))
+        with open(elf_path, "rb") as f:
+            data = f.read()
+        text = read_elf(data)["sections"][".text"]
+        body = data[text[4]:text[4] + text[5]]
+        self.assertEqual(len(body), 0x20000)
+        self.assertEqual(body[:3], b"\x31\x40\xFF")
+        self.assertEqual(body[-3:], b"\xFF\x01\x02")
+
+    def test_image_without_main_flash_warns(self):
+        hex_path = self.path("info.hex")
+        image.save(hex_path, [Segment(0x1800, b"\x01\x02"), Segment(0x24400, b"\x03\x04")])
+        elf_path = self.path("sym.elf")
+        code, out, err = self.run_tool(self.names, "--image", hex_path, "-o", elf_path)
+        self.assertEqual(code, 0)
+        self.assertEqual(err, f"warning: {hex_path} has no bytes in main flash (0x04400-0x243FF)\n")
+        self.assertIn("main flash from the image", out)
+        with open(elf_path, "rb") as f:
+            data = f.read()
+        text = read_elf(data)["sections"][".text"]
+        self.assertEqual(data[text[4]:text[4] + text[5]], b"\xFF" * 0x20000)
 
     def test_errors(self):
         out = self.path("x.elf")
@@ -170,7 +216,8 @@ class SymElfTest(unittest.TestCase):
             ("address\tnew_name\tsize\n4400\tf\tten\n", "t.tsv:2: bad size 'ten'"),
             ("address\tnew_name\tsize\n4400\tf\t-1\n", "t.tsv:2: bad size '-1'"),
             ("address\tnew_name\tsize\n4400\tf\t0x100000\n", "t.tsv:2: size 0x100000 outside 0 to 0xFFFFF"),
-            ("address\tnew_name\tsize\n4400\tf\t4294967296\n", "t.tsv:2: size 4294967296 outside 0 to 0xFFFFF"),
+            ("address\tnew_name\tsize\n4400\tf\t4294967296\n",
+             "t.tsv:2: size 4294967296 outside 0 to 0xFFFFF"),
             ("address\tnew_name\n4401\tf\n", "t.tsv:2: function at odd address 0x04401"),
             ("# a comment\naddress\tnew_name\n\n# another\n4401\tf\n", "t.tsv:5: function at odd address"),
             (b"address\tnew_name\tpurpose\n4400\tf\tna\xefve\n", "t.tsv: not UTF-8 text"),

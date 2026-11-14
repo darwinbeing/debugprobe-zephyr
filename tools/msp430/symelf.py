@@ -38,6 +38,7 @@ import image
 
 EM_MSP430 = 105
 E_MSP430_MACH_MSP430X = 45
+ELFOSABI_STANDALONE = 255  # what msp430-elf-gcc writes
 SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_NOBITS = 1, 2, 3, 8
 SHT_MSP430_ATTRIBUTES = 0x70000003
 SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR = 1, 2, 4
@@ -215,7 +216,8 @@ def build(symbols: list, device, text_data: bytes | None = None, entry: int = 0)
         shdr(sh_name(".strtab"), SHT_STRTAB, 0, 0, offsets["strtab"], len(strtab)),
         shdr(sh_name(".shstrtab"), SHT_STRTAB, 0, 0, offsets["shstr"], len(shstr)),
     ]
-    ident = b"\x7fELF" + bytes([1, 1, 1, 0]) + bytes(8)  # ELF32, little-endian, version 1
+    # ELF32, little-endian, version 1
+    ident = b"\x7fELF" + bytes([1, 1, 1, ELFOSABI_STANDALONE]) + bytes(8)
     header = ident + struct.pack("<HHIIIIIHHHHHH", 2, EM_MSP430, 1, entry, 0, shoff,
                                  E_MSP430_MACH_MSP430X, 52, 0, 0, 40, len(sections), 6)
     return header + bytes(body) + b"".join(sections)
@@ -236,21 +238,28 @@ def main(argv=None, out=sys.stdout, err=sys.stderr) -> int:
         for path in args.tables:
             symbols += read_table(path)
         symbols = list(dict.fromkeys(symbols))  # the same row in two tables counts once
-        text, entry = None, 0
+        text, entry, warning = None, 0, None
         if args.image:
-            flash = bytearray(b"\xFF" * (device.main_end - device.main_start))
+            base, end = device.main_start, device.main_end
+            flash = bytearray(b"\xFF" * (end - base))
+            copied = 0
             for seg in image.load(args.image):
-                for i, b in enumerate(seg.data):
-                    if device.main_start <= seg.addr + i < device.main_end:
-                        flash[seg.addr + i - device.main_start] = b
+                lo, hi = max(seg.addr, base), min(seg.end, end)
+                if lo < hi:
+                    flash[lo - base:hi - base] = seg.data[lo - seg.addr:hi - seg.addr]
+                    copied += hi - lo
+            if not copied:
+                warning = f"{args.image} has no bytes in main flash (0x{base:05X}-0x{end - 1:05X})"
             text = bytes(flash)
-            entry = flash[0xFFFE - device.main_start] | (flash[0xFFFF - device.main_start] << 8)
+            entry = flash[0xFFFE - base] | (flash[0xFFFF - base] << 8)
         data = build(symbols, device, text, entry)
         with open(args.out, "wb") as f:
             f.write(data)
     except (SymbolError, image.ImageError, OSError) as e:
         err.write(f"error: {e}\n")
         return 1
+    if warning:
+        err.write(f"warning: {warning}\n")
     functions = sum(1 for s in symbols if s[3] == STT_FUNC)
     out.write(f"wrote {args.out}: {functions} functions, {len(symbols) - functions} objects"
               + (", main flash from the image" if text is not None else "") + "\n")
