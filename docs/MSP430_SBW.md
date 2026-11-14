@@ -62,7 +62,11 @@ Global options go before the command: `--speed KHZ` sets the SBW clock
 implementation), `--serial SERIAL` selects one of several probes. Above
 1000 kHz the limit is usually the target board's RST/SBWTDIO circuit (pull-up,
 capacitor, wire length), not the MSP430 (up to 20 MHz): try a speed with a
-read-only `sbw --speed KHZ verify image.hex` before writing at it.
+read-only `sbw --speed KHZ verify image.hex` before writing at it. A speed
+the line cannot carry usually shows at once as "no MSP430 found (JTAG ID read
+as 0x..)"; on the board used in testing, 1400 kHz worked and 1600 kHz did not.
+Leave a margin below the highest speed that works: above 1 MHz the gain is
+small, because USB round trips dominate.
 
 Images are Intel HEX or TI-TXT. Convert an ELF file with
 `msp430-elf-objcopy -O ihex firmware.elf firmware.hex`.

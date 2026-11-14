@@ -560,4 +560,12 @@ already worked into the text above; the others take precedence over it.
     1 MHz depends on its RST/SBWTDIO circuit (pull-up, capacitor) and the
     wiring; it is measured on the board read-only (the EEM peek, debug-mode
     reads of main flash against its image, RAM read twice) before a speed is
-    used for writing.
+    used for writing. Measured on the MSP430F5529 board (2026-11-14): 1400 kHz
+    passed every check, 1600 and 2000 kHz misread the JTAG ID (0xB9), so
+    `connect` refused before sending anything else. At 1600 kHz a tick is
+    78 ns: the data line has 4 ticks (312 ns) to settle before the falling
+    edge that latches TMS or TDI, and TDO is sampled 3 ticks (234 ns) after
+    the falling edge; a line whose RC takes longer fails there (the board's
+    RST/SBWTDIO circuit was not measured). Throughput rises little with the
+    clock at these rates (debug-mode reads of main flash 14.7 KB/s at 1 MHz,
+    17.4 KB/s at 1.4 MHz): USB round trips dominate.

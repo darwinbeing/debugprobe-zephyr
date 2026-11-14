@@ -120,7 +120,8 @@ TDO_RD` macros in `LowLevelFunc430Xv2.h`):
 Timing rules:
 
 - SBWTCK idles **high**. The slot rate is configurable from 100 kHz to 10 MHz
-  (1 MHz until 2026-11-14; MSP430 debug design spec correction 29),
+  (1 MHz until 2026-11-14; MSP430 debug design spec correction 29, which
+  also records the MSP430F5529 board's measured limit, 1400 kHz),
   default 250 kHz. A slot is 8 state-machine ticks, 4 low and 4 high; the
   hand-over after the TDO slot adds 4 high ticks per cycle. At the lowest rate
   the low phase is 5 µs, inside the 7 µs limit after which the target's SBW
