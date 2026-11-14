@@ -277,9 +277,9 @@ run on a target. The server has been driven by scripted GDB clients and by
 
 | Axis | Status |
 |---|---|
-| Host tests | 357/357 C++ (`scripts/run_host_tests.sh`, also under ASan); 387 Python, 12 of them skipped without msp430-elf-gdb (`python3 -m unittest discover -s tools/msp430/tests`) |
-| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on, rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n`: built after the last firmware change (Task 15); not rebuilt since, host tool and documentation only |
-| End-to-end with GDB | ✓ 2026-11-13, GNU gdb (Mitto Systems Limited - msp430-gcc 9.3.1.11) 9.1: connect, registers, breakpoint by symbol, stepi, memory, refusals (tools/msp430/tests/test_gdb_e2e.py); also `X` escaping, breakpoints after `monitor reset` (also with `always-inserted on`, which needed a server fix) and `flushregs`, console notes before stop replies, Ctrl-C during `stepi 1000` and `next` (stops after the step under way), SIGLOST, `load`, reads and writes GDB's memory map refuses itself, register names |
+| Host tests | 363/363 C++ (`scripts/run_host_tests.sh`, also under ASan); 401 Python, 13 of them skipped without msp430-elf-gdb (`python3 -m unittest discover -s tools/msp430/tests`) |
+| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on: rebuilt 2026-11-13 after the last firmware changes (`748ebbb`, the per-device peripheral write window, and `07f2e4a`, the link check before a restore), all three boards; rpi_pico with `CONFIG_PROBE_MSP430_SBW=n`: built at Task 15, and nothing that configuration compiles has changed since |
+| End-to-end with GDB | ✓ 2026-11-13, GNU gdb (Mitto Systems Limited - msp430-gcc 9.3.1.11) 9.1: connect, registers, breakpoint by symbol, stepi, memory, refusals (tools/msp430/tests/test_gdb_e2e.py); also `X` escaping, breakpoints after `monitor reset` (also with `always-inserted on`, which needed a server fix) and `flushregs`, console notes before stop replies, Ctrl-C during `stepi 1000` and `next` (stops after the step under way), SIGLOST, `load`, reads and writes GDB's memory map refuses itself, register names, `break NAME` after a `PUSHM.A` prologue and `break *NAME` at the first instruction |
 | On-target hardware | **Not run yet** — see the acceptance table below |
 
 ### Phase 7 hardware acceptance (rpi_pico + MSP430F5529 board, read-only)

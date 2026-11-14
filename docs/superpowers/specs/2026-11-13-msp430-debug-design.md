@@ -384,3 +384,39 @@ already worked into the text above, the others take precedence over it:
     and `FLASH_BEGIN` are `PROTECTED`; GDB's `k` detaches instead of killing;
     `monitor speed` takes effect at the next attach; `--allow-flash-write` is
     refused in B1; the server listens on 127.0.0.1 only.
+
+## Corrections made while executing B1 (2026-11-13)
+
+Found during the implementation and the final review (the plan's "As-built
+corrections found during execution" has the details and commits). Item 21 is
+already worked into the text above; the others take precedence over it.
+
+19. `DBG_ATTACH` in DebugHalted or DebugRunning ends the open session as
+    `DBG_DETACH` with action 0 does (a running CPU is halted first) and then
+    attaches as from Idle; it stays `BAD_STATE` in Connected and Flashing.
+    `monitor reset` relies on it.
+20. Every release that feeds the CPU its context or its PC after a failure
+    (detach with action 0, which `Session::abort` uses after a memory,
+    register or breakpoint access returned `TARGET_ERROR`, and the release at
+    the PC after a failed sync) first checks the link again (JTAG ID 0x91
+    and a control-signal bit of 0x0301). If the check fails, nothing is fed
+    over the link: the EEM is turned off and the CPU released where it is,
+    nothing written to its memory. This refines "after it, a failure
+    releases with the saved context" under Error Handling Principles.
+21. The peripheral write window is the device's own: F5529 0x0100–0x093F
+    (`SFRIE1` to `USBFUNADR`) minus the refused blocks; the vacant
+    0x0000–0x00FF and 0x0940–0x0FFF are refused.
+22. `sbw.py gdbserver` refuses a probe that still holds a programming
+    session from an earlier command, debugs only with the protocol versions
+    it knows (2), and takes no abbreviated options. SIGTERM and SIGHUP stop
+    it as Ctrl-C does, after a detach. While it detaches, Ctrl-C, SIGTERM and
+    SIGHUP are ignored, and a detach that was cut off anyway is sent again on
+    the way out.
+23. `monitor reset` sets the hardware breakpoints GDB holds again after the
+    reset's attach, which clears every trigger, and asks the user to run
+    `flushregs`: GDB keeps its register cache across a monitor command.
+24. The host waits for each command's reply for as long as the probe may
+    need at worst: 3 s for most, and for `DBG_ATTACH`, `DBG_HALT`,
+    `DBG_STEP`, `DBG_STATUS` and `DBG_DETACH`, which can sync with the CPU,
+    the worst case of the sync's loops at the session's SBW speed (about
+    20 s per sync at 250 kHz) with a margin.
