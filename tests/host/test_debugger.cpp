@@ -82,6 +82,8 @@ struct Fx {
 		REQUIRE(scripts_consumed());
 		t.log.clear();
 		t.mem_writes.clear();
+		t.addr_reads.clear();
+		t.quick_reads.clear();
 		t.eem_writes.clear();
 		t.eem_control_writes.clear();
 	}
@@ -96,7 +98,7 @@ TEST(debugger_attach_running_follows_mspds_conditional_sync)
 	Fx f;
 	CHECK(f.attach() == Status::Ok);
 	const Log want = identify_log() + eem_stop(1, kTb0Zero) + sync_tail(0x6904, 0x0008) +
-			 read_word(0x1A04) + clear_triggers() + Log{"ir:28", "dr16:0000"};
+			 quick_read(0x1A04, 1) + clear_triggers() + Log{"ir:28", "dr16:0000"};
 	CHECK_LOG(f.t.log, want);
 	CHECK(f.d.attached());
 	CHECK(!f.d.running());
@@ -251,7 +253,7 @@ TEST(debugger_attach_waits_for_the_flash_controller)
 	 * wait; then FCTL3 read until the 100 ms limit: busy at 0, 30, 60 and
 	 * 90 ms, given up at 120 ms. Never written. */
 	CHECK_LOG(f.t.log, identify_log() + eem_stop(1, kTb0Zero) + sync_tail(0x6904, 0x0008, 4) +
-				   read_word(0x1A04) + clear_triggers() + Log{"ir:28", "dr16:0000"});
+				   quick_read(0x1A04, 1) + clear_triggers() + Log{"ir:28", "dr16:0000"});
 }
 
 TEST(debugger_attach_refuses_a_watchdog_without_its_password)
@@ -517,7 +519,7 @@ TEST(debugger_reset_and_halt_follows_mspds_assert_por)
 {
 	Fx f;
 	REQUIRE(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::Ok);
-	const Log want = identify_log() + assert_por_log(0x6904) + read_word(0x1A04) +
+	const Log want = identify_log() + assert_por_log(0x6904) + quick_read(0x1A04, 1) +
 			 clear_triggers() + Log{"ir:28", "dr16:0000"};
 	CHECK_LOG(f.t.log, want);
 	CHECK_EQ(f.d.pc(), 0x441Au); /* the reset vector's target */
@@ -537,7 +539,7 @@ TEST(debugger_reset_and_halt_clears_the_vacant_memory_flag)
 	 * address, then the flag cleared, the other one kept */
 	CHECK_LOG(f.t.log, identify_log() + assert_por_log(0x6904) + set_pc(0x0004) +
 				   Log{ir(0xC8), d16(0x0501), "tclk:1", ir(0x21)} +
-				   write_word(0x0102, 0x0004) + read_word(0x1A04) + clear_triggers() +
+				   write_word(0x0102, 0x0004) + quick_read(0x1A04, 1) + clear_triggers() +
 				   Log{"ir:28", "dr16:0000"});
 	/* the CPU's PC was moved for the write; the saved one is still the
 	 * reset vector's target */
@@ -637,9 +639,12 @@ TEST(debugger_reset_and_halt_refuses_a_watchdog_without_its_password)
 TEST(debugger_reset_and_halt_with_a_late_init_state_failure_releases_at_the_reset_vector)
 {
 	Fx f;
-	/* The sixth control-signal read is attach's check after the device ID
-	 * and the trigger clearing (lock check 3, wait_for_synch, init state). */
-	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301, 0x0000};
+	/* The ninth control-signal read is attach's check after the device ID
+	 * and the trigger clearing (lock check 3, wait_for_synch, init state,
+	 * then the device ID's quick read: SetPcXv2 twice and its save-state
+	 * check). */
+	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301,
+				0x0301, 0x0301, 0x0301, 0x0000};
 	CHECK(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::TargetError);
 	CHECK(f.scripts_consumed());
 	CHECK(!f.d.attached());
@@ -658,7 +663,8 @@ TEST(debugger_reset_and_halt_with_a_late_init_state_failure_releases_at_the_rese
 TEST(debugger_reset_and_halt_with_a_late_dead_link_resets_again)
 {
 	Fx f;
-	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301};
+	f.t.cntrl_sig_script = {0x0301, 0x0301, 0x0301, 0x0301, 0x0301,
+				0x0301, 0x0301, 0x0301};
 	f.t.cntrl_sig = 0x0000;
 	CHECK(f.d.attach(AttachMode::Reset, 250000, f.id) == Status::TargetError);
 	CHECK(f.scripts_consumed());
@@ -1011,8 +1017,9 @@ TEST(debugger_attach_with_a_late_dead_link_resets)
 {
 	Fx f;
 	f.running_cpu();
-	/* lock check 3, the sync's 5 and its CPUOFF look: then 0 for good */
-	f.t.cntrl_sig_script.assign(9, 0x0301);
+	/* lock check 3, the sync's 5 and its CPUOFF look, the device ID's quick
+	 * read 3: then 0 for good */
+	f.t.cntrl_sig_script.assign(12, 0x0301);
 	f.t.cntrl_sig = 0x0000;
 	CHECK(f.d.attach(AttachMode::Running, 250000, f.id) == Status::TargetError);
 	CHECK(f.scripts_consumed());
@@ -2428,7 +2435,7 @@ TEST(debugger_attach_detaches_an_open_session_first)
 {
 	const Log detach_halted = detach_run(0x4520, 0x0008, 0x6904);
 	const Log new_session = identify_log() + eem_stop(1, kTb0Zero) +
-				sync_tail(0x6904, 0x0008) + read_word(0x1A04) + clear_triggers() +
+				sync_tail(0x6904, 0x0008) + quick_read(0x1A04, 1) + clear_triggers() +
 				Log{"ir:28", "dr16:0000"};
 	for (const bool running : {false, true}) {
 		Fx f;
@@ -2521,6 +2528,12 @@ TEST(debugger_never_writes_flash)
 	 * saved context */
 	uint8_t buf[8] = {1, 2, 3, 4, 5, 6, 7, 8};
 	CHECK(f.d.read_mem(0x4400, 4, buf) == Status::Ok);
+	CHECK_LOG(f.faults(), Log{});
+	/* across the bootcode area's edges: the quick read inside it */
+	uint8_t tlv[12] = {};
+	CHECK(f.d.read_mem(0x19FC, 6, tlv) == Status::Ok);
+	CHECK_LOG(f.faults(), Log{});
+	CHECK(f.d.read_mem(0x1AFC, 4, tlv) == Status::Ok);
 	CHECK_LOG(f.faults(), Log{});
 	CHECK(f.d.write_mem(0x2400, 4, buf) == Status::Ok);
 	CHECK_LOG(f.faults(), Log{});
@@ -2626,15 +2639,17 @@ TEST(debugger_never_writes_flash)
 	CHECK(sfr == (std::vector<Write>{{0x0102, 0x0000}}));
 
 	/* Only the JTAG instructions of debug.cpp and of Cpuxv2::identify,
-	 * in_full_emulation and disconnect: none of IR_DATA_QUICK (Phase A's
-	 * quick memory access), IR_TEST_REG, IR_TEST_3V_REG or any other. */
+	 * in_full_emulation and disconnect: IR_DATA_QUICK only for
+	 * ReadMemQuickXv2 (the device ID and the bootcode area), which feeds the
+	 * CPU only SetPcXv2's MOVA #imm20, PC and NOP and writes no memory; none
+	 * of IR_TEST_REG, IR_TEST_3V_REG or any other. */
 	Log allowed;
 	for (const uint8_t code :
 	     {msp430::kIrAddrCapture, msp430::kIrCntrlSigCapture, msp430::kIrEmexWriteControl,
 	      msp430::kIrDataCapture, msp430::kIrData16Bit, msp430::kIrJmbExchange,
 	      msp430::kIrDataToAddr, msp430::kIrCntrlSigRelease, msp430::kIrEmexDataExchange32,
 	      msp430::kIrAddr16Bit, msp430::kIrCntrlSig16Bit, msp430::kIrEmexReadControl,
-	      msp430::kIrDeviceId, msp430::kIrCoreipId}) {
+	      msp430::kIrDeviceId, msp430::kIrCoreipId, msp430::kIrDataQuick}) {
 		allowed.push_back(ir(code));
 	}
 	Log other_irs;
@@ -2853,5 +2868,112 @@ TEST(debugger_eem_peek_between_debug_sessions)
 	f.t.log.clear();
 	CHECK(f.attach() == Status::Ok);
 	CHECK_LOG(f.t.log, identify_log() + eem_stop(1, kTb0Zero) + sync_tail(0x6904, 0x0008) +
-				   read_word(0x1A04) + clear_triggers() + Log{"ir:28", "dr16:0000"});
+				   quick_read(0x1A04, 1) + clear_triggers() + Log{"ir:28", "dr16:0000"});
+}
+
+/* ---- the bootcode area 0x1A00-0x1AFF: TI's quick read (correction 27) ----
+ * On the MSP430F5529 an address-register read (ReadMemWordXv2) of the
+ * bootcode area returns 0x3FFF (measured on the board); TI's DLL reads it
+ * only with ReadMemQuickXv2 (SpecialMemoryTypes.cpp:63-66,
+ * BootcodeRomAccess; MSP430F5xxx.h:77-82; DeviceHandleMSP430.cpp:507 for
+ * the device descriptor). FakeTap models both. */
+
+TEST(debugger_attach_reads_the_device_id_with_the_quick_read)
+{
+	for (const AttachMode mode : {AttachMode::Running, AttachMode::Reset}) {
+		Fx f;
+		if (mode == AttachMode::Running) {
+			f.running_cpu();
+		}
+		REQUIRE(f.d.attach(mode, 250000, f.id) == Status::Ok);
+		CHECK_EQ(f.id.device_id, 0x2955); /* the address register would read 0x3FFF */
+		CHECK(contains(f.t.log, quick_read(0x1A04, 1)));
+		CHECK(f.t.quick_reads == (std::vector<uint32_t>{0x1A04}));
+		CHECK(std::find(f.t.addr_reads.begin(), f.t.addr_reads.end(), 0x1A04u) ==
+		      f.t.addr_reads.end());
+		/* the quick read leaves the CPU's PC at 0x0004; the saved context
+		 * keeps the program's */
+		CHECK_EQ(f.d.pc(), mode == AttachMode::Running ? 0x4520u : 0x441Au);
+	}
+}
+
+TEST(debugger_quick_read_follows_mspds_read_mem_quick)
+{
+	Fx f;
+	f.attached();
+	f.t.memory[0x1A00] = 0x0606;
+	f.t.memory[0x1A02] = 0x0859;
+	f.t.cpu_words.clear();
+	uint8_t out[4] = {};
+	REQUIRE(f.d.read_mem(0x1A00, 2, out) == Status::Ok);
+	CHECK_LOG(f.t.log, quick_read(0x1A00, 2) + link_check());
+	const uint8_t want[] = {0x06, 0x06, 0x59, 0x08};
+	CHECK_BYTES(out, want);
+	CHECK(f.t.addr_reads.empty());
+	CHECK(f.t.quick_reads == (std::vector<uint32_t>{0x1A00, 0x1A02}));
+	/* fed: SetPcXv2's MOVA #imm20, PC, the address and NOP, twice */
+	CHECK(f.t.cpu_words == (std::vector<uint16_t>{0x0080, 0x1A00, 0x4303,
+						       0x0080, 0x0004, 0x4303}));
+	CHECK(f.t.mem_writes.empty());
+	CHECK_EQ(f.d.pc(), 0x4520u);
+}
+
+TEST(debugger_read_mem_into_the_bootcode_area_switches_to_the_quick_read)
+{
+	Fx f;
+	f.attached();
+	f.t.memory[0x19FC] = 0x1111;
+	f.t.memory[0x19FE] = 0x2222;
+	f.t.memory[0x1A00] = 0x0606;
+	f.t.memory[0x1A02] = 0x0859;
+	f.t.memory[0x1A06] = 0x1219; /* 0x1A04: 0x2955 */
+	uint8_t out[12] = {};
+	REQUIRE(f.d.read_mem(0x19FC, 6, out) == Status::Ok);
+	CHECK_LOG(f.t.log, read_words(0x19FC, 2) + quick_read(0x1A00, 4) + link_check());
+	const uint8_t want[] = {0x11, 0x11, 0x22, 0x22, 0x06, 0x06, 0x59, 0x08, 0x55, 0x29,
+				0x19, 0x12};
+	CHECK_BYTES(out, want);
+	CHECK(f.t.addr_reads == (std::vector<uint32_t>{0x19FC, 0x19FE}));
+	CHECK(f.t.quick_reads == (std::vector<uint32_t>{0x1A00, 0x1A02, 0x1A04, 0x1A06}));
+}
+
+TEST(debugger_read_mem_out_of_the_bootcode_area_switches_back)
+{
+	Fx f;
+	f.attached();
+	f.t.memory[0x1AFC] = 0xAAAA;
+	f.t.memory[0x1AFE] = 0xBBBB;
+	f.t.memory[0x1B00] = 0xCCCC;
+	f.t.memory[0x1B02] = 0xDDDD;
+	uint8_t out[8] = {};
+	REQUIRE(f.d.read_mem(0x1AFC, 4, out) == Status::Ok);
+	CHECK_LOG(f.t.log, quick_read(0x1AFC, 2) + read_words(0x1B00, 2) + link_check());
+	const uint8_t want[] = {0xAA, 0xAA, 0xBB, 0xBB, 0xCC, 0xCC, 0xDD, 0xDD};
+	CHECK_BYTES(out, want);
+	CHECK(f.t.quick_reads == (std::vector<uint32_t>{0x1AFC, 0x1AFE}));
+	CHECK(f.t.addr_reads == (std::vector<uint32_t>{0x1B00, 0x1B02}));
+}
+
+/* The quick read moves the CPU's PC (to the address, then to 0x0004), not
+ * the saved context: read_regs, step and detach use the program's PC. */
+TEST(debugger_quick_read_keeps_the_programs_pc)
+{
+	Fx f;
+	f.attached();
+	uint8_t out[2] = {};
+	REQUIRE(f.d.read_mem(0x1A04, 1, out) == Status::Ok);
+	uint32_t regs[16] = {};
+	f.t.captured = {0x43F0, 0x0000};
+	REQUIRE(f.d.read_regs(regs) == Status::Ok);
+	CHECK_EQ(regs[0], 0x4520u);
+	f.t.log.clear();
+	f.t.eem_control_script = {0x0000, 0x0080, 0x0080};
+	f.t.captured = {0x0008, 0x0000};
+	REQUIRE(f.d.step() == Status::Ok);
+	CHECK(contains(f.t.log, set_pc(0x4520))); /* released at the program's PC */
+	REQUIRE(f.d.read_mem(0x1A04, 1, out) == Status::Ok);
+	const uint32_t pc = f.d.pc();
+	f.t.log.clear();
+	CHECK(f.d.detach(DetachAction::Run) == Status::Ok);
+	CHECK_LOG(f.t.log, detach_run(pc, 0x0008, 0x6904));
 }

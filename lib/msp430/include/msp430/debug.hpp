@@ -34,7 +34,8 @@ public:
 	 * Running: SyncJtag_Conditional_SaveContextXv2, the program stops where
 	 * it is (stop reason Request). Reset: SyncJtag_AssertPor_SaveContextXv2,
 	 * the CPU stops at the reset vector (stop reason Reset). Then the device
-	 * ID is read, all EEM triggers are cleared and the EEM sequencer is
+	 * ID is read with ReadMemQuickXv2 (as the DLL does; correction 27), all
+	 * EEM triggers are cleared and the EEM sequencer is
 	 * turned off (as the DLL's EEM_Init leaves it). Statuses as
 	 * Cpuxv2::connect. On failure the pins are released and the CPU is let
 	 * go: before it reached full emulation with nothing written to its
@@ -146,7 +147,11 @@ public:
 	Status write_reg(unsigned index, uint32_t value);
 	/* `nwords` words from `addr` on, little-endian byte pairs, one per word.
 	 * Plain bus accesses: reading interrupt-vector registers, RXBUF or
-	 * vacant addresses has its usual effects. The PC is not moved. WDTCTL
+	 * vacant addresses has its usual effects. The saved PC is not moved.
+	 * Words in the bootcode area 0x1A00-0x1AFF are read with TI's quick
+	 * read (ReadMemQuickXv2, which moves the CPU's PC, not the saved one),
+	 * as TI's DLL reads them: through the address register an F5529 reads
+	 * 0x3FFF there (design spec correction 27). WDTCTL
 	 * (0x015C) goes through the saved context, as TI's DLL does: read_mem
 	 * returns 0x69 with the saved low byte, which the program gets back on
 	 * release; write_mem saves the written low byte for the release and
@@ -233,6 +238,8 @@ private:
 	void clear_jmb_out();
 
 	uint16_t read_word(uint32_t addr);
+	void read_words(uint32_t addr, size_t nwords, uint8_t *dst);
+	void read_quick(uint32_t addr, size_t nwords, uint8_t *dst);
 	void write_word(uint32_t addr, uint16_t data);
 	uint32_t read_cpu_reg(uint16_t mova);
 	void write_cpu_reg(uint16_t mova, uint16_t data);

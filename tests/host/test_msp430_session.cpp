@@ -487,7 +487,9 @@ TEST(session_range_rules)
 	CHECK_EQ(f.tap.mem_writes.back().first, 0xFFFFEu);
 	CHECK_EQ(f.tap.mem_writes.back().second, 0x1234);
 	f.tap.log.clear();
-	CHECK_BYTES(f.run(read_req(0xFFFFE, 1)), (Bytes{0x90, 0x00, 0xFF, 0xFF}));
+	/* the last word can be read; the fake's quick read returns what the
+	 * write above stored there (on the chip a flash word would not change) */
+	CHECK_BYTES(f.run(read_req(0xFFFFE, 1)), (Bytes{0x90, 0x00, 0x34, 0x12}));
 	f.tap.log.clear();
 
 	CHECK_BYTES(f.run(erase_req(0, 0x4401, 0x2400)), kBadArg);

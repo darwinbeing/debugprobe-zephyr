@@ -26,7 +26,11 @@ public:
 	 * TI's 20-bit de-scramble to every result, so the caller sees it
 	 * scrambled (measured on an MSP430F5529: 0x001A0 for 0x01A00). */
 	uint32_t device_id_ptr = 0x1A00;
-	std::deque<uint16_t> quick_words; /* DR under IR_DATA_QUICK, default 0xFFFF */
+	/* DR under IR_DATA_QUICK: consumed first, one per read. Then the quick
+	 * read returns the word of `memory` at the address the CPU's PC points
+	 * to (set by feeding MOVA #imm20, PC; every read moves it on by 2), or
+	 * 0xFFFF (erased flash) where `memory` has none. */
+	std::deque<uint16_t> quick_words;
 	std::deque<uint8_t> jtag_id_script;   /* consumed first, one per ir_shift */
 	bool jmb_in_ready = true;             /* IN0RDY in the mailbox status */
 	uint32_t jmb_hidden_polls = 0;  /* this many mailbox status reads report "nothing ready" first */
@@ -56,7 +60,11 @@ public:
 	static constexpr uint16_t kWdtctlRead = 0x6900; /* WDTCTL reads 0x69xx */
 	/* Word memory read through IR_DATA_CAPTURE right after an address was
 	 * loaded with IR_ADDR_16BIT (ReadMemWordXv2); writes through
-	 * IR_DATA_TO_ADDR update it. Missing addresses read 0. */
+	 * IR_DATA_TO_ADDR update it. Missing addresses read 0. As on the
+	 * MSP430F5529 (measured on the board), such an address-register read of
+	 * the bootcode area 0x1A00-0x1AFF (the TLV with the device ID) returns
+	 * 0x3FFF whatever the memory holds; TI's DLL reads that area only with
+	 * the quick read (IR_DATA_QUICK), which returns it. */
 	std::map<uint32_t, uint16_t> memory = {
 		{kWdtctl, 0x6904}, /* WDTCTL after reset (password 0x69 on read) */
 		{0x0144, 0x9658},  /* FCTL3: locked, not busy */
@@ -81,6 +89,8 @@ public:
 	std::vector<std::pair<uint8_t, uint32_t>> eem_writes; /* (address, value) */
 	std::vector<uint16_t> eem_control_writes; /* DR16 under IR_EMEX_WRITE_CONTROL */
 	std::vector<std::pair<uint32_t, uint16_t>> mem_writes; /* (address, data) */
+	std::vector<uint32_t> addr_reads;  /* addresses read through IR_ADDR_16BIT + IR_DATA_CAPTURE */
+	std::vector<uint32_t> quick_reads; /* addresses read through IR_DATA_QUICK */
 	std::vector<uint16_t> jmb_in;         /* words the probe wrote to the mailbox */
 	bool jmb_protocol_error = false;      /* unexpected mailbox control word */
 	/* EEM exchange out of order: an IR shift between address and data, an
@@ -202,6 +212,9 @@ private:
 		if (ir != msp430::kIrDataCapture) {
 			addr_pending_ = false;
 		}
+		if (ir == msp430::kIrDataQuick) {
+			quick_addr_ = pc_; /* the quick read starts at the PC */
+		}
 		if (ir == msp430::kIrCntrlSigRelease && has_cntrl_sig_after_release) {
 			cntrl_sig = cntrl_sig_after_release;
 		}
@@ -227,8 +240,16 @@ private:
 			return pop(cntrl_sig_script, cntrl_sig);
 		case msp430::kIrCoreipId:
 			return core_id;
-		case msp430::kIrDataQuick:
-			return pop(quick_words, 0xFFFF);
+		case msp430::kIrDataQuick: {
+			const uint32_t a = quick_addr_;
+			quick_addr_ = (quick_addr_ + 2u) & 0xFFFFFu;
+			quick_reads.push_back(a);
+			if (!quick_words.empty()) {
+				return pop(quick_words, 0xFFFF);
+			}
+			const auto it = memory.find(a);
+			return it != memory.end() ? it->second : 0xFFFF;
+		}
 		case msp430::kIrJmbExchange:
 			return jmb_shift(value);
 		case msp430::kIrCntrlSig16Bit:
@@ -263,6 +284,10 @@ private:
 				addr_pending_ = false;
 				if (!addr_clocked_ || tclk_ || !cntrl_read_) {
 					mem_protocol_error = true;
+				}
+				addr_reads.push_back(addr_);
+				if (addr_ >= 0x1A00 && addr_ < 0x1B00) {
+					return 0x3FFF; /* the bootcode area, as on the board */
 				}
 				const auto it = memory.find(addr_);
 				return it != memory.end() ? it->second : 0;
@@ -406,6 +431,9 @@ private:
 		feed_ = Feed::Instruction;
 		switch (at) {
 		case Feed::ImmWord: /* imm15:0 of MOVA #imm20, Rn */
+			if (mova_to_pc_) {
+				pc_ = (mova_imm_hi_ << 16) | w;
+			}
 			return;
 		case Feed::AbsWord: /* abs15:0 of MOVA Rn, &abs20 */
 			if (w != 0x0FF6) {
@@ -422,6 +450,8 @@ private:
 		}
 		if ((w & 0xF0F0u) == 0x0080u) { /* MOVA #imm20, Rn */
 			feed_ = Feed::ImmWord;
+			mova_to_pc_ = (w & 0x000Fu) == 0; /* R0, the PC */
+			mova_imm_hi_ = (w >> 8) & 0x000Fu;
 		} else if ((w & 0xF0FFu) == 0x0060u) { /* MOVA Rn, &abs20, abs19:16 = 0 */
 			feed_ = Feed::AbsWord;
 		} else if (w != 0x3FFD && w != 0x4303) { /* JMP $-4, NOP */
@@ -494,4 +524,8 @@ private:
 	bool addr_clocked_ = false; /* set_tclk since the address load (even if TCLK was high) */
 	bool cntrl_read_ = true;    /* R/W bit of the last IR_CNTRL_SIG_16BIT word */
 	Feed feed_ = Feed::Instruction;
+	bool mova_to_pc_ = false;  /* the MOVA #imm20 being fed writes the PC */
+	uint32_t mova_imm_hi_ = 0; /* its imm19:16 */
+	uint32_t pc_ = 0;          /* the CPU's PC as the fed MOVAs set it */
+	uint32_t quick_addr_ = 0;  /* the next word a quick read returns */
 };

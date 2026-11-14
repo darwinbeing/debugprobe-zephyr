@@ -139,6 +139,33 @@ inline Log set_pc(unsigned pc)
 		"tclk:0", "tclk:1", d16(0x4303), "tclk:0", ir(0x21), d20(0)};
 }
 
+/* ReadMemQuickXv2.c:58-113, JTAG ID 0x91: the ID captured (line 66), the PC
+ * set to `addr` (SetPcXv2), read mode, TCLK high, IR_ADDR_CAPTURE, then
+ * IR_DATA_QUICK and one TCLK cycle and DR16 per word; the "check save
+ * state" capture; the PC set to SAFE_PC_ADDRESS 0x0004 (lines 71-74), read
+ * mode, TCLK high, IR_ADDR_CAPTURE. */
+inline Log quick_read(unsigned addr, unsigned nwords)
+{
+	Log l = Log{ir(0x28)} + set_pc(addr) + Log{ir(0xC8), d16(0x0501), "tclk:1", ir(0x21), ir(0xC2)};
+	for (unsigned i = 0; i < nwords; ++i) {
+		l = l + Log{"tclk:1", "tclk:0", d16(0)};
+	}
+	return l + Log{ir(0x28), d16(0)} + set_pc(0x0004) +
+	       Log{ir(0xC8), d16(0x0501), "tclk:1", ir(0x21)};
+}
+
+/* Debugger::read_mem outside the bootcode area: read mode first (not in
+ * MSPDS), then ReadMemWordsXv2.c:58-79, ReadMemWordXv2 per word, and the
+ * clock that ends the macro. */
+inline Log read_words(unsigned addr, unsigned nwords)
+{
+	Log l = {"tclk:0", ir(0xC8), d16(0x0501)};
+	for (unsigned i = 0; i < nwords; ++i) {
+		l = l + Log{ir(0xC1), d20(addr + 2 * i), "tclk:1", "tclk:0", ir(0x42), d16(0)};
+	}
+	return l + Log{"tclk:1", "tclk:0", "tclk:1"};
+}
+
 /* EemDataExchangeXv2: one read / one write (IR selected by the caller) */
 inline Log eem_read(unsigned reg) { return {d32(reg | 1u), d32(0)}; }
 inline Log eem_write(unsigned reg, unsigned value) { return {d32(reg), d32(value)}; }

@@ -36,6 +36,18 @@
  *    Cpuxv2::read_mem do; ReadMemWordsXv2 relies on the operation before
  *    it having left the CPU in read mode, and in write mode its bus cycles
  *    could be writes;
+ *  - the bootcode area 0x1A00-0x1AFF (the TLV with the device descriptor)
+ *    is read with ReadMemQuickXv2, as TI's DLL reads it: read_mem uses it
+ *    for every word in that area and ReadMemWordsXv2 elsewhere, a range that
+ *    crosses the area's edges split (the DLL: SpecialMemoryTypes.cpp:63-66,
+ *    BootcodeRomAccess::doRead with ID_ReadMemQuick; MSP430F5xxx.h:77-82
+ *    maps 0x1A00 size 0x100 to it), and attach reads the device ID with it
+ *    after either sync (DeviceHandleMSP430.cpp:507, ID_ReadMemQuickXv2 after
+ *    the conditional sync; the DLL uses ReadMemWordsXv2 only for the reset
+ *    vector, :450). Through the address register an MSP430F5529 reads
+ *    0x3FFF throughout that area (measured on the board, design spec
+ *    correction 27). ReadMemQuickXv2 sets the CPU's PC to the address and
+ *    then to SAFE_PC_ADDRESS; the saved context keeps the program's PC;
  *  - read_mem and write_mem refuse an odd address, an address above 20 bits
  *    or words past 0xFFFFF with BadArg before any TAP traffic, and do
  *    nothing for no words. The macros take any address and wrap at 20 bits
@@ -236,6 +248,11 @@ constexpr uint32_t kFlashIdleTimeoutMs = 100;
 constexpr uint16_t kSfrIfg1 = 0x0102;
 constexpr uint16_t kVmaIfg = 0x0008;
 constexpr uint16_t kSafePc = 0x0004;      /* SAFE_PC_ADDRESS (JTAG_defs.h) */
+/* The F5xx bootcode area (device database MSP430F5xxx.h:77-82, Name::bootCode,
+ * 0x1A00 size 0x100: the TLV with the device descriptor). Read only with
+ * ReadMemQuickXv2 (see read_mem). */
+constexpr uint32_t kBootcodeLo = 0x1A00;
+constexpr uint32_t kBootcodeHi = 0x1B00;
 constexpr uint16_t kAltRomAddr = 0x0FF6;  /* ReadCpuRegXv2, altRomAddressForCpuRead */
 constexpr uint16_t kResetVector = 0xFFFE;
 constexpr uint16_t kSrCpuOff = 0x0010;
@@ -293,6 +310,11 @@ constexpr uint16_t mova_imm(unsigned reg, uint32_t value) /* MOVA #imm20, Rn */
 constexpr bool word_range_ok(uint32_t addr, size_t nwords)
 {
 	return (addr & 1u) == 0 && addr < kAddressSpace && nwords <= (kAddressSpace - addr) / 2u;
+}
+
+constexpr bool in_bootcode(uint32_t addr)
+{
+	return addr >= kBootcodeLo && addr < kBootcodeHi;
 }
 
 } // namespace
@@ -819,7 +841,12 @@ Status Debugger::attach(AttachMode mode, uint32_t slot_hz, Identity &id)
 	if (sync != Status::Ok) {
 		return sync;
 	}
-	id.device_id = read_word(id.device_id_ptr + 4u);
+	/* DeviceHandleMSP430.cpp:507: the device descriptor with
+	 * ReadMemQuickXv2; through the address register the bootcode area
+	 * reads 0x3FFF (correction 27) */
+	uint8_t raw[2] = {};
+	read_quick(id.device_id_ptr + 4u, 1, raw);
+	id.device_id = static_cast<uint16_t>(raw[0] | (raw[1] << 8));
 	clear_triggers();
 	if (!cpu_.in_full_emulation()) {
 		(void)detach(DetachAction::Run);
@@ -980,22 +1007,11 @@ Status Debugger::write_reg(unsigned index, uint32_t value)
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
 
-/* ReadMemWordsXv2.c:57-83. No SetPcXv2: the saved PC stays valid. The
- * read mode, range checks and WDTCTL are not in MSPDS (see the header). */
-Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
+/* ReadMemWordsXv2.c:57-83 for `nwords` words from `addr`, with the read
+ * mode set first and WDTCTL from the saved context (not in MSPDS, see the
+ * header). No SetPcXv2: the CPU's PC is not touched. */
+void Debugger::read_words(uint32_t addr, size_t nwords, uint8_t *dst)
 {
-	if (!attached_) {
-		return Status::BadState;
-	}
-	if (running_) {
-		return Status::Running;
-	}
-	if (!word_range_ok(addr, nwords)) {
-		return Status::BadArg;
-	}
-	if (nwords == 0) {
-		return Status::Ok;
-	}
 	tap_.clr_tclk();
 	tap_.ir_shift(kIrCntrlSig16Bit); /* read mode; not in MSPDS, see the header */
 	tap_.dr_shift16(0x0501);
@@ -1016,6 +1032,74 @@ Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
 	tap_.set_tclk();
 	tap_.clr_tclk(); /* one more cycle, so the CPU drives the correct MAB */
 	tap_.set_tclk();
+}
+
+/* ReadMemQuickXv2.c:58-113, JTAG ID 0x91: the PC is set to `addr`, the CPU
+ * reads in quick mode (each TCLK cycle one word, the PC moving on), then the
+ * PC goes to SAFE_PC_ADDRESS (lines 71-74: for ID 0x91 the PC the host
+ * passes is not used). Only the CPU's PC moves: the saved context, which
+ * release_at, step and read_regs use, is not touched. Feeds SetPcXv2's
+ * MOVA #imm20, PC and NOP only; no memory write. */
+void Debugger::read_quick(uint32_t addr, size_t nwords, uint8_t *dst)
+{
+	tap_.ir_shift(kIrCntrlSigCapture); /* the JTAG ID (line 66) */
+	set_pc(addr);
+	tap_.ir_shift(kIrCntrlSig16Bit);
+	tap_.dr_shift16(0x0501);
+	tap_.set_tclk();
+	tap_.ir_shift(kIrAddrCapture);
+	tap_.ir_shift(kIrDataQuick);
+	for (size_t i = 0; i < nwords; ++i) {
+		tap_.set_tclk();
+		tap_.clr_tclk();
+		const uint16_t word = tap_.dr_shift16(0);
+		dst[2 * i] = static_cast<uint8_t>(word);
+		dst[2 * i + 1] = static_cast<uint8_t>(word >> 8);
+	}
+	tap_.ir_shift(kIrCntrlSigCapture); /* "Check save State" */
+	tap_.dr_shift16(0x0000);
+	set_pc(kSafePc);
+	tap_.ir_shift(kIrCntrlSig16Bit);
+	tap_.dr_shift16(0x0501);
+	tap_.set_tclk();
+	tap_.ir_shift(kIrAddrCapture);
+}
+
+/* ReadMemWordsXv2 (read_words), except in the bootcode area 0x1A00-0x1AFF:
+ * there ReadMemQuickXv2 (read_quick), as TI's DLL reads that area
+ * (SpecialMemoryTypes.cpp:63-66, BootcodeRomAccess::doRead uses
+ * ID_ReadMemQuick; MSP430F5xxx.h:77-82 maps 0x1A00 size 0x100 to it). Through
+ * the address register an F5529 reads 0x3FFF there (correction 27). A range
+ * that crosses the area's edges is split. The range checks and the link
+ * check at the end are not in MSPDS (see the header). */
+Status Debugger::read_mem(uint32_t addr, size_t nwords, uint8_t *dst)
+{
+	if (!attached_) {
+		return Status::BadState;
+	}
+	if (running_) {
+		return Status::Running;
+	}
+	if (!word_range_ok(addr, nwords)) {
+		return Status::BadArg;
+	}
+	if (nwords == 0) {
+		return Status::Ok;
+	}
+	for (size_t done = 0; done < nwords;) {
+		const uint32_t a = addr + 2u * static_cast<uint32_t>(done);
+		const bool boot = in_bootcode(a);
+		size_t n = 1;
+		while (done + n < nwords && in_bootcode(a + 2u * static_cast<uint32_t>(n)) == boot) {
+			++n;
+		}
+		if (boot) {
+			read_quick(a, n, dst + 2 * done);
+		} else {
+			read_words(a, n, dst + 2 * done);
+		}
+		done += n;
+	}
 	return cpu_.in_full_emulation() ? Status::Ok : Status::TargetError;
 }
 

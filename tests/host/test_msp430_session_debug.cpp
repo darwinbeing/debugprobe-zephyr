@@ -1591,3 +1591,23 @@ TEST(session_dbg_eem_peek_only_in_idle)
 		}
 	}
 }
+
+/* The device ID comes from the quick read (correction 27): the probe knows
+ * the F5529, so its RAM and peripheral windows are open, and READ_MEM of the
+ * bootcode area returns its words (the address register would read
+ * 0x3FFF there). */
+TEST(session_dbg_attach_identifies_the_f5529_with_the_quick_read)
+{
+	Fx f;
+	f.cpu_runs();
+	const Bytes r = f.run(attach_req());
+	REQUIRE(r.size() == 17u);
+	CHECK_EQ(r[1], 0x00);
+	CHECK_EQ(r[9], 0x55); /* device ID bytes 55h 29h */
+	CHECK_EQ(r[10], 0x29);
+	CHECK(log_has(f.tap, "ir:c2"));
+	CHECK_BYTES(f.run(write_req(0x2400, 2)), kOk); /* RAM */
+	CHECK_BYTES(f.run(write_req(0x43FE, 2)), kOk);
+	CHECK_BYTES(f.run(write_req(0x0200, 2)), kOk); /* a peripheral register */
+	CHECK_BYTES(f.run(read_req(0x1A04, 1)), (Bytes{0x90, 0x00, 0x55, 0x29}));
+}
