@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.20.0)
 
 # Register this repo as a Zephyr module (see zephyr/module.yml) so the
-# out-of-tree PIO SWD driver in drivers/dp_pio/ is processed during Zephyr's
+# out-of-tree PIO drivers in drivers/ (dp_pio and sbw_pio) are processed during Zephyr's
 # module loop. That runs before Zephyr captures ZEPHYR_LIBS and builds the
 # whole-archive link group; an app-local add_subdirectory() would register the
-# driver too late, so its DEVICE_DT_INST_DEFINE device objects would be dropped
+# driver too late, so their DEVICE_DT_INST_DEFINE device objects would be dropped
 # and DEVICE_DT_GET(swd_pio) would fail to link. Must precede find_package().
 list(APPEND EXTRA_ZEPHYR_MODULES ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -20,6 +20,7 @@ target_sources(app PRIVATE
   src/usb/msosv2.cpp
   src/dap/dap_backend.cpp
   src/leds.cpp
+  src/pin_owner.cpp
   src/uart_bridge.cpp
   src/autobaud/autobaud.cpp
   src/autobaud/estimator.cpp
@@ -32,6 +33,18 @@ if(NOT CONFIG_PROBE_SWD_NULL)
     src/dap/swdp_driver.cpp
     src/dap/swdp_shim.c
   )
+endif()
+
+# MSP430 Spy-Bi-Wire programming (vendor command 0x90): glue between the PIO
+# driver in drivers/sbw_pio/, lib/msp430 and the DAP engine.
+if(CONFIG_PROBE_MSP430_SBW)
+  add_subdirectory(lib/msp430)
+  target_sources(app PRIVATE
+    src/msp430/pio_sbw_port.cpp
+    src/msp430/msp430_backend.cpp
+  )
+  target_include_directories(app PRIVATE drivers/sbw_pio)
+  target_link_libraries(app PRIVATE msp430)
 endif()
 
 target_include_directories(app PRIVATE src)

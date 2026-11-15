@@ -23,9 +23,30 @@ config PROBE_SWD_PIO
 
 endchoice
 
-# The out-of-tree PIO SWD port driver Kconfig (drivers/dp_pio/Kconfig) is
-# sourced via the Zephyr module mechanism (zephyr/module.yml -> build.kconfig),
-# not rsource'd here, so it is registered alongside the driver's CMakeLists in
-# the module loop. Sourcing it both ways would redefine SWDP_PIO.
+config PROBE_MSP430_SBW
+	bool "MSP430 Spy-Bi-Wire programming and debugging (vendor command 0x90)"
+	default y
+	depends on PROBE_SWD_PIO && PIO_RPI_PICO && DT_HAS_DEBUGPROBE_SBW_PIO_ENABLED
+	select SBW_PIO
+	help
+	  Program and debug MSP430 CPUXv2 flash devices (MSP430F5529) over
+	  Spy-Bi-Wire, using the SWD pins. Adds a CMSIS-DAP vendor command; the
+	  USB descriptors do not change. See docs/MSP430_SBW.md and
+	  docs/MSP430_DEBUG.md.
+
+# The SBW vendor command runs on the USB device thread and nests deeper than
+# the SWD path (engine -> Session -> Debugger -> Cpuxv2/SbwTap -> port -> PIO
+# driver). Zephyr's default of 1024 bytes leaves no margin for it. Static worst
+# case of the debug paths, measured with -fstack-usage and the call graph on
+# 2026-11-13: 1312 of 2048 bytes on the RP2040 boards (rpi_pico2: 1164), so
+# 2048 is kept.
+config USBD_THREAD_STACK_SIZE
+	default 2048 if PROBE_MSP430_SBW
+
+# The out-of-tree PIO driver Kconfigs (drivers/Kconfig, which pulls in dp_pio
+# and sbw_pio) are sourced via the Zephyr module mechanism (zephyr/module.yml
+# -> build.kconfig), not rsource'd here, so they are registered alongside the
+# drivers' CMakeLists in the module loop. Sourcing them both ways would
+# redefine SWDP_PIO.
 
 source "Kconfig.zephyr"

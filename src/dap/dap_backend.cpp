@@ -118,6 +118,27 @@ void request_abort()
 	g_engine.request_abort();
 }
 
+void set_vendor_handler(dap::VendorHandler *handler)
+{
+	g_engine.set_vendor_handler(handler);
+}
+
+namespace {
+void (*g_transport_disabled_hook)() = nullptr;
+} // namespace
+
+void set_transport_disabled_hook(void (*hook)())
+{
+	g_transport_disabled_hook = hook;
+}
+
+void on_transport_disabled()
+{
+	if (g_transport_disabled_hook != nullptr) {
+		g_transport_disabled_hook();
+	}
+}
+
 } // namespace dap_backend
 
 } // namespace probe

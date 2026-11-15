@@ -19,6 +19,21 @@ Board targets: `rpi_debug_probe`, `rpi_pico`, `rpi_pico2/rp2350a/m33`.
 Build all three at once: `scripts/build_all.sh`.
 Artifacts: `build/<board>/zephyr/zephyr.uf2` — drag onto the BOOTSEL drive to flash.
 
+## MSP430 Spy-Bi-Wire programming
+
+The firmware can also program an MSP430F5529 over Spy-Bi-Wire, using the SWD
+pins and a small Python tool:
+
+    python3 tools/msp430/sbw.py flash firmware.hex
+
+`flash` erases the target's main flash first. Before the first write to a
+board, read `docs/MSP430_SBW.md`: it covers wiring, electrical checks, and how
+to make and check a backup (`selftest`, `read`, `trial`).
+
+`sbw.py gdbserver` debugs an MSP430F5529 with `msp430-elf-gdb` (halt, step,
+registers, memory, hardware breakpoints) without ever writing its flash; see
+`docs/MSP430_DEBUG.md`.
+
 ## Fresh machine setup (T2 topology)
 
 ```bash

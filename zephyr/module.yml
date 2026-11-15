@@ -1,14 +1,15 @@
 name: debugprobe_dp_pio
 build:
-  # Register drivers/dp_pio/ as a Zephyr module so its zephyr_library() is
+  # Register drivers/ (dp_pio and sbw_pio) as a Zephyr module so their
+  # zephyr_library() targets are
   # collected into ZEPHYR_LIBS *before* the Zephyr top-level CMakeLists reads
   # that property (and builds the whole-archive link group). An app-local
   # add_subdirectory() runs only after find_package(Zephyr) has already
-  # finalized the link, so the driver's device objects would be dropped and
+  # finalized the link, so the drivers' device objects would be dropped and
   # DEVICE_DT_GET(swd_pio) fails to link. The module path runs in Zephyr's
   # module loop, which is early enough.
-  cmake: drivers/dp_pio
-  kconfig: drivers/dp_pio/Kconfig
+  cmake: drivers
+  kconfig: drivers/Kconfig
 settings:
   # Make this repo's dts/bindings (raspberrypi,swdp-pio.yaml) a binding root
   # via the module, independent of the app-build binding search.

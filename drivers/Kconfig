@@ -1,0 +1,2 @@
+rsource "dp_pio/Kconfig"
+rsource "sbw_pio/Kconfig"

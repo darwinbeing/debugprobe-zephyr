@@ -21,6 +21,22 @@
 		};
 	};
 
+	/* MSP430 Spy-Bi-Wire on the SWD pins, routed to PIO1: SBWTCK=GP2 (target
+	 * TEST), SBWTDIO=GP3 (target RST). The pulls define the idle state:
+	 * pull-up on SBWTDIO so the probe does not fight the target's RST
+	 * pull-up, pull-down on SBWTCK (TEST low = SBW logic off). */
+	sbw_pio_default: sbw_pio_default {
+		tck_pins {
+			pinmux = <PIO1_P2>;
+			bias-pull-down;
+		};
+		tdio_pins {
+			pinmux = <PIO1_P3>;
+			input-enable;
+			bias-pull-up;
+		};
+	};
+
 	/* Target UART (uart1): TX=GP4, RX=GP5 -- the CDC-ACM bridge endpoint. */
 	uart1_default: uart1_default {
 		tx_group {
@@ -65,6 +81,12 @@
  * driver compiles against, and so the raspberrypi,swdp-pio instance can run.
  */
 &pio0 {
+	status = "okay";
+};
+
+/* PIO1 hosts the SBW program: PIO0's instruction memory is shared by the SWD
+ * and autobaud programs. */
+&pio1 {
 	status = "okay";
 };
 
@@ -119,6 +141,16 @@
 		reset-gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
 		swclk-pin = <2>;
 		swdio-pin = <3>;
+		status = "okay";
+	};
+
+	sbw_pio: sbw_pio {
+		compatible = "debugprobe,sbw-pio";
+		piodev = <&pio1>;
+		pinctrl-0 = <&sbw_pio_default>;
+		pinctrl-names = "default";
+		tck-pin = <2>;
+		tdio-pin = <3>;
 		status = "okay";
 	};
 

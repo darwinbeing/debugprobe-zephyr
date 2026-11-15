@@ -148,6 +148,167 @@ check the available hardware allows (see the note below the table):
 
 ---
 
+## Phase 6 — MSP430F5529 Spy-Bi-Wire flash programming
+
+**Implemented:** PIO SBW transport on PIO1 (`drivers/sbw_pio`), pure C++ JTAG /
+CPUXv2 / vendor-command library (`lib/msp430`, port of TI SLAU320
+Replicator430Xv2), vendor-command hook in the DAP engine, SWD/SBW pin
+ownership with the pins returned to high-impedance after every session, Python
+host tool (`tools/msp430/sbw.py`). Design:
+`docs/superpowers/specs/2026-11-11-msp430-sbw-design.md`; user guide:
+`docs/MSP430_SBW.md`.
+
+| Axis | Status |
+|---|---|
+| Host tests | 193/193 C++ (`scripts/run_host_tests.sh`, also under ASan); 148/148 Python (`python3 -m unittest discover -s tools/msp430/tests`) |
+| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe build with the feature on; rpi_pico also with `CONFIG_PROBE_MSP430_SBW=n` (no SBW code in that image) |
+| On-target hardware | **Verified on an MSP430F5529 with an rpi_pico probe (2026-11-11):** acceptance steps 2–7 pass, including mass erase and full programming at 250, 500 and 1000 kHz. Not run: step 1 and the SWD regression (step 8); see the table and the open points below |
+
+What the host-side verification covers. During the code reviews (with
+throwaway harnesses that are not in the repository) the JTAG cycle sequences
+and the CPUXv2 device sequences were compared mechanically with TI's reference
+code; the PIO program was simulated tick by tick from its generated opcodes
+(event order as TI's macros, low phase at most 5 µs, no wait with the clock
+low); the command parser was fuzzed under ASan/UBSan.
+
+### First on-target run (2026-11-11, rpi_pico + MSP430F5529)
+
+Read-only commands only; nothing was written to the target.
+
+- `info` failed with "unsupported device: ID bytes FFh 3Fh at 0x001A4". Cause:
+  `connect` used the device-descriptor pointer after `dr_shift20`'s 20-bit
+  de-scramble, but the device shifts that pointer out in plain order, so the
+  value was 0x001A0 instead of 0x01A00 and the ID was read from vacant memory.
+  Fixed by converting the pointer back in `connect`. TI's Spy-Bi-Wire source
+  has the same slip but never uses the ID.
+- Everything else worked with that firmware, driven through the vendor command
+  by throwaway scripts: SBW entry, JTAG ID 0x91, lock-key check (not locked),
+  core ID 0x0103, sync and POR, and memory reads. The descriptor at 0x01A00
+  reads `06 06 59 08 55 29 19 12`.
+- Main flash (128 KB) was read three times, at 250 kHz, 100 kHz and 250 kHz
+  again, with different chunk sizes: byte-identical each time. Measured read
+  rate: 5.4 kB/s at 250 kHz, 2.1 kB/s at 100 kHz.
+- The backup was then checked for coherence, outside the repository: the
+  vector table and the C start-up code fit the F5529 memory map; a disassembly
+  (Ghidra, MSP430X) decodes the code region, and all but one of its 2385 direct
+  calls land on a function entry (the exception is a register-indirect call);
+  three CRCs that the target's firmware itself checks reproduce on the dump.
+- Open: a 16-byte read at 0x017F0 (bootloader area) returned zeros and, on a
+  second read in the same session, different data, both with status OK. It
+  was not investigated further on this board, whose firmware exists nowhere
+  else. The tool never reads that area, and reads elsewhere were stable
+  afterwards.
+
+With the fixed firmware on the probe, steps 2–5 of the acceptance table
+passed the same day through `sbw.py`.
+
+Before `trial`, the flash routines were approached one at a time in the blank
+segment at 0x24200, each followed by a compare of main flash and the info
+segments with the backup: a 512-byte write of 0xFF with `--erase none` (runs
+the write funclet, cannot change flash), a one-word write of 0xFFFE (exactly
+one byte differed, at 0x24200), and `erase --segment 0x24200` (no difference
+left). Each command line was first run against the fake firmware loaded with
+the real backup, to check which erase and write commands it sends.
+
+Steps 6 and 7 followed the same day. The image was the 128 KB backup itself.
+At 250, 500 and 1000 kHz, in one session each: compare with the backup, mass
+erase, read all of main flash back (blank in all four banks every time; the
+info segments unchanged), program, verify, compare; then an independent
+compare at 250 kHz. Before the two higher speeds: `selftest`, two or three
+full read-backs and `trial` at that speed. Finally the plain `flash` command
+with its defaults. The procedure had a fallback that writes the backup back
+with segment erases; it was not needed. Measured:
+
+| Speed | Mass erase | Programming 128 KB | Read-back |
+|---|---|---|---|
+| 250 kHz | 0.54 s | 77 s (1.7 kB/s) | 5.4 kB/s |
+| 500 kHz | 0.30 s | 40 s (3.3 kB/s) | about 10 kB/s |
+| 1000 kHz | 0.17 s | 22 s (6.0 kB/s) | about 18 kB/s |
+
+Not exercised on hardware: the magic-pattern entry (every connect succeeded
+with the normal entry), a locked device, `info` without a target, a write to
+the info segments, 100 kHz for anything but reads, and the other two probe
+boards. The scope measurements listed below were not made.
+
+### Phase 6 hardware acceptance (rpi_pico + MSP430F5529 board)
+
+The procedure is "First use on a board" in `docs/MSP430_SBW.md`. Nothing
+before step 6 changes the firmware on the board.
+
+| # | Step | Result |
+|---|---|---|
+| 1 | `info` without a target reports "no MSP430 found" | not run: the probe is soldered to this target |
+| 2 | `info` reports JTAG ID 0x91 and device ID bytes 55h 29h (anything else: stop) | ✓ 2026-11-11 (core ID 0x0103) |
+| 3 | `selftest` passes | ✓ 2026-11-11 |
+| 4 | Two backups of main flash at 250 and 100 kHz are identical; info memory saved | ✓ 2026-11-11; also identical to the reads made before the fix |
+| 5 | `trial --backup` passes | ✓ 2026-11-11 (segment 0x24200); an independent compare afterwards found no difference from the backup |
+| 6 | `flash` an image: verify passes, target runs | ✓ 2026-11-11: `flash` of the 128 KB backup with the default mass erase at 250 kHz, programmed and verified in 103 s; an independent compare found no difference. That the application runs afterwards was not observed by the tester |
+| 7 | 50 connect/disconnect cycles; flash at 250 / 500 / 1000 kHz | ✓ 2026-11-11: 50 cycles at 250 kHz and 50 at 1000 kHz, all on the first entry attempt; mass erase, blank check, program and verify at 250, 500 and 1000 kHz, main flash and info segments equal to the backup after each |
+| 8 | SWD regression: conformance compare and openocd acceptance, before and after SBW sessions | not run: the probe is soldered to the MSP430 board, and SWD traffic must not be driven onto its TEST and RST pins. `DAP_Info` and `DAP_Disconnect` answer normally after the SBW sessions |
+
+Things to look at during bring-up, from the code reviews:
+
+- Scope the entry pulse on SBWTCK (expected about 0.7–0.9 µs low) and confirm
+  there is no extra edge on SBWTCK when the first JTAG cycle starts.
+- Idle levels at boot and after a command: SBWTCK low through the pull-down,
+  SBWTDIO/RST high. On a Pico 2 (RP2350 A2) check that SBWTCK really reaches 0 V.
+- After an SWD `DAP_Disconnect` both pins must be high-impedance.
+- At 1 MHz the tightest margins are the data-line setup before the TMS slot's
+  rising edge (125 ns) and TDO settling (375 ns); start at 250 kHz.
+- Run once with `CONFIG_THREAD_ANALYZER=y` and read the USB thread's stack peak
+  (static worst case: about 1.2 KB of 2 KB).
+
+## Phase 7 — MSP430F5529 debugging over SBW, read-only (B1)
+
+**Implemented:** `msp430::Debugger` (`lib/msp430/src/debug.cpp`, port of the
+CPUXv2 macros of TI's MSP Debug Stack 3.15.1.1), debug operations 0x09-0x13
+of vendor command 0x90 (protocol version 2; 0x13 `DBG_EEM_PEEK`, `sbw.py
+eem-peek`, is the read-only check of the 32-bit scans to run before a board's
+first attach) with the `PROTECTED` write rules
+(RAM and peripheral registers only, without the PMM, flash controller, SYS
+and DMA blocks; the PC only into main flash) and the lock on the flash
+operations, GDB remote-protocol server (`tools/msp430/gdbserver.py`,
+`sbw.py gdbserver`), symbol-only ELF writer (`tools/msp430/symelf.py`).
+Design: `docs/superpowers/specs/2026-11-13-msp430-debug-design.md`; plan:
+`docs/superpowers/plans/2026-11-13-msp430-debug-b1.md`; user guide:
+`docs/MSP430_DEBUG.md`; TI's licence notice: `THIRD_PARTY_NOTICES.md`.
+
+**Status: implemented, host-tested, and accepted on the target (rpi_pico +
+MSP430F5529 board, 2026-11-13, read-only).** The server has been driven by
+scripted GDB clients and by `msp430-elf-gdb` 9.1 (installed in plan Task 22)
+against a fake probe, and by `msp430-elf-gdb` 9.1 on the board.
+
+| Axis | Status |
+|---|---|
+| Host tests | 391/391 C++ (`scripts/run_host_tests.sh`, also under ASan); 432 Python, 13 of them skipped without msp430-elf-gdb (`python3 -m unittest discover -s tools/msp430/tests`) |
+| 3-board build | rpi_pico, rpi_pico2, rpi_debug_probe with the feature on: rebuilt 2026-11-14 after the SBW clock limit was raised to 10 MHz (correction 29) and after the debug session's `READ_MEM` began reading memory with the quick read (design spec correction 28; its check on the board is listed below); before that rebuilt 2026-11-13 after the last firmware changes (`a3cb815`, `DBG_EEM_PEEK`; `7d624be`, the reset when the link check before a detach's restore fails; `1210beb`, only after two failed checks in a row; `7bfa278`, the bootcode area and the device ID read with TI's quick read), all three boards; rpi_pico with `CONFIG_PROBE_MSP430_SBW=n`: built at Task 15, and nothing that configuration compiles has changed since |
+| End-to-end with GDB | ✓ 2026-11-13, GNU gdb (Mitto Systems Limited - msp430-gcc 9.3.1.11) 9.1: connect, registers, breakpoint by symbol, stepi, memory, refusals (tools/msp430/tests/test_gdb_e2e.py); also `X` escaping, breakpoints after `monitor reset` (also with `always-inserted on`, which needed a server fix) and `flushregs`, console notes before stop replies, Ctrl-C during `stepi 1000` and `next` (stops after the step under way), SIGLOST, `load`, reads and writes GDB's memory map refuses itself, register names, `break NAME` after a `PUSHM.A` prologue and `break *NAME` at the first instruction |
+| SBW clock up to 10 MHz (correction 29) | ✓ 2026-11-14, rpi_pico re-flashed (`9bdf4c3`, picotool write and verify), then on the MSP430F5529 board read-only at rising speeds, stopping at the first failure; each speed: EEM peek, debug-mode reads of main flash (twice, both equal to its image) and of RAM (twice, equal), the flash session's verify. 1000, 1200 and 1400 kHz passed every step (debug-mode reads of main flash 14.7, 16.2, 17.4 KB/s; verify of main flash 6.0, 5.5, 5.1 s). 2000 and 1600 kHz failed at the first step: the JTAG ID read as 0xB9 instead of 0x91, so the probe stopped before anything else was sent; a read-only `info` at 1000 kHz afterwards found the board normal. This board's limit is therefore between 1400 and 1600 kHz, set by its RST/SBWTDIO line (inferred, not measured with a scope); 1000 kHz stays the speed used on it. The code keeps the 10 MHz ceiling for boards whose line allows it |
+| Quick read of memory (correction 28) | ✓ 2026-11-14 on the MSP430F5529 board, rpi_pico re-flashed (`909aa33`; written and verified with picotool after a drag-and-drop copy had left the Pico without a valid image): main flash read in a debug session equal to its image, information memory equal to the latest backup, RAM read twice equal, peripherals read twice equal, a pattern written to unused RAM (0x1C00-0x1FFF and a free block of system RAM) read back; at 250 and 1000 kHz. Debug-mode reads of memory 1.7 -> 5.0 KB/s at 250 kHz and 5.6 -> 16.8 KB/s at 1000 kHz; peripherals unchanged (word reads, 5.5 KB/s at 1000 kHz). A 2 MB external SPI flash read through the target took 207 s instead of 24 min and matched the earlier read byte for byte |
+| On-target hardware | ✓ 2026-11-13, rpi_pico probe on the MSP430F5529 board, read-only: every step of the acceptance table below; flash and information memory unchanged. One defect found and fixed on the way (the device ID and the bootcode area read with TI's quick read, `7bfa278`; the probe was re-flashed and the steps from the first GDB attach repeated) |
+
+### Phase 7 hardware acceptance (rpi_pico + MSP430F5529 board, read-only)
+
+Main flash and information memory are compared with the Phase 6 backups
+before the first step and after the last. Run 2026-11-13 with the user at the
+board; firmware-specific details (function names, addresses in the target's
+firmware) are kept in the local acceptance notes, not here.
+
+| # | Step | Result |
+|---|---|---|
+| 0 | Flash and information memory equal the backups before the session | ✓ 2026-11-13: `verified` for both (main flash 25 s at 250 kHz) |
+| 1 | `sbw.py info` shows protocol version 2, debugging supported, 8 hardware breakpoints | ✓ 2026-11-13: both lines as expected (JTAG ID 0x91, core ID 0x0103, device ID 55h 29h) |
+| 1a | `sbw.py eem-peek` at EEM 0x00, 0x02, 0x04, 0x06, at 250 and 100 kHz: JTAG ID 0x91 and both reads equal each time (the 32-bit scans, read-only, before the first attach) | ✓ 2026-11-13: all 8 runs `0x00000000 0x00000000 (equal)`, JTAG ID 0x91 after each (trigger blocks in their reset state) |
+| 1b | VMAIE (0 per the local notes) confirmed after the attach; VMAIFG after the attach and after one register read | ✓ 2026-11-13: SFRIE1 0x0000 (VMAIE 0); SFRIFG1 0x0088 after the attach and after one register read (VMAIFG 1 -> 1, set by the attach's own SR save, harmless with VMAIE 0); PC in main flash, SP in RAM; detached, firmware running |
+| 2 | Attach without reset, read registers, detach: the firmware keeps running | ✓ 2026-11-13 (second run, after `7bfa278`): `attached to MSP430F5529 without reset`, PC in main flash, SP in RAM, `x/4i` plausible, `detached; the program continues where it stopped`; the user confirmed normal operation. The first run had stopped: the attach reported device ID bytes FFh 3Fh, because the bootcode area 0x1A00-0x1AFF reads 0x3FFF with the address-register read (confirmed by a read-only diagnostic; all other areas matched the backups); TI reads it with ReadMemQuick, now so do we (spec correction 27) |
+| 3 | Halt and resume 50 times while it runs; it keeps working; whether a timer runs while halted | ✓ 2026-11-13: 51 PCs, all even and in main flash (every stop found the CPU in the firmware's low-power idle loop); TB0R constant over 1 s while halted after 51 stops (not conclusive: those stops were all in LPM4, where its clock is off anyway); the user confirmed normal operation |
+| 4 | Hardware breakpoint on a function by symbol; the firmware reaches it and stops there; step, inspect, continue | ✓ 2026-11-13: `break *NAME` on the key-press function (local notes), GDB chose a hardware breakpoint by itself; one key press stopped it exactly at the function's first instruction; SR 0x0008 (GIE); the first `stepi` ended at the first instruction of the Timer0_B CCR0 handler (vector 0xFFF6: GIE set, a tick pending, as documented), the second at the next instruction; a RAM variable read; `continue`, Ctrl-C, detach; normal operation confirmed |
+| 5 | Reset and halt at the reset vector, step through the start-up, continue | ✓ 2026-11-13: `target reset, halted at 0x0441A` (the backup's reset vector), `flushregs`, start-up code shown, three `stepi` along the start-up path; `continue` restarted the firmware (startup screen, then normal operation) |
+| 6 | Refusals: `load`, a write into flash, a software breakpoint | ✓ 2026-11-13: write to 0x4400 `Cannot access memory` (GDB itself); `load` `Load failed` (no packet sent); `break *0x2400` + `continue` `Cannot insert breakpoint 1 … Command aborted`, target stayed halted, server `refused: software breakpoints are not allowed in read-only mode`; `monitor mode full` refused (B2) |
+| 7 | Flash and information memory equal the backups after the session | ✓ 2026-11-13: `verified` for both |
+
+---
+
 ## Verified on hardware vs pending
 
 ### Verified on hardware
@@ -157,6 +318,8 @@ check the available hardware allows (see the note below the table):
 - SWD backends (phase 3): DPIDR read via both PIO and bitbang; matches official firmware. (Note: the phase-3 `0x10212927` value was a misread from a not-yet-live target; the genuine RP2040 DPIDR `0x0bc12477` was confirmed in phase 5 with a live target. The protocol/engine work was unaffected.)
 - UART bridge + serial (phase 4-core): loopback echo both directions; serial from hwinfo propagated to DAP_Info and USB iSerialNumber.
 - Autobaud apply path (phase 4b): MAGIC_BAUD sentinel + 4 KB stack overflow + race fixes all hold.
+- MSP430F5529 Spy-Bi-Wire (phase 6, rpi_pico, 2026-11-11): identify, RAM self-test, read, segment erase, mass erase, program and verify at 250, 500 and 1000 kHz; details in the Phase 6 section.
+- MSP430F5529 debugging, read-only (phase 7, rpi_pico, 2026-11-13): 32-bit EEM scans, attach without reset, 50 halt/resume cycles, a hardware breakpoint hit by a key press, single steps, reset and halt, every read-only refusal, with `msp430-elf-gdb` 9.1; flash unchanged; details in the Phase 7 section.
 - Conformance A/B (phase 5): 26 protocol-deterministic byte-identical + 1 environment-dependent (`swj_pins_read`, matched) + 4 whitelisted enhancements (3 DAP_Info strings + DAP packet size 64→1024), 0 unexpected mismatches vs official v2.3.1 (`compare` → 27 identical / 4 whitelisted → PASS).  **Live on-hardware A/B done 2026-06-12** — official firmware captured live, byte-for-byte identical to the source-derived prediction on all 31 commands; packet-size bump re-captured 2026-06-13.
 - **Full openocd debug acceptance (phase 5, rpi_pico/PIO, 2026-06-12): ✓ PASS** against a live RP2040 target — multidrop connect (`DPIDR 0x0bc12477`, Cortex-M0+ detected), `reset halt`, single-step, memory read, RAM write+readback (3 locations), flash erase+program+verify (top sector), and `reset run` all pass. Also verified attaching to a **running** target (connect → halt → resume), confirming the probe is not BOOTSEL-limited. The earlier connect failure was the target not being live on the bus (the garbage `DPIDR 0x10212927` was a misread), not a probe-firmware issue.
 
@@ -171,6 +334,17 @@ check the available hardware allows (see the note below the table):
    acceptance above was run on rpi_pico/PIO; the other five (rpi_pico/bitbang,
    rpi_pico2 × {PIO, bitbang}, rpi_debug_probe × {PIO, bitbang}) follow the same
    documented procedure and remain to be run when those boards are on the bench.
+
+3. **SWD regression with the MSP430 feature in the firmware** — the phase-5
+   conformance compare and openocd acceptance have not been repeated since
+   phase 6 changed the SWD pin handling (pins high-impedance when idle, pinctrl
+   re-applied on connect). It needs a probe whose SWD pins are free.
+
+4. **MSP430 Spy-Bi-Wire on rpi_pico2 and rpi_debug_probe** — built, not run.
+
+5. **MSP430 debugging (phase 7)** — accepted on rpi_pico with the
+   MSP430F5529 board (read-only, 2026-11-13); not run on rpi_pico2 or
+   rpi_debug_probe; full mode (B2) not implemented.
 
 ---
 

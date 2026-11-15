@@ -25,6 +25,23 @@
 		};
 	};
 
+	/* MSP430 Spy-Bi-Wire on the SWD pins, routed to PIO1: SBWTCK=GP12,
+	 * SBWTDIO output=GP14, SBWTDIO input=GP13. */
+	sbw_pio_default: sbw_pio_default {
+		tck_pins {
+			pinmux = <PIO1_P12>;
+			bias-pull-down;
+		};
+		tdio_pins {
+			pinmux = <PIO1_P14>;
+		};
+		tdi_in_pins {
+			pinmux = <PIO1_P13>;
+			input-enable;
+			bias-pull-up;
+		};
+	};
+
 	/* Console UART (uart0): TX=GP0, RX=GP1. The board defaults the console
 	 * to uart1, but uart1 is the bridge target here, so the console moves to
 	 * uart0 (chosen below) and needs its own pinctrl (the board DTS only
@@ -73,6 +90,12 @@
  * driver compiles against, and so the raspberrypi,swdp-pio instance can run.
  */
 &pio0 {
+	status = "okay";
+};
+
+/* PIO1 hosts the SBW program: PIO0's instruction memory is shared by the SWD
+ * and autobaud programs. */
+&pio1 {
 	status = "okay";
 };
 
@@ -139,6 +162,17 @@
 		din-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
 		swclk-pin = <12>;
 		swdio-pin = <14>;
+		status = "okay";
+	};
+
+	sbw_pio: sbw_pio {
+		compatible = "debugprobe,sbw-pio";
+		piodev = <&pio1>;
+		pinctrl-0 = <&sbw_pio_default>;
+		pinctrl-names = "default";
+		tck-pin = <12>;
+		tdio-pin = <14>;
+		tdi-in-pin = <13>;
 		status = "okay";
 	};
 

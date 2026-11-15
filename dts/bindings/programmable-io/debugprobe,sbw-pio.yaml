@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: MIT
+
+description: |
+  PIO Spy-Bi-Wire transport for MSP430 targets. Shares the SWD pins: SBWTCK on
+  the SWCLK pin (target TEST), SBWTDIO on the SWDIO pin (target RST). The
+  pinctrl state routes the pins to this node's PIO instance and sets the idle
+  pulls (pull-up on SBWTDIO, pull-down on SBWTCK).
+
+compatible: "debugprobe,sbw-pio"
+
+include: [base.yaml, pinctrl-device.yaml]
+
+properties:
+  piodev:
+    type: phandle
+    required: true
+    description: |
+      The PIO instance that runs the SBW program. A phandle (not a node label
+      in C) because hardware/pio.h defines pio0/pio1 as macros.
+
+  tck-pin:
+    type: int
+    required: true
+    description: SBWTCK GPIO number (PIO side-set base).
+
+  tdio-pin:
+    type: int
+    required: true
+    description: SBWTDIO GPIO number (PIO out/set base, and input base by default).
+
+  tdi-in-pin:
+    type: int
+    description: Separate SBWTDIO input GPIO, for boards with split in/out pins.

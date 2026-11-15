@@ -47,6 +47,7 @@ inline std::string hex(std::span<const uint8_t> b)
 inline void fail(const char *file, int line, const std::string &msg)
 {
 	std::printf("FAIL %s (%s:%d)\n  %s\n", current_test, file, line, msg.c_str());
+	std::fflush(stdout);
 	++failures;
 }
 
@@ -85,6 +86,16 @@ inline int run_all()
 	do {                                                                   \
 		if (!(cond)) {                                                 \
 			::testing::fail(__FILE__, __LINE__, "CHECK failed: " #cond); \
+		}                                                              \
+	} while (0)
+
+/* Like CHECK, but ends the test: use it before code that would be
+ * undefined if the condition were false (indexing, front(), back()). */
+#define REQUIRE(cond)                                                          \
+	do {                                                                   \
+		if (!(cond)) {                                                 \
+			::testing::fail(__FILE__, __LINE__, "REQUIRE failed: " #cond); \
+			return;                                                \
 		}                                                              \
 	} while (0)
 

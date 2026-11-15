@@ -220,6 +220,7 @@ static void dap_disable(struct usbd_class_data *const c_data)
 {
 	ARG_UNUSED(c_data);
 	LOG_INF("DAP interface disabled");
+	probe::dap_backend::on_transport_disabled();
 }
 
 static int dap_init(struct usbd_class_data *const c_data)

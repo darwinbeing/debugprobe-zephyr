@@ -101,6 +101,13 @@ DapEngine::Sizes DapEngine::dispatch(std::span<const uint8_t> req, std::span<uin
 	const uint8_t cmd = req[0];
 
 	if (cmd >= kCmdVendorFirst && cmd <= kCmdVendorLast) {
+		if (vendor_ != nullptr) {
+			const size_t n = vendor_->handle(req, resp);
+			if (n != 0) {
+				/* Handled: the command owns the rest of the packet. */
+				return {req.size(), n > resp.size() ? resp.size() : n};
+			}
+		}
 		resp[0] = cmd; /* default DAP_vendor.c: echo only */
 		return {1, 1};
 	}
